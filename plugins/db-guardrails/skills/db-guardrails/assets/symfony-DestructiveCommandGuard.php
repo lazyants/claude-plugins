@@ -36,6 +36,8 @@ final class DestructiveCommandGuard implements EventSubscriberInterface
     private const COMMANDS = [
         'doctrine:database:drop',
         'doctrine:schema:drop',
+        'doctrine:fixtures:load',
+        'doctrine:schema:update',
     ];
 
     public static function getSubscribedEvents(): array
@@ -48,6 +50,16 @@ final class DestructiveCommandGuard implements EventSubscriberInterface
         $name = $event->getCommand()?->getName();
 
         if (! in_array($name, self::COMMANDS, true)) {
+            return;
+        }
+
+        // These are VALUE_NONE options: Symfony supplies booleans after
+        // binding the command input. --append=false/--force=false are invalid
+        // CLI syntax, not a way to turn these flags off.
+        if ($name === 'doctrine:fixtures:load' && $event->getInput()->getOption('append') === true) {
+            return;
+        }
+        if ($name === 'doctrine:schema:update' && $event->getInput()->getOption('force') !== true) {
             return;
         }
 

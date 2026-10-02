@@ -7,13 +7,14 @@
 # Input  (stdin) : JSON, e.g. {"tool_name":"Bash","tool_input":{"command":"..."}}
 # Output (exit)  : 2 + stderr  => DENY  (Claude sees the message and stops)
 #                  0           => ALLOW
+#                  1 + stderr  => ALLOW with a visible hook error
 #
 # This is the fast, framework-agnostic UX layer. Its threat model is the
 # *accidental* destructive command, not a determined adversary — a command can
 # be obfuscated past any regex (SQL block comments, base64, etc.). The hard
 # guarantee is database-level privilege separation, which the bundled
-# `db-guardrails` skill installs. This hook just makes the accidental wipe
-# impossible without a deliberate, out-of-band opt-in.
+# `db-guardrails` skill installs where the engine supports it. This hook catches
+# the common accidental wipe commands, with a deliberate, out-of-band opt-in.
 #
 # Deliberate bypass: start Claude Code with
 #     ALLOW_DESTRUCTIVE_DB_HOOK=true
@@ -35,8 +36,8 @@ payload="$(cat)"
 
 # --- extract the command string from the tool payload --------------------
 # Prefer jq; fall back to python3. If neither exists the hook cannot parse its
-# input — it warns loudly (Claude sees the warning) and allows, rather than
-# bricking every Bash call in the session.
+# input — exit 1 reports a non-blocking hook error in the user's transcript,
+# rather than bricking every Bash call in the session.
 cmd=""
 if command -v jq >/dev/null 2>&1; then
   cmd="$(printf '%s' "$payload" | jq -r '.tool_input.command // empty' 2>/dev/null || true)"
@@ -46,7 +47,7 @@ elif command -v python3 >/dev/null 2>&1; then
     2>/dev/null || true)"
 else
   echo "db-guardrails: neither 'jq' nor 'python3' found — destructive-DB hook is INACTIVE. Install jq to restore protection." >&2
-  exit 0
+  exit 1
 fi
 
 [[ -z "$cmd" ]] && exit 0
@@ -54,29 +55,152 @@ fi
 cmd_lower="$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')"
 
 # --- chained / compound command detection --------------------------------
-# Command substitution executes even inside double quotes, so $(...) and
-# backticks are dangerous wherever they appear — checked on the raw command.
-# Operators (; && || | >) are only operators OUTSIDE quotes, so they are
-# checked against a copy with quoted spans removed — this stops a pipe inside
-# e.g. `grep -E "a|b"` from being mistaken for a real pipeline.
+# Walk shell quotes without evaluating anything. Substitution is active outside
+# single quotes; escaped quotes/operators and quoted newlines are ordinary data.
+# Keep two copies: shell segments for invocation-scoped flags, and SQL segments
+# whose quoted newlines remain whitespace and whose closing shell quotes end an
+# SQL argument. Semicolons remain conservative SQL boundaries even in literals.
 chained=0
-case "$cmd_lower" in
-  *'$('* | *'`'*) chained=1 ;;
-esac
-[[ "$cmd_lower" == *$'\n'* ]] && chained=1
-
-if [[ "$chained" -eq 0 ]]; then
-  cmd_unquoted="$(printf '%s' "$cmd_lower" | sed "s/'[^']*'//g; s/\"[^\"]*\"//g")"
-  case "$cmd_unquoted" in
-    *';'* | *'&&'* | *'||'* | *'|'* | *'>'*) chained=1 ;;
-  esac
+quote=""
+sub_depth=0
+sub_quotes=()
+sub_parens=()
+sub_kinds=()
+sub_shells=()
+shell_segments=()
+shell_current=""
+sql_segments=""
+heredoc_delimiter=""
+heredoc_line=""
+in_heredoc=0
+heredoc_re="^<<-?[[:space:]]*['\"]?([a-z_][a-z0-9_]*)['\"]?"
+end_shell_segment() {
+  shell_segments[${#shell_segments[@]}]="$shell_current"
+  shell_current=""
+}
+for ((i = 0; i < ${#cmd_lower}; i++)); do
+  char="${cmd_lower:i:1}"
+  next="${cmd_lower:i+1:1}"
+  if [[ "$in_heredoc" -eq 1 ]]; then
+    if [[ "$char" == $'\n' ]]; then
+      if [[ "${heredoc_line//$'\t'/}" == "$heredoc_delimiter" ]]; then
+        in_heredoc=0
+        heredoc_delimiter=""
+        sql_segments+=';'
+        end_shell_segment
+      else
+        sql_segments+="$heredoc_line"$'\n'
+        shell_current+="$heredoc_line"$'\n'
+      fi
+      heredoc_line=""
+    else
+      heredoc_line+="$char"
+    fi
+    continue
+  fi
+  if [[ "$quote" != "'" && "$char" == '\' ]]; then
+    # A backslash-newline continues the same command/SQL word.
+    if [[ "$next" != $'\n' ]]; then
+      shell_current+="$char$next"
+      sql_segments+="$next"
+    fi
+    i=$((i + 1))
+    continue
+  fi
+  if [[ "$quote" != "'" && "$char" == '$' && "$next" == '(' ]]; then
+    chained=1
+    sub_quotes[sub_depth]="$quote"
+    sub_parens[sub_depth]=1
+    sub_kinds[sub_depth]='paren'
+    sub_shells[sub_depth]="$shell_current"
+    sub_depth=$((sub_depth + 1))
+    quote=""
+    shell_current=""
+    sql_segments+='$('
+    i=$((i + 1))
+    continue
+  fi
+  if [[ "$quote" != "'" && "$char" == '`' ]]; then
+    chained=1
+    if [[ "$sub_depth" -gt 0 && "${sub_kinds[sub_depth-1]}" == 'backtick' && -z "$quote" ]]; then
+      end_shell_segment
+      sub_depth=$((sub_depth - 1))
+      quote="${sub_quotes[sub_depth]}"
+      shell_current="${sub_shells[sub_depth]}"'`...`'
+      sql_segments+=';'
+    else
+      sub_quotes[sub_depth]="$quote"
+      sub_kinds[sub_depth]='backtick'
+      sub_shells[sub_depth]="$shell_current"
+      sub_depth=$((sub_depth + 1))
+      quote=""
+      shell_current=""
+    fi
+    continue
+  fi
+  if [[ -z "$quote" && "$sub_depth" -gt 0 && "${sub_kinds[sub_depth-1]}" == 'paren' ]]; then
+    [[ "$char" == '(' ]] && sub_parens[sub_depth-1]=$((sub_parens[sub_depth-1] + 1))
+    if [[ "$char" == ')' ]]; then
+      sub_parens[sub_depth-1]=$((sub_parens[sub_depth-1] - 1))
+      if [[ "${sub_parens[sub_depth-1]}" -eq 0 ]]; then
+        end_shell_segment
+        sub_depth=$((sub_depth - 1))
+        quote="${sub_quotes[sub_depth]}"
+        shell_current="${sub_shells[sub_depth]}"'$(...)'
+        sql_segments+=';'
+        continue
+      fi
+    fi
+  fi
+  if [[ -n "$quote" ]]; then
+    shell_current+="$char"
+    if [[ "$char" == "$quote" ]]; then
+      quote=""
+      sql_segments+=$'\n;'
+    else
+      sql_segments+="$char"
+    fi
+  elif [[ "$char" == "'" || "$char" == '"' ]]; then
+    quote="$char"
+    shell_current+="$char"
+    sql_segments+="$char"
+  elif [[ "$char" == $'\n' ]]; then
+    chained=1
+    end_shell_segment
+    sql_segments+=';'
+    [[ -n "$heredoc_delimiter" ]] && in_heredoc=1
+  else
+    if [[ "$char" == '<' && "$next" == '<' && "${cmd_lower:i}" =~ $heredoc_re ]]; then
+      heredoc_delimiter="${BASH_REMATCH[1]}"
+    fi
+    case "$char" in
+      ';'|'&'|'|'|'>'|'<'|'('|')') chained=1 ;;
+    esac
+    case "$char" in
+      ';'|'&'|'|') end_shell_segment; sql_segments+=';' ;;
+      *) shell_current+="$char"; sql_segments+="$char" ;;
+    esac
+  fi
+done
+if [[ "$in_heredoc" -eq 1 && "$heredoc_line" != "$heredoc_delimiter" ]]; then
+  sql_segments+="$heredoc_line"
+  shell_current+="$heredoc_line"
 fi
+end_shell_segment
 
-# Read-only inspection tools as a single, un-chained command — a destructive
-# keyword there is an argument, not an executed statement.
+# Inspection and text commands as a single, un-chained command — a destructive
+# keyword there is an argument, not an executed statement. GNU sed's `e`
+# commands/substitution flag and external script files do not get an exemption.
 if [[ "$chained" -eq 0 ]]; then
-  if [[ "$cmd_lower" =~ ^[[:space:]]*(grep|egrep|fgrep|rg|ag|cat|less|more|head|tail|bat)[[:space:]] ]] \
-     || [[ "$cmd_lower" =~ ^[[:space:]]*git[[:space:]]+grep[[:space:]] ]]; then
+  if [[ "$cmd_lower" =~ ^[[:space:]]*(grep|egrep|fgrep|rg|ag|cat|less|more|head|tail|bat|echo|printf)[[:space:]] ]] \
+     || [[ "$cmd_lower" =~ ^[[:space:]]*git[[:space:]]+(grep|log|commit)[[:space:]] ]]; then
+    exit 0
+  fi
+  sed_exec_re="(^|[[:space:];{}'\"])[\$0-9,]*e|(^|[[:space:];{}'\"])[\$0-9,]*/[^/]*/e|[^[:alnum:]_[:space:]][egimp0-9]*e[egimp0-9]*([^[:alnum:]_]|$)"
+  sed_check="${cmd_lower// -e/ }"
+  if [[ "$cmd_lower" =~ ^[[:space:]]*sed[[:space:]] ]] \
+     && ! [[ "$sed_check" =~ $sed_exec_re ]] \
+     && ! [[ "$cmd_lower" =~ (^|[[:space:]])(-[a-z]*f|--file([[:space:]=]|$)) ]]; then
     exit 0
   fi
 fi
@@ -102,25 +226,92 @@ deny() {
 }
 
 # --- DELETE FROM with no WHERE / LIMIT (heuristic) ------------------------
-# Checked per statement: the command is split on `;` and newline so a safe
-# WHERE in one statement cannot vouch for an unbounded DELETE in another. A
-# ` -- ` SQL line comment is stripped first so a commented-out `where` cannot
-# vouch either. `LIMIT` is treated as a safe bound, like `WHERE`.
+# Checked per SQL statement and shell argument: quoted SQL and heredoc line
+# wraps remain whitespace; shell command boundaries and SQL semicolons separate
+# statements. Strip SQL line comments after DELETE, preserving newlines, so commented
+# WHERE/LIMIT cannot vouch for a DELETE. LIMIT is a safe bound, like WHERE.
 # Known limitation: a `;` inside a quoted SQL string literal is also treated
 # as a statement boundary — this can over-block (a false positive), never
 # under-block.
 old_ifs="$IFS"
-IFS=$';\n'
-for segment in $cmd_lower; do
-  seg_check="${segment%% -- *}"
-  if [[ "$seg_check" =~ delete[[:space:]]+([^|&]*[[:space:]])?from[[:space:]] ]] \
-     && ! [[ "$seg_check" =~ where ]] \
-     && ! [[ "$seg_check" =~ limit ]]; then
-    IFS="$old_ifs"
-    deny "DELETE without WHERE or LIMIT"
+IFS=';'
+for seg_check in $sql_segments; do
+  if [[ "$seg_check" =~ delete[[:space:]]+([^|&]*[[:space:]])?from[[:space:]] ]]; then
+    # Shell --options before DELETE are not SQL comments. Only inspect the SQL
+    # tail for bounds, so WHERE before this DELETE cannot vouch for it either.
+    delete_tail="${seg_check#*delete}"
+    delete_tail="$(printf '%s' "$delete_tail" | sed 's/--.*$//')"
+    if ! [[ "$delete_tail" =~ (^|[^[:alnum:]_])where([^[:alnum:]_]|$) ]] \
+       && ! [[ "$delete_tail" =~ (^|[^[:alnum:]_])limit([^[:alnum:]_]|$) ]]; then
+      IFS="$old_ifs"
+      deny "DELETE without WHERE or LIMIT"
+    fi
   fi
 done
 IFS="$old_ifs"
+
+# Tokenize literal argv without evaluating substitutions or variables. Quoted
+# flags remain flags; an option's value such as --group="--append" does not.
+parse_shell_words() {
+  local text="$1" word="" word_quote="" char next j
+  words=()
+  for ((j = 0; j < ${#text}; j++)); do
+    char="${text:j:1}"
+    next="${text:j+1:1}"
+    if [[ "$word_quote" != "'" && "$char" == '\' ]]; then
+      word+="$next"
+      j=$((j + 1))
+    elif [[ -n "$word_quote" ]]; then
+      if [[ "$char" == "$word_quote" ]]; then
+        word_quote=""
+      else
+        word+="$char"
+      fi
+    elif [[ "$char" == "'" || "$char" == '"' ]]; then
+      word_quote="$char"
+    elif [[ "$char" == [[:space:]] ]]; then
+      [[ -n "$word" ]] && words[${#words[@]}]="$word"
+      word=""
+    else
+      word+="$char"
+    fi
+  done
+  [[ -n "$word" ]] && words[${#words[@]}]="$word"
+}
+
+# Options apply to the same invocation, regardless of their argv position.
+# A later/nested command's --append / --force / -r cannot affect this command.
+for segment in "${shell_segments[@]}"; do
+  parse_shell_words "$segment"
+  append=0 force=0 recursive=0 volumes=0
+  for word in "${words[@]}"; do
+    case "$word" in
+      --) break ;;
+      --append) append=1 ;;
+      --force) force=1 ;;
+      --recursive) recursive=1 ;;
+      --volumes|--volumes=true|--volumes=1|--volumes=t) volumes=1 ;;
+      -*) [[ "$word" =~ ^-[a-z]*r[a-z]*$ ]] && recursive=1 ;;
+    esac
+  done
+  if [[ "$segment" =~ doctrine:fixtures:load([^[:alnum:]_:-]|$) ]] \
+     && [[ "$append" -eq 0 ]]; then
+    deny "doctrine:fixtures:load without --append (Symfony)"
+  fi
+  if [[ "$segment" =~ doctrine:schema:update([^[:alnum:]_:-]|$) ]] \
+     && [[ "$force" -eq 1 ]]; then
+    deny "doctrine:schema:update --force (Symfony)"
+  fi
+  if [[ "$segment" =~ (^|[^[:alnum:]_])rm[[:space:]] ]] \
+     && [[ "$recursive" -eq 1 ]] \
+     && [[ "$segment" =~ data/(mysql|mariadb|postgres|postgresql)|/var/lib/(mysql|postgresql)|(mysql|mariadb|postgres|pg)[-_]?data([^a-z]|$) ]]; then
+    deny "rm -rf of a database data directory"
+  fi
+  if [[ "$segment" =~ docker[[:space:]]+system[[:space:]]+prune([[:space:]]|$) ]] \
+     && [[ "$volumes" -eq 1 ]]; then
+    deny "docker system prune --volumes (deletes anonymous DB volumes)"
+  fi
+done
 
 # --- pattern rules: 'EXTENDED_REGEX::human label' -------------------------
 # Matched against the lower-cased command. Regexes must not contain '::'.
@@ -155,11 +346,12 @@ rules=(
   'flyway[^|;&]*clean::flyway clean (also mvn flyway:clean / gradle flywayClean)'
   'liquibase[^|;&]*dropall::liquibase dropAll'
   'dropdatabase::dropDatabase() (MongoDB)'
+  '\.[[:space:]]*drop[[:space:]]*\(::collection.drop() (MongoDB)'
+  '\.[[:space:]]*(deletemany|remove)[[:space:]]*\([[:space:]]*\{[[:space:]]*\}[[:space:]]*(,|\))::unfiltered deleteMany / remove (MongoDB)'
   'flushall::redis FLUSHALL'
   'flushdb::redis FLUSHDB'
   'docker[ -]compose[[:space:]][^|;&]*down[^|;&]*(--volume|[[:space:]]-v([[:space:]]|$))::docker compose down -v (deletes DB volumes)'
   'docker[[:space:]]+volume[[:space:]]+(rm|prune)::docker volume rm / prune'
-  '(^|[^[:alnum:]_])rm[[:space:]]+[^|;&]*(-[a-z]*r[a-z]*|--recursive)[[:space:]][^|;&]*(data/(mysql|mariadb|postgres|postgresql)|/var/lib/(mysql|postgresql)|(mysql|mariadb|postgres|pg)[-_]?data([^a-z]|$))::rm -rf of a database data directory'
 )
 
 for rule in "${rules[@]}"; do

@@ -1,24 +1,42 @@
 -- db-guardrails — layer 1 for PostgreSQL
 -- --------------------------------------
 -- The application connects as a role that owns nothing and has no CREATE on
--- the schema, so it cannot DROP or TRUNCATE tables (Postgres requires object
--- ownership for both). A separate migrator role owns the schema and is used
+-- the schema. DROP requires ownership; TRUNCATE is a separate privilege that
+-- is withheld below. A separate migrator role owns the schema and is used
 -- for migrations.
 --
--- Run as a superuser (e.g. the `postgres` role), against the app database:
+-- Run with psql 15+ as a superuser (e.g. `postgres`), against the app database:
 --
---   psql -U postgres -d <app_db> \
+--   export MIGRATOR_PASSWORD="$(openssl rand -hex 24)"
+--   psql -X -U postgres -d <app_db> \
 --        -v app_user=myapp \
 --        -v migrator_user=myapp_migrator \
---        -v migrator_pw="$(openssl rand -hex 24)" \
 --        -f privilege-separation-postgres.sql
 --
 -- The app's runtime connection keeps using <app_user>. Migrations must run as
 -- <migrator_user>. Store the migrator password in the environment, never in a
 -- tracked file. Re-running this script resets the migrator password to the
--- value of :migrator_pw.
+-- value of MIGRATOR_PASSWORD. Do not pass the secret with psql -v: process
+-- arguments are visible to other users. Use -X to ignore startup files and
+-- leave shell tracing off; the SQL also disables query echo before reading
+-- the secret. Superuser/inherited roles and other ownership must be reviewed
+-- separately; revoking direct grants does not remove those capabilities.
 
 \set ON_ERROR_STOP on
+\set ECHO none
+\set ECHO_HIDDEN off
+-- Initialize explicitly: \getenv leaves a variable unchanged if the env
+-- key is missing. Never accept an old -v migrator_pw as a secret fallback.
+\set migrator_pw ''
+\getenv migrator_pw MIGRATOR_PASSWORD
+SELECT length(:'migrator_pw') > 0 AS migrator_password_present
+\gset
+\if :migrator_password_present
+\else
+DO $$ BEGIN
+  RAISE EXCEPTION 'MIGRATOR_PASSWORD must be set to a nonempty value in the environment';
+END $$;
+\endif
 
 -- 1. Create the migrator role if it does not exist.
 SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'migrator_user', :'migrator_pw')
@@ -38,7 +56,8 @@ REASSIGN OWNED BY :"app_user" TO :"migrator_user";
 -- 5. Strip every pre-existing privilege from the app role, and CREATE from
 --    PUBLIC, so an earlier over-grant cannot survive this run. Then grant
 --    back DML only — no CREATE on the schema means the app role can neither
---    create nor own tables, therefore cannot DROP or TRUNCATE them.
+--    create nor own tables. With no inherited/other grants, ownership or
+--    superuser rights, it can neither DROP nor TRUNCATE those tables.
 REVOKE ALL ON ALL TABLES    IN SCHEMA public FROM :"app_user";
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM :"app_user";
 REVOKE ALL ON SCHEMA public FROM :"app_user";
@@ -61,3 +80,4 @@ ALTER DEFAULT PRIVILEGES FOR ROLE :"migrator_user" IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO :"app_user";
 
 -- Verify: \dn+ public  -> Owner must be the migrator, not the app user.
+\unset migrator_pw
