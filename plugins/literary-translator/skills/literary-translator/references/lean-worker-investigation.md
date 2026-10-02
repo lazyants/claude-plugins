@@ -87,6 +87,9 @@ Output is local provenance, **not path-free**. No profile scan, model invocation
 network request or durable-project write occurs. Exit 0 means measured records
 were parsed; exit 2 with stderr only means malformed, missing or unmeasured input.
 Partial logs measure only observed usage and never prove a job completed.
+The shipped sibling `json_stdout.py` is required; the script loads it by exact
+path to preserve the plugin's escaping of Unicode line separators on stdout.
+JSONL input is split only on LF, so those characters inside strings remain data.
 
 The two Codex files are under the development machine's Codex session store,
 `sessions/2026/08/30/`:

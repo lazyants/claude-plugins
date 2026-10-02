@@ -20,6 +20,7 @@ Stdlib-only; independent of durable-root state and all workflow hash bundles.
 
 import argparse
 import hashlib
+import importlib.util as _importlib_util
 import json
 from pathlib import Path
 import sys
@@ -27,6 +28,19 @@ import sys
 
 class UsageError(Exception):
     pass
+
+
+_JSON_STDOUT_PATH = Path(__file__).resolve().parent / "json_stdout.py"
+try:
+    _json_stdout_spec = _importlib_util.spec_from_file_location("json_stdout", _JSON_STDOUT_PATH)
+    if _json_stdout_spec is None or _json_stdout_spec.loader is None:
+        raise ImportError(f"no loader for {_JSON_STDOUT_PATH}")
+    _json_stdout = _importlib_util.module_from_spec(_json_stdout_spec)
+    _json_stdout_spec.loader.exec_module(_json_stdout)
+except (ImportError, OSError) as exc:
+    print(f"worker-usage: cannot load sibling json_stdout.py: {exc}", file=sys.stderr)
+    sys.exit(2)
+dumps_line = _json_stdout.dumps_line
 
 
 def count(obj, key):
@@ -67,7 +81,9 @@ def summarize(path, fmt):
     try:
         raw = path.read_bytes()
         rows = []
-        for line_number, line in enumerate(raw.decode("utf-8").splitlines(), 1):
+        # JSONL is delimited by LF; Unicode line separators inside JSON strings
+        # are data, not record boundaries.
+        for line_number, line in enumerate(raw.decode("utf-8").split("\n"), 1):
             if not line.strip():
                 continue
             try:
@@ -188,9 +204,9 @@ def main(argv=None):
     except UsageError as exc:
         print(f"worker-usage: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps({"worker_class": args.worker_class,
+    print(dumps_line({"worker_class": args.worker_class,
                       "classification": "caller_supplied_not_inferred",
-                      "records": records}, ensure_ascii=False, sort_keys=True))
+                      "records": records}, sort_keys=True))
     return 0
 
 

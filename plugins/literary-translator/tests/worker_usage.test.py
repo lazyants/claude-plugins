@@ -15,7 +15,7 @@ SCRIPT = (Path(__file__).resolve().parents[1] / "skills/literary-translator"
 
 def invoke(tmp_path, fmt, rows, extra_records=()):
     record = tmp_path / "record.jsonl"
-    record.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    record.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--format", fmt, "--worker-class", "review",
          str(record), *map(str, extra_records)], capture_output=True, text=True)
@@ -149,6 +149,21 @@ def test_legitimate_non_usage_notifications_can_follow_measured_usage(tmp_path):
     proc, _ = invoke(tmp_path, "claude-session", [claude(), synthetic])
     assert proc.returncode == 0
     assert json.loads(proc.stdout)["records"][0]["observations"] == 1
+
+
+@pytest.mark.parametrize("separator", [chr(0x85), chr(0x2028), chr(0x2029)])
+def test_unicode_line_separators_in_data_and_paths_are_not_record_boundaries(tmp_path, separator):
+    directory = tmp_path / ("данные" + separator + "records")
+    directory.mkdir()
+    row = claude()
+    row["message"]["content"][0]["text"] += separator + "MORE SOURCE"
+    proc, record = invoke(directory, "claude-session", [row])
+    assert proc.returncode == 0, proc.stderr
+    assert len(proc.stdout.splitlines()) == 1
+    assert separator not in proc.stdout
+    result = json.loads(proc.stdout)["records"][0]
+    assert result["path"] == str(record)
+    assert result["first_observation"]["input_tokens"] == 102
 
 
 def test_invalid_json_missing_file_and_wrong_format_are_fatal(tmp_path):
