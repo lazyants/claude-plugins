@@ -7,7 +7,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | Plugin | Version | What it does |
 |---|---|---|
 | [`ai-cli-optout`](#ai-cli-optout--v120) | 1.2.0 | Privacy opt-outs for AI CLIs and IDEs, Vercel CLI and its Claude Code plugin, plus macOS / Windows / Linux controls. |
-| [`db-guardrails`](#db-guardrails--v101) | 1.0.1 | Stop AI coding agents from accidentally emptying your database — an always-on hook that blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for deeper safety layers. |
+| [`db-guardrails`](#db-guardrails--v110) | 1.1.0 | Stop AI coding agents from accidentally emptying your database — an always-on hook across 15+ frameworks, with privilege separation for MySQL/MariaDB, PostgreSQL and SQL Server. |
 | [`obsidian-project-vault`](#obsidian-project-vault--v110) | 1.1.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
 | [`cc-usage-coach`](#cc-usage-coach--v101) | 1.0.1 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
 | [`enduser-handbook`](#enduser-handbook--v1183) | 1.18.3 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
@@ -77,7 +77,7 @@ Trigger phrases: "disable telemetry", "opt out of telemetry", "privacy mode", et
 
 See [`DISCLAIMER.md`](./DISCLAIMER.md) for the full no-warranty statement.
 
-## `db-guardrails` — v1.0.1
+## `db-guardrails` — v1.1.0
 
 Stop AI coding agents from accidentally emptying your database. It exists because it happened — an agent ran `artisan migrate` with a test flag that did *not* isolate to the test database and wiped the development database. Twice. `db-guardrails` is the hardened, generalised result.
 
@@ -85,8 +85,8 @@ Trigger phrases: "harden the database", "protect the database", "db guardrails",
 
 ### What it does
 
-- **Layer 4 — the hook (auto-on).** A `PreToolUse:Bash` hook blocks destructive database commands the moment the plugin is installed, in **any** project. Recognised across 15+ stacks: raw SQL (`DROP`, `TRUNCATE`, `DELETE` without `WHERE`), Laravel, Rails, Django, Prisma, TypeORM, Sequelize, Knex, Drizzle, Doctrine/Symfony, EF Core, Alembic, Flyway, Liquibase, MongoDB, Redis, plus `docker compose down -v` and `rm -rf` of DB data directories. Blocked attempts are logged to `~/.claude/logs/destructive-db-blocked.log`.
-- **Layers 1–3 — the `/db-guardrails` skill.** Run it once per project. It detects the database engine and framework, then scaffolds database-level privilege separation (the app role loses `DROP` — works for MySQL/MariaDB and PostgreSQL), a framework boot guard, and test-environment isolation.
+- **Layer 4 — the hook (auto-on).** A `PreToolUse:Bash` hook blocks destructive database commands the moment the plugin is installed, in **any** project. Recognised across 15+ stacks: raw SQL (`DROP`, `TRUNCATE`, `DELETE` without `WHERE`), Laravel, Rails, Django, Prisma, TypeORM, Sequelize, Knex, Drizzle, Doctrine/Symfony, EF Core, Alembic, Flyway, Liquibase, MongoDB database/collection drops and empty-filter deletes, Redis, Docker volume deletion (including `docker system prune --volumes`), and recursive removal of DB data directories. Blocked attempts are logged to `~/.claude/logs/destructive-db-blocked.log`.
+- **Layers 1–3 — the `/db-guardrails` skill.** Run it once per project. It detects the database engine and framework, then scaffolds privilege separation for MySQL/MariaDB, PostgreSQL and SQL Server, framework guards for Laravel/Django/Rails/Symfony, Node/EF Core connection patterns, and test isolation. Database privileges protect against schema deletion after effective grants and ownership are verified; runtime `DELETE` rights still permit deleting rows. MongoDB's `readWrite` role permits collection drops and mass deletes, so its custom-role guidance states the remaining limits.
 
 ### The bypass
 
@@ -94,7 +94,7 @@ The hook is bypassed only by starting Claude Code with `ALLOW_DESTRUCTIVE_DB_HOO
 
 ### Dependency
 
-The hook parses its input with `jq` (preferred) or `python3` — at least one must be on `PATH`. If neither is found the hook warns and allows rather than breaking every Bash command, so install `jq`.
+The hook parses its input with `jq` (preferred) or `python3` — at least one must be on `PATH`. If neither is found it returns a non-blocking hook error (exit 1), showing an inactive-guard warning in the transcript while allowing the command. Install `jq` to restore protection.
 
 ### What the hook is not
 

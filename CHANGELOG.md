@@ -2,6 +2,21 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [db-guardrails 1.1.0] — 2026-10-02
+
+### Added
+
+- SQL Server privilege-separation installer and SQL asset, with separate app and migrator logins, checks for elevated app principals and ownership, and EF Core deployment/test-isolation guidance (#59). CI verifies the app's DML rights and schema-deletion denial against SQL Server.
+- Hook coverage for MongoDB collection drops and literal empty-filter deletes, destructive Doctrine fixture loads and forced schema updates, and Docker system prune with `--volumes` (#161, #163, #164). Docker's current command prunes anonymous volumes; it has no `-v` alias.
+
+### Fixed
+
+- Ordinary git messages/searches, echo and sed text can mention destructive commands without being blocked; chained or nested execution still receives scrutiny. Wrapped SQL DELETE statements retain their WHERE clause while separate commands cannot vouch for each other (#27, #44). Recursive DB-directory removal is recognized with flags before or after the path (#160).
+- The missing-parser fallback reports a visible non-blocking hook error, and tests isolate HOME so fixtures do not pollute the user's audit log (#43, #48).
+- MySQL provisioning handles password quoting independently of backslash SQL modes and refuses to claim safety for unexpected effective grants, roles or global privileges. Laravel's wrapper reports missing `.env` credentials rather than silently exiting (#45, #46, #47).
+- PostgreSQL reads the migrator password from the environment with psql 15+ instead of exposing it in `-v` process arguments (#162).
+- MongoDB guidance states that `readWrite` permits collection drops and mass deletes, includes an explicit custom role without `dropCollection`, and explains the residual delete risk (#28). Layer-1 guarantees are scoped to verified schema permissions; DML rights still permit row deletion.
+
 ## [ai-cli-optout 1.2.0] — 2026-10-02
 
 ### Added
