@@ -329,10 +329,18 @@ for inventory_platform in darwin linux win32; do
     --arg platform "$inventory_platform" --arg root "$inventory_root" \
     '[.persistent_files[].paths[$platform]] | sort ==
       (["Antigravity", "Antigravity IDE"] as $products |
-       ["Crashpad", "logs", "machineid", "CachedData"] as $items |
+       ["logs", "machineid", "CachedData"] as $items |
        [$products[] as $product | $items[] | $root + $product + "/" + .] | sort)' \
     "$VENDORS_DIR/antigravity.json"
 done
+
+assert "Antigravity separates future collection from historical deletion" jq -e \
+  'any(.manual_only_items[]; .name == "Future Interactions and model-improvement collection" and
+    (.ui_path | contains("Enable Telemetry → OFF"))) and
+   any(.manual_only_items[]; .name == "Previously collected Interactions deletion" and
+    (.ui_path | contains("antigravity-support@google.com"))) and
+   any(.manual_only_items[]; .name == "Crash-history inventory requires runtime path inspection") and
+   ((. | tostring | contains("EMAIL-ONLY")) | not)' "$VENDORS_DIR/antigravity.json"
 
 if [ "$TESTS_FAILED" -eq 0 ]; then
   echo "vendor-schema: $TESTS_RUN ok"

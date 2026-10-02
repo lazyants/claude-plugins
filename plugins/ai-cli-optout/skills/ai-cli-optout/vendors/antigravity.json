@@ -13,6 +13,7 @@
     "https://discuss.ai.google.dev/t/antigravity-privacy/138277",
     "https://discuss.ai.google.dev/t/antigravity-data-training-opt-out/125236",
     "https://antigravity.google/docs/settings",
+    "https://antigravity.google/docs/faq",
     "https://antigravity.google/download",
     "https://antigravity.google/download/linux"
   ],
@@ -74,14 +75,6 @@
   "persistent_files": [
     {
       "paths": {
-        "darwin": "~/Library/Application Support/Antigravity/Crashpad",
-        "linux": "${XDG_CONFIG_HOME}/Antigravity/Crashpad",
-        "win32": "%APPDATA%/Antigravity/Crashpad"
-      },
-      "note": "Legacy Antigravity: crash dumps queued for upload."
-    },
-    {
-      "paths": {
         "darwin": "~/Library/Application Support/Antigravity/logs",
         "linux": "${XDG_CONFIG_HOME}/Antigravity/logs",
         "win32": "%APPDATA%/Antigravity/logs"
@@ -102,15 +95,7 @@
         "linux": "${XDG_CONFIG_HOME}/Antigravity/CachedData",
         "win32": "%APPDATA%/Antigravity/CachedData"
       },
-      "note": "Legacy Antigravity: extension + interaction cache."
-    },
-    {
-      "paths": {
-        "darwin": "~/Library/Application Support/Antigravity IDE/Crashpad",
-        "linux": "${XDG_CONFIG_HOME}/Antigravity IDE/Crashpad",
-        "win32": "%APPDATA%/Antigravity IDE/Crashpad"
-      },
-      "note": "Antigravity IDE: crash dumps queued for upload."
+      "note": "Legacy Antigravity: compiled V8 code cache, versioned by application commit."
     },
     {
       "paths": {
@@ -134,7 +119,7 @@
         "linux": "${XDG_CONFIG_HOME}/Antigravity IDE/CachedData",
         "win32": "%APPDATA%/Antigravity IDE/CachedData"
       },
-      "note": "Antigravity IDE: extension + interaction cache."
+      "note": "Antigravity IDE: compiled V8 code cache, versioned by application commit."
     }
   ],
   "diff_patterns": {
@@ -149,18 +134,31 @@
       "win32": "powershell.exe -NoProfile -Command 'try { if (Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -match \"^Antigravity( IDE)?$\" }) { exit 0 }; exit 1 } catch { [Console]::Error.WriteLine($_); exit 2 }'"
     }
   },
+  "manual_only_items": [
+    {
+      "name": "Crash-history inventory requires runtime path inspection",
+      "ui_path": "Inspect the IDE's launch configuration and active Electron crashDumps location",
+      "reason": "Both verified IDE packages allow --crash-reporter-directory to override Electron's crashDumps path. A fixed Crashpad leaf was not verified in these app packages, and Electron documents its crash-directory layout as an implementation detail. The known-path report does not establish that crash history is absent; report crash inventory as incomplete until the active runtime location is inspected."
+    },
+    {
+      "name": "Future Interactions and model-improvement collection",
+      "ui_path": "Current Antigravity Settings → Account → Enable Telemetry → OFF",
+      "reason": "Google's current settings documentation says this control governs Interactions collected to evaluate, develop and improve Antigravity and its supporting models. It is separate from the VS Code-layer telemetry.telemetryLevel setting. If an older build does not expose this control, report the data-collection opt-out as unverified and use Google support; do not invent a JSON key or claim the editor telemetry edit covers it."
+    },
+    {
+      "name": "Previously collected Interactions deletion",
+      "ui_path": "Email antigravity-support@google.com to request deletion of existing Interactions",
+      "reason": "Google's Terms describe this email as a deletion request for previously collected Interactions. Turning off future collection does not itself establish that historical data was deleted; report deletion as requested or pending until Google confirms it."
+    }
+  ],
   "notes": [
     "Supports the legacy Antigravity VS Code fork and the current Antigravity IDE application. The separate Antigravity 2.0 app and Antigravity CLI are not identified as an IDE just by their shared brand; settings targets require the associated IDE executable and product.json metadata.",
     "Default user-data roots and product names were verified in Google's official Linux distributions: Antigravity 1.23.2 at https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/1.23.2-4781536860569600/linux-x64/Antigravity.tar.gz and Antigravity IDE 2.5.5 at https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/2.5.5-4923483625488384/linux-x64/Antigravity%20IDE.tar.gz. Both use APPDATA on Windows, ~/Library/Application Support on macOS and XDG_CONFIG_HOME or ~/.config on Linux, joined with the exact product name.",
-    "Resolve XDG_CONFIG_HOME, VSCODE_APPDATA, portable mode or --user-data-dir before applying to a custom user-data location. If an IDE is installed in a custom root that the install checks cannot verify, report detection as unresolved and provide the editor UI path instead of creating a guessed settings file."
+    "Both packages' compiled main.js joins userDataPath with logs and machineid, and uses userDataPath/CachedData/<application commit> for compiled code cache without a platform-specific leaf branch. Those default leaves are inventoried for both products; custom user-data, log and crash-directory overrides still require active-location inspection.",
+    "Resolve XDG_CONFIG_HOME, VSCODE_APPDATA, portable mode or --user-data-dir before applying to a custom user-data location. If an IDE is installed in a custom root that the install checks cannot verify, report detection as unresolved and provide the editor UI path instead of creating a guessed settings file.",
+    "Editor telemetry and Google's Interactions collection are separate controls. Use the documented Settings → Account → Enable Telemetry UI for future Interactions/model-improvement collection, and the support email only for historical deletion requests. The current FAQ documents a Settings-panel data-collection opt-out; email-only is not an accurate description of future collection."
   ],
-  "caveats": [
-    {
-      "var": "ai_training_opt_out",
-      "framing": "AI training opt-out is EMAIL-ONLY — no settings key or env var. Send a request to antigravity-support@google.com to delete your Interactions data. Google otherwise uses Interactions for ML training unless accessed via Workspace/GCP.",
-      "auto_apply": false
-    }
-  ],
+  "caveats": [],
   "detect_check": {
     "darwin": "( for app in /Applications/'Antigravity IDE.app' \"$HOME/Applications/Antigravity IDE.app\"; do if [ -x \"$app/Contents/Resources/app/bin/antigravity-ide\" ] && [ -f \"$app/Contents/Resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity IDE\" and .applicationName == \"antigravity-ide\"' \"$app/Contents/Resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1 ); probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; ( for app in /Applications/'Antigravity.app' \"$HOME/Applications/Antigravity.app\"; do if [ -x \"$app/Contents/Resources/app/bin/antigravity\" ] && [ -f \"$app/Contents/Resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity\" and .applicationName == \"antigravity\"' \"$app/Contents/Resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1 )",
     "linux": "( launcher=$(command -v antigravity-ide) || exit 1; command -v readlink >/dev/null || exit 2; launcher=$(readlink -f \"$launcher\") || exit 2; for root in \"$(dirname \"$launcher\")\" \"$(dirname \"$(dirname \"$launcher\")\")\"; do if [ -x \"$launcher\" ] && [ -f \"$root/resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity IDE\" and .applicationName == \"antigravity-ide\"' \"$root/resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1 ); probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; ( launcher=$(command -v antigravity) || exit 1; command -v readlink >/dev/null || exit 2; launcher=$(readlink -f \"$launcher\") || exit 2; for root in \"$(dirname \"$launcher\")\" \"$(dirname \"$(dirname \"$launcher\")\")\"; do if [ -x \"$launcher\" ] && [ -f \"$root/resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity\" and .applicationName == \"antigravity\"' \"$root/resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1 )",

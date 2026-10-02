@@ -2,12 +2,12 @@
 
 **Authoritative source:** `vendors/*.json`. This file is a readable summary.
 
-Last verified: 2026-04-24 (extension for Antigravity / VS Code / PhpStorm / macOS / Windows).
+Original baseline: 2026-04-24. Platform, profile and new-vendor coverage updated for 1.2.0; use each vendor JSON's current sources, notes and workflow for exact paths and limitations.
 
 ## Anthropic Claude Code
-- Env vars (in `~/.claude/settings.json` and `~/.claude-bm/settings.json` env block):
-  - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` — kill switch (Statsig + Sentry + surveys + /feedback)
-  - `DISABLE_TELEMETRY=1` — Statsig operational metrics
+- Env vars (in the active `CLAUDE_CONFIG_DIR/settings.json`, default `~/.claude/settings.json`, env block):
+  - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` — broad nonessential-traffic switch; confirmation required because remote feature-flag delivery and gated capabilities can stop
+  - `DISABLE_TELEMETRY=1` — telemetry; the same feature-flag trade-off requires confirmation
   - `DISABLE_ERROR_REPORTING=1` — Sentry crash reports
   - `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1` — in-session rating prompt
   - `DISABLE_FEEDBACK_COMMAND=1` — `/feedback`
@@ -18,13 +18,13 @@ Last verified: 2026-04-24 (extension for Antigravity / VS Code / PhpStorm / macO
 - Docs: https://code.claude.com/docs/en/env-vars.md · https://code.claude.com/docs/en/data-usage.md · https://code.claude.com/docs/en/monitoring-usage.md · https://code.claude.com/docs/en/settings.md · https://www.anthropic.com/legal/privacy
 
 ## OpenAI Codex CLI
-- `~/.codex/config.toml`:
+- `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`):
   - `analytics.enabled = false` — usage analytics
   - `feedback.enabled = false` — `/feedback` uploads
 - No env var documented
-- Profile-scoped: `profiles.<name>.analytics.enabled = false`
+- Profile analytics: set `analytics.enabled = false` in each existing `NAME.config.toml` overlay in Codex home. Codex before 0.134.0 uses `profiles.<name>.analytics.enabled = false` instead; newer versions ignore legacy nested profiles. Do not create profiles or claim ignored legacy sections are active. Feedback is a separate top-level control.
 - Persistent: `~/.codex/logs_2.sqlite` (can be huge), `~/.codex/history.jsonl` (plaintext conversations), `~/.codex/installation_id`, `~/.codex/sessions/`, `~/.codex/.codex-global-state.json`
-- Docs: https://developers.openai.com/codex/config-reference
+- Docs: https://developers.openai.com/codex/config-reference · https://learn.chatgpt.com/docs/config-file/config-advanced
 
 ## Google Gemini CLI
 - `~/.gemini/settings.json`:
@@ -63,21 +63,22 @@ Last verified: 2026-04-24 (extension for Antigravity / VS Code / PhpStorm / macO
 - Persistent: `~/.cursor/cli-config.json`, `~/.cursor/ai-tracking/` (shared with editor), `~/.cursor/plans/`.
 - Docs: https://cursor.com/data-use, https://docs.cursor.com/cli/overview (JS-SPA; doc-diff scanner only sees data-use page).
 
-## Google Antigravity (macOS)
-- Google-branded VS Code fork (v1.107.0). Settings: `~/Library/Application Support/Antigravity/User/settings.json`:
+## Google Antigravity IDE (macOS / Linux / Windows)
+- Current Antigravity IDE and legacy Antigravity editor have different product names and settings roots. The vendor's installation checks select the matching product. Default root: `~/Library/Application Support/<product>` on macOS, `$XDG_CONFIG_HOME/<product>` (default `~/.config/<product>`) on Linux, `%APPDATA%/<product>` on Windows. Settings live under `User/settings.json`:
   - `"telemetry.telemetryLevel": "off"` — VS Code-layer telemetry only (Application Insights)
   - `"telemetry.enableCrashReporter": false` — crash dumps to Google
-- **AI-training opt-out is EMAIL-ONLY** — no documented settings key or env var. Send to `antigravity-support@google.com` to delete Interactions. Google uses Interactions for ML training unless accessed via Workspace/GCP.
+- Future Interactions collection/model improvement: use the current Settings → Account → Enable Telemetry control and turn it OFF. This is separate from VS Code-layer settings; do not invent a JSON key for it. Google's support email is the terms' route to request deletion of already-collected Interactions, not an email-only future-collection opt-out. If an older build lacks the UI, leave that scope pending and consult its supported control.
 - Close the app (including `Antigravity Helper` children) before editing settings.json — rewrites on graceful quit.
-- Persistent: `~/Library/Application Support/Antigravity/{Crashpad,logs,machineid,CachedData}`
-- Docs: https://antigravity.google/terms · https://discuss.ai.google.dev/t/antigravity-privacy/138277 · https://discuss.ai.google.dev/t/antigravity-data-training-opt-out/125236
+- Persistent: the vendor inventory selects each product's platform root. Crash-dump locations and custom user-data directories need runtime inspection; a missing default path does not prove no retained state exists.
+- Docs: https://antigravity.google/terms · https://antigravity.google/docs/settings · https://antigravity.google/docs/faq
 
-## Visual Studio Code (macOS)
-- Settings: `~/Library/Application Support/Code/User/settings.json`:
+## Visual Studio Code (macOS / Linux / Windows)
+- Settings: `~/Library/Application Support/Code/User/settings.json` on macOS, `~/.config/Code/User/settings.json` on Linux, `%APPDATA%/Code/User/settings.json` on Windows; resolve custom roots and profile overrides first:
   - `"telemetry.telemetryLevel": "off"` — covers crash, error, usage tiers. Supersedes deprecated `telemetry.enableTelemetry` / `telemetry.enableCrashReporter` (do NOT double-write).
 - CLI flag: `--disable-telemetry` — per-invocation only, not persistent.
 - **GitHub Copilot extension does NOT inherit `telemetry.telemetryLevel`** per Microsoft docs — check each extension's own telemetry docs.
 - Detection fallback includes `/Applications/Visual Studio Code.app` (fresh installs lack the `code` shim until palette → "Install 'code' command in PATH").
+- Running or failed process checks defer file edits; the literal dotted JSON key is preserved along with comments and unrelated settings.
 - Persistent: `~/Library/Application Support/Code/{User/globalStorage,logs}`
 - Docs: https://github.com/microsoft/vscode-docs/blob/main/docs/configure/telemetry.md · https://code.visualstudio.com/docs/configure/telemetry
 
@@ -94,7 +95,7 @@ Last verified: 2026-04-24 (extension for Antigravity / VS Code / PhpStorm / macO
   - `sudo defaults write /Library/Application\ Support/CrashReporter/DiagnosticMessagesHistory AutoSubmit -bool false` — Share Mac Analytics (sudo)
   - `sudo defaults write /Library/Application\ Support/CrashReporter/DiagnosticMessagesHistory ThirdPartyDataSubmit -bool false` — Share with App Developers (sudo)
 - **Manual-only (UI)**:
-  - Apple Intelligence features — System Settings → Apple Intelligence & Siri. **`com.apple.applicationaccess allow*` keys are MDM-only** on unmanaged Macs; plain `defaults write` silently no-ops. Automation requires installing a signed `.mobileconfig` restrictions profile.
+  - Apple Intelligence features — System Settings → Apple Intelligence & Siri. **`com.apple.applicationaccess allow*` keys are MDM-only**; plain `defaults write` silently no-ops on unmanaged Macs. Use the UI there; managed-device restrictions belong to the MDM administrator.
   - Improve Siri & Dictation — System Settings → Privacy & Security → Analytics & Improvements
   - Help Apple Improve Search — System Settings → Spotlight → Search Privacy
   - Share iCloud Analytics — System Settings → Privacy & Security → Analytics & Improvements
@@ -106,7 +107,7 @@ Last verified: 2026-04-24 (extension for Antigravity / VS Code / PhpStorm / macO
   - Recall (HKCU, user): `DisableAIDataAnalysis=1` under `HKCU\Software\Policies\Microsoft\Windows\WindowsAI`
   - Recall (HKLM, admin): `AllowRecallEnablement=0` under `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsAI` (deletes snapshots on reboot)
   - Legacy Copilot (HKCU, user): `TurnOffWindowsCopilot=1` under `HKCU\Software\Policies\Microsoft\Windows\WindowsCopilot` (path is `WindowsCopilot`, not `WindowsAI`)
-  - Diagnostic data (HKLM, admin): `AllowTelemetry=0` under `HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection` — **Home: unsupported, floor is Required [1]**
+  - Diagnostic data (HKLM, admin): `AllowTelemetry=0` under `HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection` — **Home/Pro: floor is Required [1]; diagnostic-off is limited to Enterprise/Education/Server**
   - Activity history (HKLM, admin): `PublishUserActivities=0`, `UploadUserActivities=0` under `HKLM\SOFTWARE\Policies\Microsoft\Windows\System`
   - Advertising ID (HKCU, user): `Enabled=0` under `HKCU\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo`
   - Cortana (HKLM, admin): `AllowCortana=0` under `HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search`
@@ -115,3 +116,22 @@ Last verified: 2026-04-24 (extension for Antigravity / VS Code / PhpStorm / macO
 - **New Copilot chat app** (post-2024 rebuild): uninstall-only per Microsoft. Not covered by `TurnOffWindowsCopilot`.
 - Edge telemetry is NOT part of Windows privacy — configure via Edge's own policy keys (out of scope).
 - Docs: https://learn.microsoft.com/en-us/windows/privacy/configure-windows-diagnostic-data-in-your-organization · https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-windowsai
+
+## Vercel CLI and Vercel Claude Code plugin
+- CLI: `vercel telemetry disable` persists the setting; `VERCEL_TELEMETRY_DISABLED=1` is a per-run override. See [the CLI entry](../vendors/vercel.json) for login and path limits.
+- Plugin: `VERCEL_PLUGIN_TELEMETRY=off` in the environment that launches Claude Code, followed by restart. It has its own installed-plugin detection and stream; the CLI opt-out does not cover it. The current upstream payload policy differs from older builds. See [the plugin entry](../vendors/vercel-plugin.json).
+
+## Windsurf / Codeium (Devin Desktop)
+- Manual account privacy controls at `windsurf.com/settings`; current documentation calls the renamed editor Devin Desktop. Plan/admin Data Controls differ. No unverified local telemetry key is shipped. See [the vendor entry](../vendors/windsurf.json).
+
+## Zed
+- Nested `telemetry.diagnostics = false` and `telemetry.metrics = false` in the active settings file disable client diagnostics/metrics. Preserve JSON comments; report Linux state from active XDG roots.
+- Edit Prediction training and AI feedback are separate UI/account controls. See [the vendor entry](../vendors/zed.json) for default/custom roots and retention limits.
+
+## Ollama
+- Local inference, cloud inference, model downloads and updates are separate network surfaces. Optional `disable_ollama_cloud` / `OLLAMA_NO_CLOUD=1` disables cloud models and web search; it requires explicit agreement and configuration of the actual server, not just the CLI client.
+- Resolve server owner/home and restart/verify that server. No automatic service edits or unverified telemetry flag. See [the vendor entry](../vendors/ollama.json).
+
+## Linux system privacy
+- Flatpak's supported `report-os-info` setting disables its OS-info HTTP header per installation; it does not disable application telemetry or downloads.
+- GNOME/ABRT reporting, KDE KUserFeedback and distro package surveys have separate component-specific manual controls. Skip absent components and verify the applicable settings rather than claiming a universal OS switch. See [the vendor entry](../vendors/linux-privacy.json).
