@@ -1,4 +1,5 @@
 import os, sys, json
+import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "skills", "cc-usage-coach", "scripts"))
 import arc
@@ -67,6 +68,8 @@ def test_iter_human_prompts():
         _user("a normal user prompt"),
         _user([{"type": "tool_result", "content": "stuff"}]),        # excluded (no text)
         _user("meta text", isMeta=True),                              # excluded
+        _user("snapshot text", isSnapshotUpdate=True),                # excluded
+        _user("transcript-only text", isVisibleInTranscriptOnly=True), # excluded
         _user("compact summary text", isCompactSummary=True),         # excluded
         _user("<command-name>/foo</command-name><command-message>x</command-message>"),
         {"type": "assistant", "message": {"role": "assistant", "content": "hi"}},  # not user
@@ -79,6 +82,12 @@ def test_iter_human_prompts():
     assert prompts[1]["cmd"] == "/foo"
     # the command tags are stripped out of the visible text
     assert "<command-name>" not in prompts[1]["text"]
+
+
+def test_iter_human_prompts_false_synthetic_flags():
+    entries = [_user("a human prompt", isSnapshotUpdate=False,
+                     isVisibleInTranscriptOnly=False)]
+    assert arc.iter_human_prompts(entries)[0]["text"] == "a human prompt"
 
 
 def test_command_name_path_redacted():
@@ -239,6 +248,61 @@ def test_main_home_dir_cwd_no_username(tmp_path, monkeypatch, capsys):
     out3 = capsys.readouterr().out
     assert "myrepo" in out3
     assert "alice" not in out3
+
+
+@pytest.mark.parametrize("cwd,project", [
+    ("/mnt/c/Users/alice", None),
+    ("/Volumes/Drive/Users/alice/", None),
+    ("C:/Users/alice", None),
+    (r"C:\Users\alice", None),
+    (r"\\server\Users\alice", None),
+    ("/Volumes/Data/local-user", None),
+    (r"D:\Profiles\local-user", None),
+    ("/mnt/c/Users/alice/myrepo", "myrepo"),
+    (r"C:\Users\alice\myrepo", "myrepo"),
+    (r"\\server\Users\alice\myrepo", "myrepo"),
+])
+def test_main_cross_platform_project_labels(cwd, project, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CC_COACH_OUT", str(tmp_path))
+    monkeypatch.setattr(arc.E, "_SELF", {"local-user"})
+    sess = tmp_path / "session.jsonl"
+    _write_jsonl(sess, [_user("do a thing", cwd=cwd)])
+    (tmp_path / "source_index.json").write_text(json.dumps({"REF": str(sess)}))
+
+    assert arc.main(["arc.py", "REF"]) == 0
+    out = capsys.readouterr().out
+    header = out.splitlines()[0]
+    assert "alice" not in out
+    assert "local-user" not in out
+    assert "server" not in out
+    if project:
+        assert header == f"REF | {project} | 1 turns"
+    else:
+        assert header == "REF | 1 turns"
+
+
+@pytest.mark.parametrize("flag", ["isSnapshotUpdate", "isVisibleInTranscriptOnly"])
+def test_main_synthetic_user_entries_do_not_change_human_arc(flag, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CC_COACH_OUT", str(tmp_path))
+    sess = tmp_path / "session.jsonl"
+    entries = [
+        _user("do the real work"),
+        _user("injected noise: This session is being continued from a previous conversation "
+              "<<autonomous-loop <command-name>/loop</command-name>", **{flag: True}),
+        _user("compacted", isCompactSummary=True, compactMetadata={"trigger": "auto"}),
+    ]
+    _write_jsonl(sess, entries)
+    (tmp_path / "source_index.json").write_text(json.dumps({"REF": str(sess)}))
+
+    assert arc.main(["arc.py", "REF"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "REF | 1 turns"
+    assert "do the real work" in out
+    assert "injected noise" not in out
+    assert "compactions=1" in out
+    assert "resumes=0" in out
+    assert "autonomous_loop=False" in out
+    assert "slash_cmds={}" in out
 
 
 # ---------------------------------------------------------------------------

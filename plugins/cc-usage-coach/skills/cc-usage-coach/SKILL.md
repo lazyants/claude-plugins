@@ -31,7 +31,7 @@ matter (e.g. `python3 "<skill-dir>/scripts/extract.py"`).
    dirs to scan as well, e.g. `CC_COACH_CONFIG_DIRS=dir-a,dir-b` (use the user's
    real dir names; the placeholders here are generic on purpose).
 
-2. **Build signals.** Run `scripts/signals.py`. It writes three files:
+2. **Build signals.** Run `scripts/signals.py`. It writes four files:
    - `signal_pack.json` — compact, path-free AND project-name-free, **shareable**.
      Project labels in it are OPAQUE IDs (e.g. `proj_a1b2c3d4e5`), not real names.
    - `source_index.json` — `{source_ref -> absolute path}`, **LOCAL-ONLY**
@@ -39,12 +39,15 @@ matter (e.g. `python3 "<skill-dir>/scripts/extract.py"`).
    - `project_index.json` — `{opaque project id -> real project name}`,
      **LOCAL-ONLY** (`0600`, gitignored). Used only to show real project names
      in YOUR report.
+   - `tool_index.json` — `{opaque custom tool id -> observed tool name}`,
+     **LOCAL-ONLY** (`0600`, gitignored). Used only to resolve custom tool names
+     in YOUR report; built-in tool names are already readable in the pack.
 
    Both extract and signals write under the plugin's own directory by default.
    When you invoke the scripts from outside the plugin dir, or the plugin dir is
    read-only, set `CC_COACH_OUT` to a writable output dir and the scripts will
-   put `dataset/`, `signal_pack.json`, `source_index.json`, and
-   `project_index.json` there instead.
+   put `dataset/`, `signal_pack.json`, `source_index.json`, `project_index.json`,
+   and `tool_index.json` there instead.
 
 3. **Read the pack (resolve names locally).** Read `signal_pack.json`; never read
    `dataset/sessions.jsonl` or the per-turn files into context — the pack is the
@@ -54,11 +57,17 @@ matter (e.g. `python3 "<skill-dir>/scripts/extract.py"`).
    (`{id -> real name}`). Show the user the real name; NEVER put a real project
    name in anything meant to be shared.
 
+   Likewise, custom tool labels in `tool_injection.by_tool[].tool` are OPAQUE
+   IDs (`tool_<hash>`). Resolve them through the LOCAL-ONLY `tool_index.json`
+   when describing tools in the user's local report. Keep the opaque IDs in
+   anything meant to be shared; a custom tool name may contain private details.
+
 4. **Inspect the top candidates.** Pick the top 3–5 entries in
    `candidate_sessions.items` (by `cost_pct` / `anomaly_rank` / `why`). For each,
    run `python3 "<skill-dir>/scripts/arc.py" <source_ref>` to get a compact,
-   LOCAL-ONLY **arc digest** of that session — the sequence of user prompts and
-   the edit/agent activity over time. **Judge from the arc, not the opener.** A
+   LOCAL-ONLY **arc digest** of that session — the sequence of human prompts and
+   structural compaction, resume, loop, and slash-command markers.
+   **Judge from the arc, not the opener.** A
    long session whose prompts trace one coherent task — even across compactions,
    or an autonomous loop that keeps working the same goal — is *warranted*; call
    it wasteful only when the prompt arc shows unrelated task-switching (a
@@ -66,10 +75,17 @@ matter (e.g. `python3 "<skill-dir>/scripts/extract.py"`).
    one session). This human-judgment pass is the point of the skill — the pack
    flags candidates, you decide.
 
+   Each candidate includes `d` (its directory class) and `baseline_scope`.
+   Compare its anomalies against `baselines_by_dir_class[item.d]`, including
+   subagent and workflow candidates. The top-level `baselines` describes only
+   real sessions. Cost ranks still compare each candidate's share of total
+   corpus quota; anomaly factors use the matching directory-class baselines.
+
    Two constraints on what the arc can prove:
-   - You see the **MAIN transcript only** — file changes a subagent made through
-     its own runtime are invisible here, so "nothing changed between X and Y" can
-     never be proven from this view alone.
+   - The digest does not list tool calls, edits, or agent activity. Work in
+     separate subagent transcripts is also invisible from the selected
+     transcript, so "nothing changed between X and Y" can never be proven from
+     this view alone.
    - The arc digest is **LOCAL-ONLY** (it contains the user's prompt text).
      Never quote it verbatim in the shareable report — summarize the shape of
      the work ("one refactor across ~40 turns"), never the prompts themselves.
@@ -120,8 +136,18 @@ sprawling session from a large coherent one.
 The Python computes metrics, per-user baselines, and ranked candidates with
 **no verdicts and no magnitude thresholds**. You supply every conclusion. A raw
 number means nothing on its own — compare it to the matching `baselines.*.p50`
-/ `.p90` for *this* user. The same turn count that is unremarkable for a heavy
-user is an outlier for a light one; the pack encodes that, you must honor it.
+/ `.p90` for *this* user's real sessions, or to
+`baselines_by_dir_class[item.d]` for a candidate in another class. The same turn
+count that is unremarkable for a heavy user is an outlier for a light one; the
+pack encodes that, you must honor it.
+
+`corpus.n_err` and each candidate's `n_err` count observed errored or empty
+assistant turns. `error_turn_rate` is `n_err / (n_turns + n_err)` because those
+errors are excluded from the successful counted `n_turns`. These observations
+cover only sessions retained by extraction: error-only files and files without
+counted usage turns are omitted. Honor `corpus.error_turn_note` when reporting
+this slice. Error counts do not measure retry token cost or savings, and do not
+prove waste; inspect the candidate arc before drawing a behavioral conclusion.
 
 ## Verification gate (before you rank ANY lever)
 
@@ -192,14 +218,15 @@ Also:
   state which tier matters for them. Limit savings ≠ dollar savings.
 - If `corpus.insufficient_data` is true (or `n` is small on the baselines),
   **hedge hard**: present findings as tentative, do not rank aggressive levers.
-- **Never quote a local filesystem path or a real project name in a shareable
-  output.** `source_index.json`, `project_index.json`, `dataset/sessions.jsonl`,
+- **Never quote a local filesystem path, a real project name, or a resolved
+  custom tool name in a shareable output.** `source_index.json`,
+  `project_index.json`, `tool_index.json`, `dataset/sessions.jsonl`,
   and the arc digest carry real usernames / paths / project names — they are
   LOCAL-ONLY: do not archive, upload, paste, or quote them. In the pack, sessions
   are opaque `source_ref` and projects are opaque IDs; resolve them to real names
-  (via `source_index.json` / `project_index.json`) ONLY in the user's local
-  report. Only the path-free, project-name-free `signal_pack.json` is safe to
-  share.
+  (via `source_index.json` / `project_index.json` / `tool_index.json`) ONLY in
+  the user's local report. Only the path-free, project-name-free
+  `signal_pack.json` is safe to share.
 
 ## Self-check before delivering
 

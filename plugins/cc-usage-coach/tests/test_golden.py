@@ -26,12 +26,14 @@ GOLDEN_PATH = os.path.join(HERE, "fixtures", "golden_pack.json")
 
 REQUIRED_KEYS = (
     "schema_version", "corpus", "split", "pareto", "baselines", "session_length",
+    "baselines_by_dir_class",
     "candidate_sessions", "fan_out", "version_signals_by_model", "tool_injection",
     "behavior_color", "model_task_fit_signals", "currency_notes",
 )
 PATH_NEEDLES = ("/Users/", "/home/", "-Users-", "-home-", ".jsonl", "source_path")
 # synthetic project labels that MUST be anonymized out of the shareable (shipped) pack
 PROJECT_NEEDLES = ("project-a", "project-b", "project-c")
+CUSTOM_TOOL = "mcp__synthetic-client__project-c_lookup"
 
 
 # --------------------------------------------------------------------------- #
@@ -60,7 +62,7 @@ def _session(s, p, d="real", n_turns=10, cr=200_000, peak_ctx=100_000, build_flo
              n_comp=0, n_models=1, n_side=0, n_read=0, read_chars=0, repeat_reads=None,
              n_repeat_read_paths=0, first_cr=50_000, date="2026-06-01", n_epochs=1,
              models=None, vers=None, inp=10_000, rd=500_000, out=0, dur_min=60.0,
-             source_path=None):
+             source_path=None, n_err=0):
     quota = inp + cr + out
     start = date + "T08:00:00.000Z" if date else None
     end = date + "T09:00:00.000Z" if date else None
@@ -74,7 +76,7 @@ def _session(s, p, d="real", n_turns=10, cr=200_000, peak_ctx=100_000, build_flo
         "n_epochs": n_epochs, "n_model_epoch_groups": n_models,
         "n_read": n_read, "read_chars": read_chars, "repeat_reads": repeat_reads or [],
         "n_repeat_read_paths": n_repeat_read_paths,
-        "n_5m": 0, "n_1h": n_turns, "has_5m_writes": False, "n_comp": n_comp, "n_err": 0,
+        "n_5m": 0, "n_1h": n_turns, "has_5m_writes": False, "n_comp": n_comp, "n_err": n_err,
         "start": start, "end": end, "dur_min": dur_min, "date": date,
     }
 
@@ -95,7 +97,8 @@ def build_corpus():
 
     # 1. Big main session -> top cost bucket; n_turns=120 (101-300 histogram bucket).
     add(_session("a-big", "project-a", n_turns=120, cr=4_000_000, peak_ctx=400_000,
-                 build_floor=400_000, first_cr=80_000, date="2026-06-02", out=20_000, inp=40_000),
+                 build_floor=400_000, first_cr=80_000, date="2026-06-02", out=20_000, inp=40_000,
+                 n_err=6),
         [_turn("a-big", "project-a", m="opus", v="2.1.150", cr=100_000, inp=1000, out=500,
                ts="2026-06-02T08:00:00.000Z") for _ in range(120)])
 
@@ -104,7 +107,7 @@ def build_corpus():
     add(_session("a-marathon", "project-a", n_turns=25, cr=2_400_000, peak_ctx=300_000,
                  build_floor=900_000, n_comp=1, n_models=2, n_epochs=2, n_side=4, first_cr=70_000,
                  date="2026-06-03", models=["opus", "sonnet"], vers=["2.1.150", "2.1.158"],
-                 out=15_000, inp=30_000),
+                 out=15_000, inp=30_000, n_err=2),
         ([_turn("a-marathon", "project-a", m="opus", v="2.1.150", cr=80_000,
                 ts="2026-06-03T08:00:00.000Z") for _ in range(13)] +
          [_turn("a-marathon", "project-a", m="sonnet", v="2.1.158", cr=80_000,
@@ -176,6 +179,7 @@ def build_corpus():
             "Bash": {"chars": 800_000, "est_tokens": 200_000, "count": 500},
             "Edit": {"chars": 240_000, "est_tokens": 60_000, "count": 120},
             "Agent": {"chars": 400_000, "est_tokens": 100_000, "count": 40},
+            CUSTOM_TOOL: {"chars": 320_000, "est_tokens": 80_000, "count": 20},
         },
     }
     return sessions, turns, tools
@@ -236,10 +240,10 @@ def test_golden_pack_exact_match():
 def test_all_required_keys_present():
     sessions, turns, tools = load_fixture()
     pack = shipped_pack(sessions, turns, tools)
-    assert pack["schema_version"] == 3
+    assert pack["schema_version"] == 4
     for k in REQUIRED_KEYS:
         assert k in pack, f"missing top-level key: {k}"
-    assert len(REQUIRED_KEYS) == 13
+    assert len(REQUIRED_KEYS) == 14
 
 
 def test_dir_class_counts_sum_to_corpus():
@@ -260,8 +264,19 @@ def test_no_path_leakage_in_pack():
     sessions, turns, tools = load_fixture()
     pack = shipped_pack(sessions, turns, tools)
     blob = json.dumps(pack)
-    for needle in PATH_NEEDLES + PROJECT_NEEDLES:
+    for needle in PATH_NEEDLES + PROJECT_NEEDLES + (CUSTOM_TOOL, "synthetic-client"):
         assert needle not in blob, f"path/source/project leak: {needle!r} present in shareable pack"
+
+
+def test_custom_tool_opaque_in_shipped_pack():
+    sessions, turns, tools = load_fixture()
+    assert CUSTOM_TOOL in tools["tool_result_bytes"], "fixture must exercise a client-named MCP tool"
+    pack = shipped_pack(sessions, turns, tools)
+    labels = [row["tool"] for row in pack["tool_injection"]["by_tool"]]
+    assert S._tool_label(CUSTOM_TOOL) in labels
+    assert "Read" in labels and "Bash" in labels
+    assert re.fullmatch(r"tool_[0-9a-f]{10}", S._tool_label(CUSTOM_TOOL))
+    assert S._tool_index(tools)[S._tool_label(CUSTOM_TOOL)] == CUSTOM_TOOL
 
 
 def test_project_labels_opaque_and_mapped():

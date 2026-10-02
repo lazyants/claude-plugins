@@ -7,14 +7,15 @@ candidates); the LLM at skill runtime CONCLUDES (significance, behavior, advice)
 Emits:
   signal_pack.json   shareable, PATH-FREE, NO verdicts, NO magnitude thresholds.
   source_index.json  LOCAL ONLY (0600, gitignored): {source_ref -> absolute path}.
+  tool_index.json    LOCAL ONLY (0600, gitignored): {opaque tool ID -> raw tool name}.
 
-Design rules (see SKILL_PLAN.md): no hardcoded magnitude thresholds (only per-user
+Design rules: no hardcoded magnitude thresholds (only per-user
 p50/p90 + mechanism-level constants below); no advice strings; reads are free for limits.
-Run: python3 tools/signals.py
+Run: python3 scripts/signals.py
 """
 import bisect, datetime, hashlib, json, os, sys, statistics
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lib_sessions as L   # shared out_dir() resolver (Change 4b)
+import lib_sessions as L   # shared out_dir() resolver
 
 # DATASET / output dir are resolved lazily in main() via L.out_dir() so importing this
 # module (e.g. from tests) has no filesystem side effects.
@@ -44,8 +45,24 @@ CURRENCY_NOTES = {
     "5m_write_means_overage": False,
 }
 
-# Per-session anomaly metrics (percentile-ranked within the user's own data).
-ANOMALY_METRICS = ["cr_per_turn", "recache_excess_proxy", "n_turns", "peak_ctx"]
+# Per-session anomaly metrics (percentile-ranked within the matching directory class).
+ANOMALY_METRICS = ["cr_per_turn", "recache_excess_proxy", "n_turns", "peak_ctx", "n_err"]
+DIR_CLASSES = ("real", "subagents", "workflow")
+BASELINE_KEYS = {"n_turns": "turns"}
+
+# Exact native names are safe structural vocabulary. Unknown/custom names, including every
+# MCP name, are opaque in the shareable pack: even a tool suffix can carry a client name.
+NATIVE_TOOLS = frozenset({
+    "Agent", "AskUserQuestion", "Bash", "Edit", "EnterPlanMode", "ExitPlanMode", "Glob",
+    "Grep", "LS", "MultiEdit", "NotebookEdit", "Read", "Skill", "Task", "TaskCreate",
+    "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "TodoRead", "TodoWrite",
+    "ToolSearch", "WebFetch", "WebSearch", "Write",
+})
+ERROR_TURN_NOTE = (
+    "Observed error/empty assistant turns in retained dataset sessions only; files with no "
+    "counted usage turns are omitted. n_turns excludes these errors; error_turn_rate is "
+    "n_err / (n_turns + n_err), not a retry token-cost estimate."
+)
 
 
 # --------------------------------------------------------------------------- pure helpers
@@ -149,6 +166,22 @@ def session_metric(s, key):
     if key == "read_chars_per_call":
         return session_read_chars_per_call(s)
     return s.get(key, 0)
+
+
+def session_baselines(sessions):
+    """Per-user p50/p90 for one directory class, including an explicit empty population."""
+    return {
+        "turns": p50_p90([s["n_turns"] for s in sessions]),
+        "peak_ctx": p50_p90([s["peak_ctx"] for s in sessions]),
+        "cr_per_turn": p50_p90([session_cr_per_turn(s) for s in sessions]),
+        "recache_excess_proxy": p50_p90([session_recache_excess(s) for s in sessions]),
+        "read_chars_per_call": p50_p90([session_read_chars_per_call(s) for s in sessions if s.get("n_read")]),
+        "n_err": p50_p90([s.get("n_err", 0) for s in sessions]),
+    }
+
+
+def error_turn_rate(n_turns, n_err):
+    return round(n_err / (n_turns + n_err), 4) if n_turns + n_err else 0.0
 
 
 def pareto_projects(proj_quota, total_quota):
@@ -268,11 +301,14 @@ def build_pack(sessions, turns_iter, tools):
     # ---- corpus
     total_recache_excess = sum(session_recache_excess(s) for s in sessions)
     total_first_cr = sum(s.get("first_cr") or 0 for s in sessions)
+    total_err = sum(s.get("n_err", 0) for s in sessions)
     dates = sorted(s["date"] for s in sessions if s.get("date"))
     corpus = {
         "quota": total_quota, "creation": total["cr"], "output": total["out"],
         "input": total["in"], "read": total["rd"],
         "n_sessions": n_sessions, "n_turns": total_turns, "n_projects": len(proj_quota),
+        "n_err": total_err, "error_turn_rate": error_turn_rate(total_turns, total_err),
+        "error_turn_note": ERROR_TURN_NOTE,
         "date_range": [dates[0], dates[-1]] if dates else [None, None],
         "recache_share": round(total_recache_excess / total_cr, 4),
         "prefix_share": round(total_first_cr / total_cr, 4),
@@ -289,17 +325,14 @@ def build_pack(sessions, turns_iter, tools):
     pareto = {"top_projects": top_projects, "projects_to_81pct": to81, "projects_to_90pct": to90,
               "session_quota_shares": session_quota_shares([s["quota"] for s in sessions], total_quota or 1)}
 
-    # ---- baselines (per-user)
-    baselines = {
-        "turns": p50_p90([s["n_turns"] for s in sessions]),
-        "peak_ctx": p50_p90([s["peak_ctx"] for s in sessions]),
-        "cr_per_turn": p50_p90([session_cr_per_turn(s) for s in sessions]),
-        "recache_excess_proxy": p50_p90([session_recache_excess(s) for s in sessions]),
-        "read_chars_per_call": p50_p90([session_read_chars_per_call(s) for s in sessions if s.get("n_read")]),
-    }
+    # ---- baselines (per-user AND matching directory class). Keep the familiar top-level
+    # metric shape for real sessions; side-thread candidates use their own named population.
+    by_dir = {dc: [s for s in sessions if s["d"] == dc] for dc in DIR_CLASSES}
+    baselines_by_dir_class = {dc: session_baselines(by_dir[dc]) for dc in DIR_CLASSES}
+    baselines = baselines_by_dir_class["real"]
 
     # ---- candidate_sessions (multi-bucket, deterministic; NO score verdict)
-    cand = select_candidates(sessions, total_quota or 1, baselines)
+    cand = select_candidates(sessions, total_quota or 1, baselines_by_dir_class)
 
     # ---- fan_out
     side = [s for s in sessions if s["d"] in ("workflow", "subagents") or s["n_side"] > 0]
@@ -323,7 +356,7 @@ def build_pack(sessions, turns_iter, tools):
     # ---- tool_injection
     trb = tools.get("tool_result_bytes", {})
     total_inj = sum(v["est_tokens"] for v in trb.values()) or 1
-    by_tool = [{"tool": k, "est_tokens": v["est_tokens"],
+    by_tool = [{"tool": _tool_label(k), "est_tokens": v["est_tokens"],
                 "pct": round(100 * v["est_tokens"] / total_inj, 1),
                 "chars_per_call": round(v["chars"] / v["count"]) if v["count"] else 0}
                for k, v in list(trb.items())[:12]]
@@ -347,8 +380,9 @@ def build_pack(sessions, turns_iter, tools):
     session_length = session_length_block(sessions)
 
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "corpus": corpus, "split": split, "pareto": pareto, "baselines": baselines,
+        "baselines_by_dir_class": baselines_by_dir_class,
         "session_length": session_length,
         "candidate_sessions": cand, "fan_out": fan_out,
         "version_signals_by_model": version_signals,
@@ -400,7 +434,7 @@ def _read_token(leaf_hash):
     _, sep, tail = s.rpartition("#")
     if sep and tail and all(c in "0123456789abcdef" for c in tail):
         return "file_" + tail
-    return "file_" + hashlib.sha1(s.encode("utf-8", errors="replace")).hexdigest()[:6]
+    return "file_" + hashlib.sha1(s.encode("utf-8", errors="surrogatepass")).hexdigest()[:6]
 
 
 def _source_ref(s):
@@ -412,18 +446,28 @@ def _source_ref(s):
     return L.session_id(s.get("source_path") or s.get("s"))
 
 
-def select_candidates(sessions, total_quota, baselines):
+def select_candidates(sessions, total_quota, baselines_by_dir_class):
     """Deterministic multi-bucket candidate selection. Emits ranks/factors, NO verdict."""
-    # precompute per-session metric values + within-user percentile ranks
-    metric_sorted = {m: sorted(session_metric(s, m) for s in sessions) for m in ANOMALY_METRICS}
+    # Percentiles compare a real session to reals, a subagent to subagents, and a workflow
+    # to workflows. Cost ranks/buckets still span the corpus because their quota is comparable.
+    metric_sorted = {
+        dc: {m: sorted(session_metric(s, m) for s in sessions if s["d"] == dc)
+             for m in ANOMALY_METRICS}
+        for dc in DIR_CLASSES
+    }
     enriched = []
     for s in sessions:
         cost_pct = round(100 * s["quota"] / total_quota, 3)
-        factors = {m: round(pct_rank(metric_sorted[m], session_metric(s, m)), 3) for m in ANOMALY_METRICS}
+        dc = s["d"]
+        factors = {
+            m: (0.0 if m == "n_err" and session_metric(s, m) == 0 else
+                round(pct_rank(metric_sorted[dc][m], session_metric(s, m)), 3))
+            for m in ANOMALY_METRICS
+        }
         anomaly = max(factors.values()) if factors else 0.0
         why = []
         for m in ANOMALY_METRICS:
-            bl = baselines.get(m)
+            bl = baselines_by_dir_class[dc].get(BASELINE_KEYS.get(m, m))
             if bl and bl["p90"] is not None and session_metric(s, m) > bl["p90"]:
                 why.append(m)
         if s.get("n_comp", 0) > 0:
@@ -463,9 +507,12 @@ def select_candidates(sessions, total_quota, baselines):
         s = e["s"]
         out.append({
             "source_ref": _source_ref(s), "p": s["p"],
+            "d": s["d"], "baseline_scope": s["d"],
             "n_turns": s["n_turns"], "peak_ctx": s["peak_ctx"], "cr": s["cr"],
             "build_floor": s.get("build_floor", 0), "n_epochs": s.get("n_epochs", 1),
             "n_comp": s.get("n_comp", 0), "n_models": s.get("n_models", 1),
+            "n_err": s.get("n_err", 0),
+            "error_turn_rate": error_turn_rate(s["n_turns"], s.get("n_err", 0)),
             "recache_excess_proxy": session_recache_excess(s),
             "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
             "cr_peak_mult": round(s["cr"] / s["peak_ctx"], 2) if s["peak_ctx"] else None,
@@ -491,7 +538,21 @@ def _proj_id(name):
     label is hashed — nothing passes through unmasked — so a real project that happens to be named
     like a fallback ("unknown"/"?") cannot leak, and a non-string is coerced (never crashes). The
     report resolves IDs back to names via the LOCAL-ONLY project_index.json. codex review."""
-    return "proj_" + hashlib.sha1(str(name).encode("utf-8")).hexdigest()[:10]
+    return "proj_" + hashlib.sha1(str(name).encode("utf-8", errors="surrogatepass")).hexdigest()[:10]
+
+
+def _tool_label(name):
+    """Only exact native names pass through; every custom label becomes a stable opaque ID."""
+    s = str(name)
+    if s in NATIVE_TOOLS:
+        return s
+    return "tool_" + hashlib.sha1(s.encode("utf-8", errors="surrogatepass")).hexdigest()[:10]
+
+
+def _tool_index(tools):
+    """LOCAL-ONLY resolution for opaque by_tool labels; no raw name reaches the shared pack."""
+    return {_tool_label(name): name for name in tools.get("tool_result_bytes", {})
+            if str(name) not in NATIVE_TOOLS}
 
 
 def anonymize_projects(pack):
@@ -556,13 +617,16 @@ def _run():
         return 1
     if not _write_local_json(os.path.join(out, "project_index.json"), proj_index):
         return 1
+    tool_index = _tool_index(tools)
+    if not _write_local_json(os.path.join(out, "tool_index.json"), tool_index):
+        return 1
     c = pack["corpus"]
     # Print NO absolute path to stdout — this stream enters the skill LLM's context.
     print(f"signal_pack.json written ({os.path.getsize(pack_path)//1024} KB)")
     print(f"  sessions={c['n_sessions']:,} quota={c['quota']:,} recache_share={c['recache_share']} "
           f"candidates={len(pack['candidate_sessions']['items'])}")
-    print(f"source_index.json + project_index.json written "
-          f"({len(index)} refs, {len(proj_index)} projects; LOCAL, 0600)")
+    print(f"source_index.json + project_index.json + tool_index.json written "
+          f"({len(index)} refs, {len(proj_index)} projects, {len(tool_index)} tools; LOCAL, 0600)")
     return 0
 
 
