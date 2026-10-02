@@ -99,8 +99,12 @@ carries the detail and the rationale for each.
 
 **Rails**
 
-- `assets/rails-db_guardrails.rb` → `config/initializers/db_guardrails.rb`.
-  No registration step — initializers load automatically.
+- `assets/rails-db_guardrails.rb` → `lib/tasks/db_guardrails.rake`.
+  No registration step — Rails loads `.rake` files before invoking tasks.
+  For an existing install, remove `config/initializers/db_guardrails.rb` and
+  replace it with this task file; the initializer placement cannot guard the
+  first invocation. The guard boots the environment, then blocks destructive
+  tasks unless `Rails.env.test?` or `ALLOW_DESTRUCTIVE=true`.
 - Test isolation is built in (the `test` environment in `config/database.yml`).
 
 **Symfony**
