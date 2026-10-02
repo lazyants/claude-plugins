@@ -116,6 +116,37 @@ def test_synthetic_error_message_is_not_a_zero_input_request(tmp_path):
     assert "no measured usage" in proc.stderr
 
 
+@pytest.mark.parametrize("fmt,valid,bad", [
+    ("claude-session", claude(), {"type": "assistant", "message": None}),
+    ("claude-session", claude(), {"type": "assistant", "message": []}),
+    ("claude-session", claude(), {"type": "assistant"}),
+    ("claude-session", claude(), {"type": "assistant", "message": {"id": "m2"}}),
+    ("codex-session", codex(), {"type": "event_msg", "payload": None}),
+    ("codex-session", codex(), {"type": "event_msg", "payload": []}),
+    ("codex-session", codex(), {"type": "event_msg"}),
+    ("codex-session", codex(), {"type": "event_msg", "payload": {}}),
+    ("codex-session", codex(), {"type": "event_msg", "payload": {"type": "token_count"}}),
+    ("codex-session", codex(), {"type": "turn_context", "payload": None}),
+])
+def test_malformed_row_never_produces_partial_success(tmp_path, fmt, valid, bad):
+    proc, _ = invoke(tmp_path, fmt, [valid, bad])
+    assert proc.returncode == 2
+    assert proc.stdout == ""
+    assert "worker-usage:" in proc.stderr
+
+
+def test_legitimate_non_usage_notifications_can_follow_measured_usage(tmp_path):
+    proc, _ = invoke(tmp_path, "codex-session", [codex(),
+        {"type": "event_msg", "payload": {"type": "task_complete"}},
+        {"type": "event_msg", "payload": {"type": "token_count", "info": None}}])
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["records"][0]["observations"] == 1
+    synthetic = {"type": "assistant", "message": {"model": "<synthetic>"}}
+    proc, _ = invoke(tmp_path, "claude-session", [claude(), synthetic])
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["records"][0]["observations"] == 1
+
+
 def test_invalid_json_missing_file_and_wrong_format_are_fatal(tmp_path):
     record = tmp_path / "bad.jsonl"
     record.write_text("{\n", encoding="utf-8")

@@ -88,12 +88,14 @@ def summarize(path, fmt):
             if row.get("type") != "assistant":
                 continue
             message = row.get("message")
-            if not isinstance(message, dict) or "usage" not in message:
-                continue
+            if not isinstance(message, dict):
+                raise UsageError("assistant message: expected an object")
             # Synthetic local messages (e.g. API-error renderings) are not
             # provider requests and must not become zero-input observations.
             if message.get("model") == "<synthetic>":
                 continue
+            if "usage" not in message:
+                raise UsageError("assistant message has no usage")
             mid = message.get("id")
             if not isinstance(mid, str) or not mid:
                 raise UsageError("assistant usage has no message id")
@@ -116,12 +118,20 @@ def summarize(path, fmt):
                     ("input_tokens", "cached_input_tokens", "output_tokens")}
         for row in rows:
             payload = row.get("payload")
+            if row.get("type") in ("event_msg", "turn_context"):
+                if not isinstance(payload, dict):
+                    raise UsageError(f"{row['type']} payload: expected an object")
+            if row.get("type") == "event_msg":
+                if not isinstance(payload.get("type"), str) or not payload["type"]:
+                    raise UsageError("event_msg payload has no event type")
             if not isinstance(payload, dict):
                 continue
             if row.get("type") == "turn_context" and isinstance(payload.get("model"), str):
                 models.add(payload["model"])
             if row.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue
+            if "info" not in payload:
+                raise UsageError("token_count has no info field")
             info = payload.get("info")
             if info is None:  # rate-limit-only notification, no usage
                 continue
