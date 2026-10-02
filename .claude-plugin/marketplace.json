@@ -11,8 +11,8 @@
     {
       "name": "ai-cli-optout",
       "source": "./plugins/ai-cli-optout",
-      "description": "Opt out of telemetry across every locally installed AI CLI and AI-enabled IDE, plus macOS/Windows OS-level privacy surfaces.",
-      "version": "1.1.3",
+      "description": "Apply documented privacy opt-outs for installed AI CLIs and IDEs, Vercel CLI and its Claude Code plugin, plus macOS, Windows and Linux privacy controls.",
+      "version": "1.2.0",
       "author": {
         "name": "Lazy Ants"
       },
@@ -30,7 +30,13 @@
         "antigravity",
         "vscode",
         "phpstorm",
-        "vercel"
+        "vercel",
+        "windsurf",
+        "codeium",
+        "zed",
+        "ollama",
+        "linux",
+        "flatpak"
       ]
     },
     {

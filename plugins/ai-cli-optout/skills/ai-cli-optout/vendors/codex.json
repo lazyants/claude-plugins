@@ -2,17 +2,29 @@
   "name": "codex",
   "display": "OpenAI Codex CLI",
   "detect_cmd": "codex",
-  "detect_paths": ["~/.codex"],
+  "detect_paths": [],
   "doc_urls": [
-    "https://developers.openai.com/codex/config-reference"
+    "https://developers.openai.com/codex/config-reference",
+    "https://learn.chatgpt.com/docs/config-file/config-advanced"
   ],
   "settings_files": [
     {
       "path": "~/.codex/config.toml",
+      "home_env": "CODEX_HOME",
       "format": "toml",
       "edits": [
         { "key": "analytics.enabled", "value": false, "disables": "Codex usage analytics sent to OpenAI" },
         { "key": "feedback.enabled", "value": false, "disables": "Codex /feedback uploads" }
+      ],
+      "profile_files": {
+        "pattern": "*.config.toml",
+        "existing_only": true,
+        "edits": [
+          { "key": "analytics.enabled", "value": false, "disables": "Codex analytics in an existing named profile file" }
+        ]
+      },
+      "profile_edits": [
+        { "key": "analytics.enabled", "value": false, "disables": "Codex analytics in an existing legacy nested profile (CLI before 0.134.0)" }
       ]
     }
   ],
@@ -30,7 +42,7 @@
   },
   "notes": [
     "No env-var wrapper — must edit config.toml directly.",
-    "Profile-scoped override exists: profiles.<name>.analytics.enabled = false. If config.toml has a [profiles.*] section, apply there too.",
+    "analytics.enabled is profile-scoped. The workflow resolves CODEX_HOME (default ~/.codex), covers each existing named *.config.toml profile file, and covers legacy nested [profiles.<name>] analytics only on CLI versions before 0.134.0. Newer CLI versions ignore legacy nested profiles; report their migration as pending rather than claiming they are active.",
     "Opt-out stops new sends; existing sqlite/jsonl logs persist and should be reviewed separately."
   ],
   "caveats": []

@@ -2,6 +2,20 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [ai-cli-optout 1.2.0] — 2026-10-02
+
+### Added
+
+- First-class vendor entries for the Vercel Claude Code plugin, Windsurf/Codeium, Zed, Ollama and Linux privacy controls. Vercel CLI and its Claude Code plugin remain separate products; Linux coverage distinguishes Flatpak's OS-info header from desktop feedback and crash reporting (#58, #144, #145).
+- Platform-specific VS Code and Antigravity settings paths and process checks for macOS, Linux and Windows (#165).
+
+### Fixed
+
+- Settings edits check whether an app is running before writing, defer on failed checks, and preserve literal dotted editor keys. Vendor notes are surfaced before changes and in the report. Codex analytics covers existing profile overlays and older nested profiles, with the version-specific limits stated (#22, #166, #170).
+- Installation detection uses executables or application bundles rather than shared or retained config directories. Author-specific Claude profile paths are removed; active config homes are honored (#25, #35, #169).
+- Persistent-file reporting expands globs safely, resolves Windows and Linux XDG environment roots, selects platform-specific paths for Zed and both Antigravity IDE products, and uses the Vercel CLI's actual default Windows data directory. Research tests exercise real shipped vendor data and the schema rejects backtick-bearing discovery patterns (#23, #24, #165, #167, #168).
+- Installed-plugin and marketplace descriptions agree, and the publishing checklist names the canonical description. Permanent Apple, Windows and Claude feature-flag limitations remain documented with their supported controls and confirmation gates (#34, #141, #142, #143).
+
 ## [obsidian-project-vault 1.1.0] — 2026-10-02
 
 ### Added

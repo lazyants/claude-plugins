@@ -3,8 +3,8 @@
   "display": "Cursor editor",
   "detect_cmd": "cursor",
   "detect_paths": [
-    "~/.cursor",
-    "~/Library/Application Support/Cursor"
+    "/Applications/Cursor.app",
+    "~/Applications/Cursor.app"
   ],
   "doc_urls": [
     "https://cursor.com/data-use"

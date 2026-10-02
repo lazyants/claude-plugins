@@ -1,6 +1,6 @@
 # ai-cli-optout — tests
 
-Static invariant + smoke tests. Run before every release.
+Static invariant + smoke tests. The full suite runs in GitHub Actions before every merge. Locally run only the changed test file and cheap static checks, as required by the root `CLAUDE.md`.
 
 ```
 bash tests/run-all.sh
@@ -10,14 +10,17 @@ bash tests/run-all.sh
 
 - **`vendor-schema.test.sh`** — static invariants across every `vendors/*.json`:
   - required fields present, types correct
-  - no shared / ancestor `detect_paths` (B1 regression guard)
+  - no shared / ancestor / retained-state `detect_paths` (B1 regression guard)
   - dotted-path `edits[].key` syntax
-  - `manual_only: true` vendors have `manual_instructions` + `process_check` and zero auto-edit entries
+  - `manual_only: true` vendors have manual instructions and zero auto-edit entries; declared process checks are validated
+  - platform-specific settings paths, install/process checks and literal versus nested key modes
+  - discovery patterns contain no backticks and Codex profile scopes are structured
   - `shell_commands[]` is always `platforms`-gated
   - `platforms` values restricted to `darwin` / `linux` / `win32`
 - **`scripts.test.sh`** — smoke tests for the shipped bash scripts:
-  - `report_persistent_files.sh`: empty fake HOME reports `(not present)`; populated fake HOME reports a size; unknown vendor exits 2
-  - `check_new_optouts.sh`: fetches a `file://` fixture doc, surfaces a new token in the "Not in baseline" section, and does not flag baseline tokens
+  - `report_persistent_files.sh`: literal and glob paths, multiple versions, spaces, active XDG roots, native/WSL Windows path conversion, platform/product maps and explicit unresolved/foreign-platform skips
+  - `check_new_optouts.sh`: deterministic `file://` docs, real shipped Anthropic vendor data, baseline subtraction and new-token discovery
+- **`new-vendors.test.sh`** — executes shipped inventory checks and command strings against isolated CLI fixtures: exact enabled Vercel registrations, Windsurf/Codeium detection, Flatpak capability/scope checks and literal PowerShell arguments. It never changes real account, app or system settings.
 
 ## What's **not** covered (and why)
 

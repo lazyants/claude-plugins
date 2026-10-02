@@ -1,0 +1,39 @@
+{
+  "name": "vercel-plugin",
+  "display": "Vercel Claude Code plugin",
+  "detect_cmd": "",
+  "detect_paths": [],
+  "detect_check": "plugin_inventory=$(claude plugin list --json) && printf '%s\\n' \"$plugin_inventory\" | jq -e 'any(.[]; .enabled != false and ((.id // \"\") | split(\"@\")[0] | . == \"vercel\" or . == \"vercel-plugin\"))' >/dev/null",
+  "doc_urls": [
+    "https://github.com/vercel/vercel-plugin/blob/main/README.md",
+    "https://github.com/vercel/vercel-plugin/blob/main/hooks/src/telemetry.mts",
+    "https://github.com/vercel/vercel-plugin/blob/main/.claude-plugin/plugin.json",
+    "https://github.com/vercel/vercel-plugin/blob/main/.claude-plugin/marketplace.json"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [
+    {
+      "name": "VERCEL_PLUGIN_TELEMETRY",
+      "value": "off",
+      "disables": "Vercel plugin telemetry, including daily activity, first-use, version/install identifiers, agent-harness category and plugin skill events. Export in the environment that launches Claude Code, then restart that terminal/app session."
+    }
+  ],
+  "persistent_files": [
+    { "path": "~/.config/vercel-plugin/installation-id", "note": "Random plugin installation UUID; opting out prevents creation of a new identifier but does not erase an existing one." },
+    { "path": "~/.config/vercel-plugin/dau-stamp", "note": "Daily telemetry throttle stamp. Report only, never delete." },
+    { "path": "~/.config/vercel-plugin/first-use-stamp", "note": "First-use telemetry throttle stamp. Report only, never delete." },
+    { "path": "~/.config/vercel-plugin/active-session.json", "note": "Recent plugin session marker used by Vercel CLI telemetry. Current plugin removes this marker when the opt-out is active; the skill itself does not delete it." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(VERCEL_PLUGIN_|TELEMETRY|DISABLE|OPT_?OUT|TRACK)",
+    "settings_regex": "(telemetry|privacy|consent)"
+  },
+  "notes": [
+    "Separate product from the Vercel CLI: VERCEL_TELEMETRY_DISABLED and vercel telemetry disable do not disable this plugin's telemetry.",
+    "detect_check queries Claude Code's installed-plugin inventory, including its active CLAUDE_CONFIG_DIR, and requires an enabled vercel or vercel-plugin registration. Neither the vercel/claude binary alone nor leftover ~/.config/vercel-plugin files establish that this plugin is installed. If inventory retrieval fails, report detection as unverified; do not infer presence.",
+    "Verify in a fresh POSIX shell that launches Claude Code: test \"${VERCEL_PLUGIN_TELEMETRY:-}\" = off. A success in a different shell does not prove an already-running app inherited the setting. Windows: set the variable in the launching PowerShell environment or persist it with setx VERCEL_PLUGIN_TELEMETRY off, then restart the app/terminal.",
+    "Current upstream README (0.52.0 baseline) says prompt text, bash commands, tool-call contents, paths and project/account names are not collected. Earlier plugin builds behaved differently; inspect the installed version and update before assuming the current documented payload applies.",
+    "Other agent harnesses can also use the upstream plugin. This entry detects the Claude Code installation only; do not infer Cursor or Codex plugin installation from the Claude inventory."
+  ],
+  "caveats": []
+}

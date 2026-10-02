@@ -1,0 +1,79 @@
+{
+  "name": "zed",
+  "display": "Zed editor",
+  "detect_cmd": "zed",
+  "detect_paths": ["/Applications/Zed.app", "~/Applications/Zed.app"],
+  "platforms": ["darwin", "linux", "win32"],
+  "doc_urls": [
+    "https://zed.dev/docs/telemetry",
+    "https://zed.dev/docs/configuring-zed",
+    "https://zed.dev/docs/ai/privacy-and-security",
+    "https://zed.dev/docs/ai/ai-improvement",
+    "https://github.com/zed-industries/zed/blob/main/crates/paths/src/paths.rs"
+  ],
+  "settings_files": [
+    {
+      "paths": {
+        "darwin": "~/.config/zed/settings.json",
+        "linux": "${XDG_CONFIG_HOME}/zed/settings.json",
+        "win32": "%APPDATA%/Zed/settings.json"
+      },
+      "format": "json",
+      "key_mode": "dotted",
+      "edits": [
+        { "key": "telemetry.diagnostics", "value": false, "disables": "Zed client crash diagnostics. Preserve the existing telemetry object and unrelated settings." },
+        { "key": "telemetry.metrics", "value": false, "disables": "Zed client usage metrics, including high-level AI-feature interactions. Hosted-service billing/rate-limit metadata is separate." }
+      ]
+    }
+  ],
+  "shell_env_vars": [],
+  "process_check": {
+    "commands": {
+      "darwin": "pgrep -ix zed",
+      "linux": "pgrep -x zed",
+      "win32": "powershell.exe -NoProfile -Command 'try { $running = Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -match \"^(zed)$\" }; if ($running) { exit 0 } else { exit 1 } } catch { exit 2 }'"
+    },
+    "if_running": "Quit Zed before external settings edits so an in-app settings write cannot replace the change; verify both telemetry settings after restarting."
+  },
+  "manual_only_items": [
+    {
+      "name": "Edit Prediction training data",
+      "ui_path": "Zed's Edit Prediction status bar menu → Privacy → Training Data Collection: turn OFF if previously enabled; verify the toggle in the UI. This is separate from the telemetry settings.",
+      "reason": "Official documentation says training collection is opt-in and the UI control is the supported opt-out. Do not invent a settings.json training key."
+    },
+    {
+      "name": "AI response ratings and feedback",
+      "ui_path": "Do not rate or submit AI conversations if you do not want those threads persisted by Zed. On Zed Business, administrators can additionally restrict feedback/training participation through organization Data Sharing controls.",
+      "reason": "Each feedback submission explicitly shares a thread. telemetry.metrics=false does not revoke past feedback, erase retained data or suppress essential hosted-model requests."
+    }
+  ],
+  "persistent_files": [
+    {
+      "paths": {
+        "darwin": "~/.config/zed/settings.json",
+        "linux": "${XDG_CONFIG_HOME}/zed/settings.json",
+        "win32": "%APPDATA%/Zed/settings.json"
+      },
+      "note": "User settings for the current platform; Linux honors XDG_CONFIG_HOME with ~/.config as its standard fallback. Zed supports JSON comments. Resolve Flatpak or --user-data-dir overrides through the app before interpreting a missing default-path file. Report only."
+    },
+    {
+      "paths": {
+        "darwin": "~/Library/Logs/Zed",
+        "linux": "${XDG_DATA_HOME}/zed/logs",
+        "win32": "%LOCALAPPDATA%/Zed/logs"
+      },
+      "note": "Editor logs for the current platform; Linux honors XDG_DATA_HOME with ~/.local/share as its standard fallback. Flatpak and custom data roots may use another location, which must be resolved from the app. Report only; never delete logs."
+    }
+  ],
+  "diff_patterns": {
+    "env_regex": "(ZED_|TELEMETRY|DISABLE|OPT_?OUT|PRIVACY)",
+    "settings_regex": "(telemetry|diagnostics|metrics|training|data_collection|edit_predictions)"
+  },
+  "notes": [
+    "The two telemetry keys are real nested JSON properties, not literal dotted-name settings. Preserve JSON comments and other telemetry members while changing only diagnostics and metrics.",
+    "Resolve the actual user settings file before editing: Linux honors XDG_CONFIG_HOME; Flatpak builds can use FLATPAK_XDG_CONFIG_HOME; --user-data-dir changes the config root to <selected-directory>/config. Use Zed's Open Settings File command when an override is present, and do not create the default file instead.",
+    "Only client diagnostics/metrics are disabled. Zed-hosted AI and collaboration retain essential server-side metadata; external agents and provider API keys have their own policies. Review AI privacy docs for provider-specific retention exceptions.",
+    "For installations without a zed launcher (or nonstandard/prerelease bundles), verify the app in its installed location rather than treating leftover ~/.config/zed settings as proof of installation."
+  ],
+  "caveats": []
+}

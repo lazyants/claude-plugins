@@ -1,0 +1,54 @@
+{
+  "name": "ollama",
+  "display": "Ollama",
+  "detect_cmd": "ollama",
+  "detect_paths": ["/Applications/Ollama.app", "~/Applications/Ollama.app"],
+  "doc_urls": [
+    "https://docs.ollama.com/faq",
+    "https://docs.ollama.com/cloud",
+    "https://github.com/ollama/ollama/blob/main/docs/faq.mdx",
+    "https://github.com/ollama/ollama/blob/main/envconfig/config.go",
+    "https://github.com/ollama/ollama/blob/main/readline/history.go"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [],
+  "manual_only": true,
+  "manual_instructions": [
+    "For local-model inference, Ollama's FAQ says prompts and responses are not sent back to ollama.com. Cloud models are a separate remote-inference path. Do not invent OLLAMA_TELEMETRY or claim no network traffic: model pulls, application updates, cloud inference and web search can still use the network.",
+    "Optional local-only mode removes access to Ollama cloud models AND web search. Present that trade-off and obtain explicit agreement before suggesting a change. The official setting is {\"disable_ollama_cloud\": true} in the SERVER's ~/.ollama/server.json, preserving existing JSON keys. This is a feature restriction, not a telemetry toggle.",
+    "First resolve which server the CLI uses, including any OLLAMA_HOST override. For a server you own and launch interactively, ~/.ollama is relative to that server user's home. For Linux systemd, inspect `systemctl cat ollama.service` and `systemctl show ollama.service --property=User --property=Environment`; service User/HOME and drop-ins can differ from your terminal. Do not create the caller's ~/.ollama/server.json and claim it changed a service or remote server. If the effective server home/owner cannot be established, leave the configuration unchanged and provide the manual instructions to its administrator.",
+    "The documented alternative is OLLAMA_NO_CLOUD=1 in the Ollama SERVER environment. After the same explicit trade-off agreement, use the vendor's platform-specific environment instructions: launchctl setenv for the macOS app, a systemctl edit ollama.service [Service] Environment=\"OLLAMA_NO_CLOUD=1\" override for Linux systemd, or Windows user environment variables for the Windows app. Exporting it only in a CLI client's shell does not update an existing app/service server.",
+    "Restart the actual Ollama server after either change. On Linux systemd, the official environment procedure includes daemon-reload and service restart; administrator approval is required. Verify that the restarted server's logs say `Ollama cloud disabled: true`. Until the effective server and this log are verified, report local-only mode as unverified. Existing model files, conversation history and credentials are reported, never deleted."
+  ],
+  "process_check": {
+    "commands": {
+      "darwin": "pgrep -x Ollama || pgrep -x ollama",
+      "linux": "pgrep -x ollama",
+      "win32": "powershell.exe -NoProfile -Command 'try { $running = Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -match \"^(ollama|ollama app)$\" }; if ($running) { exit 0 } else { exit 1 } } catch { exit 2 }'"
+    },
+    "if_running": "The running Ollama server keeps its existing configuration until restarted. Resolve its owner/home and obtain agreement to losing cloud models/web search before changing or restarting it; a CLI-client restart is insufficient."
+  },
+  "persistent_files": [
+    { "path": "~/.ollama/server.json", "note": "Documented server configuration only when this is the actual server user's home; resolve systemd/remote ownership first. Report only." },
+    { "path": "~/.ollama/history", "note": "User CLI conversation/input history; report only and never delete." },
+    { "path": "~/.ollama/id_ed25519", "note": "Private account key; report path/permissions only, never print contents or delete." },
+    { "path": "~/.ollama/id_ed25519.pub", "note": "Public key associated with account access. Report only." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(OLLAMA_|TELEMETRY|DISABLE|NO_CLOUD|OPT_?OUT|PRIVACY)",
+    "settings_regex": "(disable_ollama_cloud|telemetry|privacy|cloud)"
+  },
+  "notes": [
+    "The account/key/history paths belong to the invoking user's default home; they are not evidence of where a system-wide Ollama server reads its configuration.",
+    "Local-only mode blocks the documented cloud features but is not an offline/network kill switch. It does not claim to prevent registry downloads, desktop update checks or unrelated clients' traffic.",
+    "If OLLAMA_HOST targets an administrator-managed or remote server, provide instructions to that owner and leave local server settings unchanged."
+  ],
+  "caveats": [
+    {
+      "var": "OLLAMA_NO_CLOUD",
+      "value": "1",
+      "framing": "Optional feature restriction: OLLAMA_NO_CLOUD=1 disables Ollama cloud models and web search. Apply only with explicit agreement, in the actual server's environment, followed by its restart and cloud-disabled log verification. An export in an unrelated CLI-client shell does not change a running server.",
+      "auto_apply": false
+    }
+  ]
+}

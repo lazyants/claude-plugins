@@ -1,0 +1,71 @@
+{
+  "name": "linux-privacy",
+  "display": "Linux system privacy",
+  "detect_cmd": "uname",
+  "detect_paths": [],
+  "platforms": ["linux"],
+  "doc_urls": [
+    "https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-config",
+    "https://github.com/flatpak/flatpak/blob/main/doc/flatpak-config.xml",
+    "https://github.com/GNOME/gsettings-desktop-schemas/blob/master/schemas/org.gnome.desktop.privacy.gschema.xml.in",
+    "https://github.com/GNOME/gnome-control-center/blob/main/panels/privacy/diagnostics/cc-diagnostics-page.c",
+    "https://github.com/GNOME/gnome-control-center/blob/main/panels/privacy/diagnostics/cc-diagnostics-page.blp",
+    "https://develop.kde.org/docs/administration/kiosk/keys/",
+    "https://docs.kde.org/stable_kf6/en/dolphin/dolphin/configuring-dolphin.html",
+    "https://github.com/KDE/kuserfeedback/blob/master/src/provider/core/provider.cpp",
+    "https://popcon.debian.org/FAQ",
+    "https://popcon.debian.org/README"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [],
+  "cli_commands": [
+    {
+      "cmd": "command -v flatpak >/dev/null && flatpak config --user --get report-os-info >/dev/null && flatpak config --user --set report-os-info false",
+      "disables": "Flatpak OS name/version/architecture reporting in the Flatpak-Os-Info HTTP header for the per-user installation only. Run only if Flatpak is installed and its report-os-info key is supported. This does not disable usage/crash reporting inside applications, downloads, remote server logs or system-installation reporting."
+    }
+  ],
+  "manual_only_items": [
+    {
+      "name": "Flatpak system and additional installations",
+      "ui_path": "Terminal, only when Flatpak is installed and `flatpak config --system --get report-os-info` supports the key: after administrator approval, run `sudo flatpak config --system --set report-os-info false`; verify with `flatpak config --system --get report-os-info`. For each named installation in /etc/flatpak/installations.d, use `--installation=NAME` instead of `--system`. Verify the per-user installation separately with `flatpak config --user --get report-os-info`.",
+      "reason": "Configuration is per installation. The key is present in Flatpak 1.18.4 but absent in 1.16.1; capability-check the installed build rather than guessing from distro name. Old builds without this key do not implement this particular header control. Upstream also documents a no-report-os-info marker in FLATPAK_CONFIG_DIR; the skill does not create system files automatically."
+    },
+    {
+      "name": "Flatpak application usage and crash reports",
+      "ui_path": "For each installed Flatpak application that collects usage/crash reports, use that application's own Privacy, Diagnostics or Feedback settings; KDE applications may expose the KUserFeedback controls below. Record each app's actual setting separately.",
+      "reason": "Flatpak's documented report-os-info switch controls a download HTTP header, not a universal application telemetry/crash-reporting agent. Restricting app network permissions can break normal app features and is not applied as a telemetry opt-out. Do not report all Flatpak apps opted out after changing the header setting."
+    },
+    {
+      "name": "GNOME automatic problem reporting and software-usage statistics",
+      "ui_path": "On GNOME with an ABRT-backed reporting service, open Settings → Privacy & Security → Diagnostics and turn Automatic Problem Reporting OFF. If the panel is absent, inspect the distro's reporting agent instead. When the org.gnome.desktop.privacy schema exposes the corresponding keys, the documented settings are `gsettings set org.gnome.desktop.privacy report-technical-problems false` and `gsettings set org.gnome.desktop.privacy send-software-usage-stats false`; verify each with `gsettings get` in the same user's desktop session.",
+      "reason": "GNOME's Diagnostics panel watches org.freedesktop.problems.daemon and hides itself when that ABRT service is absent. These settings cover cooperating GNOME/distro integrations, not every crash reporter or package survey. Check schema/key availability first; do not invent a GNOME telemetry service or run these commands on KDE/headless systems."
+    },
+    {
+      "name": "KDE Plasma and application KUserFeedback",
+      "ui_path": "On KDE Plasma, search System Settings for User Feedback and choose the lowest sharing level. Also open each participating application's User Feedback settings (for example Dolphin → Configure Dolphin → User Feedback), set statistics to Don't share anything and surveys to Don't participate. For an administrator-managed KUserFeedback switch, merge `[UserFeedback]` / `Enabled=false` into /etc/xdg/KDE/UserFeedback.conf, preserving other groups and reviewing any per-user overrides, then restart the participating applications and inspect their feedback settings.",
+      "reason": "The official KDE Kiosk documentation describes this global KUserFeedback setting. It applies to clients of that framework, not unrelated KDE apps, distro reporters or all Linux telemetry. Per-application settings and Qt configuration precedence must be checked; the skill does not overwrite an administrator's INI file or remove packages."
+    },
+    {
+      "name": "Debian-family popularity-contest package survey",
+      "ui_path": "Only when popularity-contest is installed: after administrator approval, run `sudo dpkg-reconfigure popularity-contest` and answer No to participation. Verify `PARTICIPATE=\"no\"` in /etc/popularity-contest.conf and inspect /etc/popularity-contest.d/*.conf for overrides.",
+      "reason": "The Debian package configuration sets PARTICIPATE from the debconf answer; its scheduled reporter stops when the effective value is no. This is a package-usage survey, separate from GNOME/ABRT and KUserFeedback. Do not install it just to opt out, or generalize this setting to other distributions' agents."
+    }
+  ],
+  "persistent_files": [
+    { "path": "/etc/popularity-contest.conf", "note": "Debian-family package-survey participation setting; read only and preserve the host identifier." },
+    { "path": "/etc/popularity-contest.d", "note": "Additional survey settings can override participation. Report only; never delete or execute these files." },
+    { "path": "/etc/xdg/KDE/UserFeedback.conf", "note": "Administrator-managed KUserFeedback settings. Preserve existing INI groups." },
+    { "path": "~/.config/KDE/UserFeedback.conf", "note": "Default per-user Qt/KUserFeedback configuration location; honor XDG_CONFIG_HOME and inspect precedence before claiming the global switch is effective." },
+    { "path": "/etc/flatpak/no-report-os-info", "note": "Upstream-documented marker when FLATPAK_CONFIG_DIR uses the default system directory; report only." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(FLATPAK_|GNOME_|KDE_|TELEMETRY|FEEDBACK|REPORT|PRIVACY)",
+    "settings_regex": "(report-os-info|report-technical-problems|send-software-usage-stats|UserFeedback|Enabled|PARTICIPATE)"
+  },
+  "notes": [
+    "Inventory the installed desktop, distro and reporting components first. Linux has no universal telemetry opt-out, and no single agent exists on every distribution.",
+    "Skip the Flatpak cli_command when its availability/capability checks fail; report not applicable or unsupported rather than claiming an opt-out. Verify the actual per-user value is false after a successful change.",
+    "GNOME, KDE and popularity-contest instructions are component-specific manual items. Do not mark absent components opted out, change system settings without approval, uninstall reporting packages or delete existing crash/usage history."
+  ],
+  "caveats": []
+}

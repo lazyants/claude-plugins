@@ -3,19 +3,28 @@
   "display": "Visual Studio Code",
   "detect_cmd": "code",
   "detect_paths": [
-    "~/.vscode",
-    "~/Library/Application Support/Code",
-    "/Applications/Visual Studio Code.app"
+    "/Applications/Visual Studio Code.app",
+    "~/Applications/Visual Studio Code.app",
+    "/usr/bin/code",
+    "/snap/bin/code",
+    "%LOCALAPPDATA%/Programs/Microsoft VS Code/Code.exe",
+    "%ProgramFiles%/Microsoft VS Code/Code.exe"
   ],
-  "platforms": ["darwin"],
+  "platforms": ["darwin", "linux", "win32"],
   "doc_urls": [
     "https://github.com/microsoft/vscode-docs/blob/main/docs/configure/telemetry.md",
-    "https://code.visualstudio.com/docs/configure/telemetry"
+    "https://code.visualstudio.com/docs/configure/telemetry",
+    "https://code.visualstudio.com/docs/configure/settings"
   ],
   "settings_files": [
     {
-      "path": "~/Library/Application Support/Code/User/settings.json",
+      "paths": {
+        "darwin": "~/Library/Application Support/Code/User/settings.json",
+        "linux": "${XDG_CONFIG_HOME}/Code/User/settings.json",
+        "win32": "%APPDATA%/Code/User/settings.json"
+      },
       "format": "json",
+      "key_mode": "literal",
       "edits": [
         { "key": "telemetry.telemetryLevel", "value": "off", "disables": "All VS Code telemetry tiers (crash, error, usage). Supersedes deprecated telemetry.enableTelemetry / telemetry.enableCrashReporter — never write both." }
       ]
@@ -23,8 +32,22 @@
   ],
   "shell_env_vars": [],
   "persistent_files": [
-    { "path": "~/Library/Application Support/Code/User/globalStorage", "note": "Per-extension state; may include telemetry queues for third-party extensions." },
-    { "path": "~/Library/Application Support/Code/logs", "note": "Rotating IDE logs." }
+    {
+      "paths": {
+        "darwin": "~/Library/Application Support/Code/User/globalStorage",
+        "linux": "${XDG_CONFIG_HOME}/Code/User/globalStorage",
+        "win32": "%APPDATA%/Code/User/globalStorage"
+      },
+      "note": "Default-profile global state and extension storage under the supported user-data root. Named profiles and custom user-data roots require active-location inspection."
+    },
+    {
+      "paths": {
+        "darwin": "~/Library/Application Support/Code/logs",
+        "linux": "${XDG_CONFIG_HOME}/Code/logs",
+        "win32": "%APPDATA%/Code/logs"
+      },
+      "note": "Timestamped IDE logs under the supported user-data root. A custom logsPath or user-data root requires active-location inspection."
+    }
   ],
   "cli_flags": [
     { "flag": "--disable-telemetry", "note": "Diagnostic / per-invocation flag (e.g. `code tunnel --disable-telemetry`); not a persistent opt-out." }
@@ -34,11 +57,17 @@
     "settings_regex": "^telemetry\\."
   },
   "process_check": {
-    "cmd": "pgrep -i 'Visual Studio Code'",
+    "commands": {
+      "darwin": "pgrep -if '/Visual Studio Code[.]app/Contents/'",
+      "linux": "pgrep -ix code",
+      "win32": "powershell.exe -NoProfile -Command 'try { if (Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -eq \"Code\" }) { exit 0 }; exit 1 } catch { [Console]::Error.WriteLine($_); exit 2 }'"
+    },
     "if_running": "Quit VS Code before editing settings.json — graceful-shutdown rewrite can clobber manual edits."
   },
   "notes": [
-    "telemetry.telemetryLevel is the one canonical key — never double-write the deprecated enableTelemetry / enableCrashReporter alongside it."
+    "telemetry.telemetryLevel is the one canonical key — never double-write the deprecated enableTelemetry / enableCrashReporter alongside it.",
+    "Settings and persistent-file maps cover the supported platform roots; Linux uses XDG_CONFIG_HOME, defaulting to ~/.config when empty or unset. VSCODE_APPDATA, portable mode and --user-data-dir can redirect the active root, and logsPath can redirect logs. Resolve those locations before applying settings or claiming retained-state coverage. Existing named profiles can override settings and store their own global state; inspect them before claiming all-profile coverage.",
+    "Microsoft's NativeEnvironmentService resolves the platform root with getUserDataPath. AbstractNativeEnvironmentService joins that root with User/globalStorage for default-profile state and logs/<timestamp> for logs: https://github.com/microsoft/vscode/blob/main/src/vs/platform/environment/common/environmentService.ts. Platform roots and supported overrides: https://github.com/microsoft/vscode/blob/main/src/vs/platform/environment/node/userDataPath.ts."
   ],
   "caveats": [
     {

@@ -2,7 +2,7 @@
   "name": "copilot",
   "display": "GitHub CLI + Copilot CLI",
   "detect_cmd": "gh",
-  "detect_paths": ["~/.config/github-copilot", "~/.config/gh"],
+  "detect_paths": [],
   "doc_urls": [
     "https://docs.github.com/en/copilot/responsible-use/copilot-cli",
     "https://cli.github.com/manual/gh_config"
