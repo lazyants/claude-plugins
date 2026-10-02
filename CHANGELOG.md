@@ -14,7 +14,8 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   invocation, completes it before dispatching destructive prerequisites (also
   in Rake's concurrent `--multitask` mode), and retains it when task
   definitions load later. It boots the environment before checking the test
-  exemption or exact `ALLOW_DESTRUCTIVE=true` override. A real-Rake regression
+  exemption or exact `ALLOW_DESTRUCTIVE=true` override on every execution,
+  including after a single-task re-enable. A real-Rake regression
   suite covers all eight guarded tasks, both definition orders, exemptions,
   destructive prerequisites and safe commands; CI runs it alongside the hook suite.
 

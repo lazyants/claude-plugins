@@ -51,7 +51,9 @@ its other prerequisites, including in Rake's `--multitask` mode. It
 defines placeholders for tasks loaded later, so either definition order works.
 The guard boots `environment` and checks `Rails.env` at invocation time,
 allowing only the `test` environment or the exact override
-`ALLOW_DESTRUCTIVE=true`. Test isolation is built in via the `test` environment
+`ALLOW_DESTRUCTIVE=true`. Environment boot is cached by Rake; the safety check
+itself runs on every destructive-task execution, including after re-enabling
+just that task. Test isolation is built in via the `test` environment
 in `config/database.yml`.
 
 ## Symfony — `assets/symfony-DestructiveCommandGuard.php`

@@ -57,8 +57,13 @@ class RailsDbGuardrailsTest < Minitest::Test
     load asset if scenario == "reload"
     if scenario == "runtime_change"
       Rake::Task[requested].invoke
-      Rake::Task.tasks.each(&:reenable)
+      Rake::Task[requested].reenable
       ENV["GUARD_TEST_ENV"] = "development"
+      ENV.delete("ALLOW_DESTRUCTIVE")
+      puts "SECOND INVOCATION"
+    end
+    if scenario == "different_task"
+      Rake::Task["db:drop"].invoke
       ENV.delete("ALLOW_DESTRUCTIVE")
       puts "SECOND INVOCATION"
     end
@@ -130,7 +135,17 @@ class RailsDbGuardrailsTest < Minitest::Test
       assert_includes stdout, "DESTRUCTIVE ACTION db:drop"
       assert_includes stderr, "BLOCKED by db-guardrails"
       refute_includes stdout.split("SECOND INVOCATION").last, "DESTRUCTIVE"
+      assert_equal 1, stdout.scan("ENVIRONMENT BOOTED").length
     end
+  end
+
+  def test_override_does_not_carry_over_to_another_task
+    stdout, stderr, status = invoke("db:purge", override: "true", scenario: "different_task")
+    refute status.success?, stdout + stderr
+    assert_includes stdout, "DESTRUCTIVE ACTION db:drop"
+    assert_includes stderr, "BLOCKED by db-guardrails"
+    refute_includes stdout.split("SECOND INVOCATION").last, "DESTRUCTIVE"
+    assert_equal 1, stdout.scan("ENVIRONMENT BOOTED").length
   end
 
   def test_reloading_asset_keeps_guard_active
