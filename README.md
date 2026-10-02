@@ -9,7 +9,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | [`ai-cli-optout`](#ai-cli-optout--v120) | 1.2.0 | Privacy opt-outs for AI CLIs and IDEs, Vercel CLI and its Claude Code plugin, plus macOS / Windows / Linux controls. |
 | [`db-guardrails`](#db-guardrails--v110) | 1.1.0 | Stop AI coding agents from accidentally emptying your database — an always-on hook across 15+ frameworks, with privilege separation for MySQL/MariaDB, PostgreSQL and SQL Server. |
 | [`obsidian-project-vault`](#obsidian-project-vault--v110) | 1.1.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
-| [`cc-usage-coach`](#cc-usage-coach--v101) | 1.0.1 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
+| [`cc-usage-coach`](#cc-usage-coach--v110) | 1.1.0 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
 | [`enduser-handbook`](#enduser-handbook--v1183) | 1.18.3 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
 | [`literary-translator`](#literary-translator--v12221) | 1.222.1 | High-fidelity literary book translation over a Gutenberg-style EPUB source (expert-mode `custom` extractor also supported) — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability, plus optional book assembly into an Obsidian glossary-wiki behind a deterministic render/diff gate. |
 | [`multi-profile-plugins`](#multi-profile-plugins--v140) | 1.4.0 | Understand and diagnose config-profile isolation across multiple Claude Code `CLAUDE_CONFIG_DIR` profiles or Codex `CODEX_HOME` profiles — why profiles that share a plugins store hit recurring "corrupted installLocation" errors and cross-profile plugin deletion, and why a Codex profile seeded by copying `config.toml` keeps reading the home it came from. A read-only health-check script for each, plus a usage-limit report across every profile and home. |
@@ -113,7 +113,7 @@ Trigger phrases: "set up obsidian", "migrate vault", "audit vault", "wiki-lint",
 - **Ongoing operations** — ingest Markdown, PDFs, data files, and transcripts with adjacent source-state sidecars and legacy Markdown state support; query the vault and file findings back; lint Markdown links, wikilinks, connectivity, schema, freshness, and duplicate candidates; merge confirmed duplicate pages while preserving content, citations, and inbound links.
 - **Git + `.obsidian/`** — `.gitignore` patterns, vault MCP config, sane defaults for human-side workflow (Web Clipper, Dataview, graph view).
 
-## `cc-usage-coach` — v1.0.1
+## `cc-usage-coach` — v1.1.0
 
 Personalized, behavior-aware analysis of where your Claude Code (Max / Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your **local** session logs. Python measures; Claude concludes.
 
@@ -122,12 +122,13 @@ Trigger phrases: "where do my tokens go", "why am I hitting the usage limit", "u
 ### What it does
 
 - **Builds a path-free signal pack.** A skill reads your local session logs and runs `scripts/extract.py` (logs → local `dataset/`) then `scripts/signals.py` (dataset → `signal_pack.json` + a local-only `source_index.json`). The signal pack is an aggregate of your token shapes, cache patterns, tool mix, and session lengths — no paths, no prompt text.
+- **Compares like sessions and reports observed errors.** Candidate baselines and percentile factors distinguish real sessions, subagents, and workflow logs. Error counts and rates describe retained dataset sessions; they do not estimate retry token cost. Custom tool names appear as opaque IDs, with local name resolution for your report.
 - **Writes a personalized report.** The Claude runtime reads `signal_pack.json` and produces a plain-language breakdown of where your limit tokens go plus a ranked list of low-effort levers tailored to how you actually work — not generic advice.
 - **Per-session arc.** `scripts/arc.py <source_ref>` inspects a single session's prompt arc (referenced by an opaque `source_ref`) so you can see how one conversation consumed budget over time. Local-only.
 
 ### Privacy
 
-The **scripts** are local-first: they read local logs only and make no network calls of their own. `signal_pack.json` is path-free and safe to share; `source_index.json`, `project_index.json`, the `dataset/`, and the `arc.py` digest are local-only — they hold real paths, project names, and prompt text, are written `0600` where applicable, and must never be uploaded. Sessions are referred to only by an opaque `source_ref`. The **report**, though, is written by the Claude Code model: the skill sends it the signal pack and (for sessions inspected via `arc.py` in step 4) raw prompt excerpts as prompt context — so on Max/Pro that data goes to Anthropic's API like any Claude Code conversation. Those excerpts are never added to the shareable pack, but the report step is not "nothing leaves your machine."
+The **scripts** are local-first: they read local logs only and make no network calls of their own. `signal_pack.json` is path-free and safe to share; `source_index.json`, `project_index.json`, `tool_index.json`, the `dataset/`, and the `arc.py` digest are local-only — they hold real paths, project/tool names, and prompt text, are written `0600` where applicable, and must never be uploaded. Sessions are referred to only by an opaque `source_ref`, and custom tool names only by opaque IDs. The **report**, though, is written by the Claude Code model: the skill sends it the signal pack and (for sessions inspected via `arc.py` in step 4) raw prompt excerpts as prompt context — so on Max/Pro that data goes to Anthropic's API like any Claude Code conversation. Those excerpts are never added to the shareable pack, but the report step is not "nothing leaves your machine."
 
 ### Environment variables
 

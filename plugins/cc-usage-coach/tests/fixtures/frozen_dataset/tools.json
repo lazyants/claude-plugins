@@ -26,6 +26,11 @@
       "chars": 400000,
       "est_tokens": 100000,
       "count": 40
+    },
+    "mcp__synthetic-client__project-c_lookup": {
+      "chars": 320000,
+      "est_tokens": 80000,
+      "count": 20
     }
   }
 }
