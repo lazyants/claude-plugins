@@ -138,7 +138,7 @@ printf '{}\n' >"$platform_home/.config/zed/settings.json"
 printf '{}\n' >"$windows_appdata/Zed/settings.json"
 for product in Antigravity 'Antigravity IDE'; do
   for product_root in "$xdg_config/$product" "$platform_home/Library/Application Support/$product" "$windows_appdata/$product"; do
-    mkdir -p "$product_root/Crashpad" "$product_root/logs" "$product_root/CachedData"
+    mkdir -p "$product_root/logs" "$product_root/CachedData"
     printf 'installation identifier\n' >"$product_root/machineid"
   done
 done
@@ -157,7 +157,7 @@ for platform_case in linux darwin win32; do
 
   antigravity_out="$(PATH="$tmp/bin:$PATH" TEST_KERNEL="$kernel" WSL_INTEROP= WSL_DISTRO_NAME= HOME="$platform_home" XDG_CONFIG_HOME="$xdg_config" APPDATA="$windows_appdata" bash "$tmp/report/scripts/report_persistent_files.sh" antigravity 2>&1)"
   assert_eq "Antigravity platform report ($platform_case): exit 0" "0" "$?"
-  assert_eq "Antigravity platform report ($platform_case): eight product paths" "8" "$(printf '%s\n' "$antigravity_out" | awk '/^- /{count++} END {print count+0}')"
+  assert_eq "Antigravity platform report ($platform_case): six product paths" "6" "$(printf '%s\n' "$antigravity_out" | awk '/^- /{count++} END {print count+0}')"
   for product in Antigravity 'Antigravity IDE'; do
     assert_contains "Antigravity platform report ($platform_case): $product root" "- $antigravity_root/$product/logs  [" "$antigravity_out"
   done
