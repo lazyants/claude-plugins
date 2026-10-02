@@ -25,6 +25,20 @@
 \set ON_ERROR_STOP on
 \set ECHO none
 \set ECHO_HIDDEN off
+-- PostgreSQL identifiers resolve to the server's name type, which truncates
+-- to its compiled identifier limit. Compare that canonical form before any
+-- CREATE/ALTER or ownership change: two different long inputs may name one
+-- role. App and migrator must remain distinct, nonempty identities.
+SELECT :'app_user' <> '' AND :'migrator_user' <> ''
+       AND :'app_user'::name <> :'migrator_user'::name AS distinct_role_names
+\gset
+\if :distinct_role_names
+\else
+DO $$ BEGIN
+  RAISE EXCEPTION 'app_user and migrator_user must resolve to distinct, nonempty PostgreSQL role names';
+END $$;
+\endif
+
 -- Initialize explicitly: \getenv leaves a variable unchanged if the env
 -- key is missing. Never accept an old -v migrator_pw as a secret fallback.
 \set migrator_pw ''

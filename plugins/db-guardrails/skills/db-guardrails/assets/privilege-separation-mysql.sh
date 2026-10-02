@@ -173,7 +173,7 @@ SQL
 # Fail closed on output we cannot establish as safe, including role/proxy
 # assignments, partial revokes, dynamic privileges and WITH GRANT OPTION.
 # Never print raw grant rows: MariaDB may include authentication hashes.
-if ! printf '%s\n' "$app_grants" | awk '
+if ! printf '%s\n' "$app_grants" | awk -v database="$MYSQL_DATABASE" '
   BEGIN {
     split("SELECT|INSERT|UPDATE|DELETE|EXECUTE|CREATE|ALTER|INDEX|REFERENCES|LOCK TABLES|CREATE TEMPORARY TABLES", names, "|")
     for (i in names) allowed[names[i]] = 1
@@ -184,11 +184,19 @@ if ! printf '%s\n' "$app_grants" | awk '
     privileges = row
     sub(/^GRANT /, "", privileges)
     sub(/ ON .*/, "", privileges)
-    scope = row
+    # Database identifiers may be case-sensitive. Preserve the actual scope
+    # instead of comparing the uppercased privilege/keyword copy.
+    scope = $0
     sub(/^.* ON /, "", scope)
     sub(/ TO .*/, "", scope)
     if (scope == "*.*") {
       if (privileges != "USAGE") bad = 1
+      next
+    }
+    prefix = "`" database "`."
+    object = substr(scope, length(prefix) + 1)
+    if (index(scope, prefix) != 1 || (object != "*" && object !~ /^`([^`]|``)+`$/)) {
+      bad = 1
       next
     }
     count = split(privileges, parts, /, */)
@@ -197,7 +205,7 @@ if ! printf '%s\n' "$app_grants" | awk '
   }
   END { exit bad || !seen }
 '; then
-  echo "[db-guardrails] verification failed: app account has global, inherited, proxy, grant-option or unrecognized privileges." >&2
+  echo "[db-guardrails] verification failed: app account has global, inherited, proxy, grant-option, outside-database or unrecognized privileges." >&2
   echo "[db-guardrails] inspect SHOW GRANTS locally, revoke the extra grants, and re-run; no safe-separation success is claimed." >&2
   exit 1
 fi

@@ -213,6 +213,9 @@ class CredentialAssetsTest(unittest.TestCase):
             "GRANT SELECT, DROP ON *.* TO `app`@`%`",
             "GRANT SELECT ON *.* TO `app`@`%`",
             "GRANT DROP ON `other`.* TO `app`@`%`",
+            "GRANT ALTER ON `otherdb`.* TO `app`@`%`",
+            "GRANT SELECT ON `otherdb`.`users` TO `app`@`%`",
+            "GRANT SELECT ON `APPDB`.* TO `app`@`%`",
             "GRANT ALL PRIVILEGES ON `appdb`.* TO `app`@`%`",
             "GRANT SELECT ON `appdb`.* TO `app`@`%` WITH GRANT OPTION",
             "GRANT `dangerous_role`@`%` TO `app`@`%`",
@@ -228,6 +231,12 @@ class CredentialAssetsTest(unittest.TestCase):
                 self.assertIn("verification failed", result.stderr)
                 self.assertNotIn("applied:", result.stdout)
                 self.assertNotIn(extra, result.stderr)
+
+    def test_mysql_allows_safe_object_grants_only_in_configured_database(self):
+        extra = "GRANT SELECT ON `appdb`.`users` TO `app`@`%`\n"
+        result = self.mysql(GUARD_APP_GRANTS=SAFE_GRANTS + extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("applied:", result.stdout)
 
     def test_mysql_empty_grants_fail_closed(self):
         for grants in ("", "GRANT USAGE ON *.* TO `app`@`%`\n"):
@@ -290,6 +299,8 @@ class CredentialAssetsTest(unittest.TestCase):
         self.assertLess(sql.index("\\set migrator_pw ''"), sql.index("\\getenv migrator_pw"))
         self.assertIn("MIGRATOR_PASSWORD must be set to a nonempty value", sql)
         self.assertIn("\\unset migrator_pw", sql)
+        self.assertIn(":'app_user'::name <> :'migrator_user'::name", sql)
+        self.assertLess(sql.index("AS distinct_role_names"), sql.index("SELECT format('CREATE ROLE"))
 
     def test_postgres_invocation_process_has_no_secret_on_argv(self):
         client = self.bin / "psql"
@@ -356,7 +367,7 @@ class MySQLLiveTest(unittest.TestCase):
 
     def cleanup_database(self):
         self.admin(f"DROP DATABASE IF EXISTS `{self.identifier}`; DROP USER IF EXISTS '{self.app}'@'%'; "
-                   f"DROP USER IF EXISTS '{self.migrator}'@'%';", check=False)
+                   f"DROP USER IF EXISTS '{self.migrator}'@'%'; DROP DATABASE IF EXISTS `{self.identifier}other`;", check=False)
 
     def provision(self, password):
         env = sanitized_env() | {"PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
@@ -391,6 +402,22 @@ class MySQLLiveTest(unittest.TestCase):
         self.assertIn("verification failed", result.stderr)
         self.assertNotIn("applied:", result.stdout)
 
+    def test_outside_database_grants_refuse_success(self):
+        other = self.identifier + "other"
+        self.admin(f"CREATE DATABASE `{other}`; CREATE TABLE `{other}`.outside_data (id INT); "
+                   f"CREATE TABLE `{self.identifier}`.inside_data (id INT);")
+        for privileges, scope in [("ALTER", f"`{other}`.*"), ("SELECT", f"`{other}`.`outside_data`")]:
+            with self.subTest(scope=scope):
+                self.admin(f"GRANT {privileges} ON {scope} TO '{self.app}'@'%';")
+                result = self.provision("migrator-password")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("verification failed", result.stderr)
+                self.assertNotIn("applied:", result.stdout)
+                self.admin(f"REVOKE {privileges} ON {scope} FROM '{self.app}'@'%';")
+        self.admin(f"GRANT SELECT ON `{self.identifier}`.`inside_data` TO '{self.app}'@'%';")
+        result = self.provision("migrator-password")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 @unittest.skipUnless(os.environ.get("DB_GUARDRAILS_LIVE_POSTGRES") == "1", "live PostgreSQL is CI-only")
 class PostgresLiveTest(unittest.TestCase):
@@ -401,6 +428,7 @@ class PostgresLiveTest(unittest.TestCase):
         self.identifier = "guard" + uuid.uuid4().hex[:12]
         self.app = self.identifier + "app"
         self.migrator = self.identifier + "m"
+        self.extra_roles = []
         self.addCleanup(self.cleanup_database)
         self.admin(f"CREATE ROLE {self.app} LOGIN PASSWORD 'app-password'; CREATE DATABASE {self.identifier};")
         self.admin(f"CREATE TABLE keep_data (id INT); INSERT INTO keep_data VALUES (1); ALTER TABLE keep_data OWNER TO {self.app};", database=self.identifier)
@@ -412,15 +440,17 @@ class PostgresLiveTest(unittest.TestCase):
         return result
 
     def cleanup_database(self):
-        self.admin(f"DROP DATABASE IF EXISTS {self.identifier}; DROP ROLE IF EXISTS {self.app}; DROP ROLE IF EXISTS {self.migrator};", check=False)
+        extra = " ".join("DROP ROLE IF EXISTS " + role + ";" for role in self.extra_roles)
+        self.admin(f"DROP DATABASE IF EXISTS {self.identifier}; DROP ROLE IF EXISTS {self.app}; DROP ROLE IF EXISTS {self.migrator}; " + extra, check=False)
 
-    def provision(self, password, *extra):
+    def provision(self, password, *extra, app_user=None, migrator_user=None):
         env = self.env.copy()
         env.pop("MIGRATOR_PASSWORD", None)
         if password is not None:
             env["MIGRATOR_PASSWORD"] = password
         args = [self.client, "-X", *extra, "-d", self.identifier,
-                "-v", "app_user=" + self.app, "-v", "migrator_user=" + self.migrator,
+                "-v", "app_user=" + (self.app if app_user is None else app_user),
+                "-v", "migrator_user=" + (self.migrator if migrator_user is None else migrator_user),
                 "-f", str(POSTGRES)]
         if password:
             self.assertNotIn(password, " ".join(args))
@@ -436,6 +466,28 @@ class PostgresLiveTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("MIGRATOR_PASSWORD must be set", result.stderr)
             self.assertEqual(self.admin(f"SELECT count(*) FROM pg_roles WHERE rolname='{self.migrator}'").stdout.strip(), "0")
+
+    def test_equal_and_truncated_role_names_leave_password_and_ownership_unchanged(self):
+        canonical = ("alias" + self.identifier + "x" * 63)[:63]
+        self.extra_roles.append(canonical)
+        self.admin(f"CREATE ROLE {canonical} LOGIN PASSWORD 'app-password';")
+        self.admin(f"CREATE TABLE alias_data (id INT); ALTER TABLE alias_data OWNER TO {canonical};", database=self.identifier)
+        schema_owner = self.admin("SELECT nspowner::regrole FROM pg_namespace WHERE nspname='public'", database=self.identifier).stdout.strip()
+        cases = [(self.app, self.app, self.app, "keep_data"),
+                 (canonical + "app", canonical + "migrator", canonical, "alias_data")]
+        for app_input, migrator_input, actual_role, table in cases:
+            with self.subTest(app=app_input, migrator=migrator_input):
+                result = self.provision("collision-new-password", app_user=app_input, migrator_user=migrator_input)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("must resolve to distinct", result.stderr)
+                self.assertNotIn("collision-new-password", result.stdout + result.stderr)
+                self.assertEqual(self.as_user(actual_role, "app-password", "SELECT 1").returncode, 0)
+                self.assertNotEqual(self.as_user(actual_role, "collision-new-password", "SELECT 1").returncode, 0)
+                owner = self.admin(f"SELECT tableowner FROM pg_tables WHERE schemaname='public' AND tablename='{table}'", database=self.identifier)
+                self.assertEqual(owner.stdout.strip(), actual_role)
+                current_schema_owner = self.admin("SELECT nspowner::regrole FROM pg_namespace WHERE nspname='public'", database=self.identifier)
+                self.assertEqual(current_schema_owner.stdout.strip(), schema_owner)
+        self.assertEqual(self.admin(f"SELECT count(*) FROM pg_roles WHERE rolname='{self.migrator}'").stdout.strip(), "0")
 
     def test_env_secret_roundtrip_echo_suppression_and_schema_protection(self):
         password = "pg\\'\" secret; $ literal"
