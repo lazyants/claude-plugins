@@ -534,6 +534,12 @@ def _fetch_retry_ladder_span():
 
 
 FIGURES = [
+    # ROTATED TO 1.222.1 (#956). The wait values are tree-owned figures;
+    # HTTP status codes, issue/version numbers and the date are identifiers.
+    Figure("15-second", 15, lambda: _fetch_retry_delay(0)),
+    Figure("60-second", 60, lambda: _fetch_retry_delay(1)),
+    #
+    # The 1.222.0 record this replaces, kept as its own:
     # ROTATED TO 1.222.0 (#962). The newest entry's digit runs are only
     # identifiers: its version, date and issue number. It declares no numeric
     # measurement re-derivable from this tree, so the live row list is empty.
@@ -1860,7 +1866,7 @@ FIGURES = [
 # the second test iterate zero times, which prints exactly what a passing one
 # prints -- so the rotation itself is what gets asserted, and a release that
 # forgets to rotate goes RED instead of silently checking nothing.
-FIGURES_VERSION = "1.222.0"
+FIGURES_VERSION = "1.222.1"
 
 
 def _newest_entry():

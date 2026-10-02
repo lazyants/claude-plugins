@@ -30,10 +30,13 @@ No network, no subprocess, no real sleep: `run_fetch`, `read_pairs` and
 """
 
 import importlib.util
+import json
 import shutil
 import socket
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,7 +47,7 @@ JSON_STDOUT = DRIVER.parent / "json_stdout.py"
 
 
 @pytest.fixture
-def mod(tmp_path):
+def mod(tmp_path, monkeypatch):
     scripts = tmp_path / "durable" / "scripts"
     scripts.mkdir(parents=True)
     target = scripts / "glossary_dispatch_driver.py"
@@ -55,7 +58,10 @@ def mod(tmp_path):
     shutil.copy2(JSON_STDOUT, target.parent / "json_stdout.py")
     spec = importlib.util.spec_from_file_location("gdd_transient_retry", target)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Bind the injected preparation path's default sleep without a wall clock.
+    with monkeypatch.context() as patch:
+        patch.setattr(time, "sleep", lambda delay: None)
+        spec.loader.exec_module(module)
     return module
 
 
@@ -84,6 +90,219 @@ def _fake_sleep(record):
     def sleep(delay):
         record.append(delay)
     return sleep
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_known_successful_host_retries_http_refusal_without_a_rung(mod, status):
+    rows = [{"basis": "established", "source": "https://reference.example/name"}]
+    run_fetch, read_pairs, calls = _scripted([
+        [{"item_index": 0, "outcome": f"http_error:{status}"}],
+        [{"item_index": 0, "outcome": "fetched"}],
+    ])
+    delays = []
+    result = mod.fetch_until_stable(
+        run_fetch, read_pairs, lambda: {0}, load_rows=lambda: rows,
+        successful_hosts={"reference.example"}, sleep=_fake_sleep(delays))
+    assert calls["run_fetch"] == 2
+    assert delays == [15.0]
+    assert result["classified"] == {"budget_failed": [], "repairable": []}
+    assert result["host_successes"] == ["reference.example"]
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_success_observed_in_this_pass_qualifies_a_sibling_refusal(mod, status):
+    rows = [{"basis": "established", "source": f"https://reference.example/{i}"}
+            for i in range(2)]
+    run_fetch, read_pairs, calls = _scripted([
+        [{"item_index": 0, "outcome": "fetched"},
+         {"item_index": 1, "outcome": f"http_error:{status}"}],
+        [{"item_index": 0, "outcome": "fetched"},
+         {"item_index": 1, "outcome": "fetched"}],
+    ])
+    result = mod.fetch_until_stable(
+        run_fetch, read_pairs, lambda: {0, 1}, load_rows=lambda: rows,
+        sleep=_fake_sleep([]))
+    assert calls["run_fetch"] == 2
+    assert result["classified"]["repairable"] == []
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_a_success_from_an_earlier_fetch_pass_is_remembered(mod, status):
+    rows = [{"basis": "established", "source": "https://reference.example/0"},
+            {"basis": "established", "source": "https://other.example/1"}]
+    run_fetch, read_pairs, calls = _scripted([
+        [{"item_index": 0, "outcome": "fetched"},
+         {"item_index": 1, "outcome": "refused:read-timeout"}],
+        [{"item_index": 0, "outcome": f"http_error:{status}"},
+         {"item_index": 1, "outcome": "fetched"}],
+        [{"item_index": 0, "outcome": "fetched"},
+         {"item_index": 1, "outcome": "fetched"}],
+    ])
+    delays = []
+    result = mod.fetch_until_stable(
+        run_fetch, read_pairs, lambda: {0, 1}, load_rows=lambda: rows,
+        sleep=_fake_sleep(delays))
+    assert calls["run_fetch"] == 3
+    assert delays == [15.0, 60.0]
+    assert result["classified"]["repairable"] == []
+
+
+def test_non_established_success_does_not_qualify_a_refusal(mod):
+    rows = [{"basis": "attested", "source": "https://reference.example/0"},
+            {"basis": "established", "source": "https://reference.example/1"}]
+    run_fetch, read_pairs, calls = _scripted([
+        [{"item_index": 0, "outcome": "fetched"},
+         {"item_index": 1, "outcome": "http_error:403"}],
+    ])
+    result = mod.fetch_until_stable(
+        run_fetch, read_pairs, lambda: {1}, load_rows=lambda: rows,
+        sleep=_fake_sleep([]))
+    assert calls["run_fetch"] == 1
+    assert result["host_successes"] == []
+    assert result["classified"]["repairable"] == [1]
+
+
+@pytest.mark.parametrize("status", [403, 429])
+@pytest.mark.parametrize("history", [set(), {"other.example"}])
+def test_host_without_its_own_success_still_repairs(mod, status, history):
+    rows = [{"basis": "established", "source": "https://reference.example/name"}]
+    run_fetch, read_pairs, calls = _scripted([
+        [{"item_index": 0, "outcome": f"http_error:{status}"}],
+    ])
+    result = mod.fetch_until_stable(
+        run_fetch, read_pairs, lambda: {0}, load_rows=lambda: rows,
+        successful_hosts=history, sleep=_fake_sleep([]))
+    assert calls["run_fetch"] == 1
+    assert result["classified"]["repairable"] == [0]
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_persistent_known_host_refusal_exhausts_only_the_fetch_ladder(mod, status):
+    rows = [{"basis": "established", "source": "https://reference.example/name"}]
+    pairs = [{"item_index": 0, "outcome": f"http_error:{status}"}]
+    run_fetch, read_pairs, calls = _scripted([pairs, pairs, pairs])
+    delays = []
+    result = mod.fetch_until_stable(
+        run_fetch, read_pairs, lambda: {0}, load_rows=lambda: rows,
+        successful_hosts={"reference.example"}, sleep=_fake_sleep(delays))
+    assert calls["run_fetch"] == 3
+    assert delays == [15.0, 60.0]
+    assert result["classified"]["repairable"] == [0]
+
+
+@pytest.mark.parametrize("outcome", [
+    "http_error:404", "http_error:503", "http_error:4030", "http_error:429x",
+    "refused:content-type-not-allowed", "unusable:duplicate-body",
+    "refused:batch-deadline", "refused:batch-byte-budget",
+])
+def test_success_history_does_not_widen_other_retry_outcomes(mod, outcome):
+    rows = [{"basis": "established", "source": "https://reference.example/name"}]
+    run_fetch, read_pairs, calls = _scripted([[{"item_index": 0, "outcome": outcome}]])
+    result = mod.fetch_until_stable(
+        run_fetch, read_pairs, lambda: {0}, load_rows=lambda: rows,
+        successful_hosts={"reference.example"}, sleep=_fake_sleep([]))
+    assert calls["run_fetch"] == 1
+    key = "budget_failed" if outcome in mod._SHARED_BUDGET_OUTCOMES else "repairable"
+    assert result["classified"][key] == [0]
+
+
+@pytest.mark.parametrize("source,host", [
+    ("https://REFERENCE.example./name", "reference.example"),
+    ("https://bücher.de/name", "xn--bcher-kva.de"),
+    ("https://[2606:4700:4700::1111]/name", "2606:4700:4700::1111"),
+])
+def test_success_history_uses_the_existing_host_normalization(mod, source, host):
+    run_fetch, read_pairs, _ = _scripted([[{"item_index": 0, "outcome": "fetched"}]])
+    result = mod.fetch_until_stable(
+        run_fetch, read_pairs, lambda: {0}, sleep=_fake_sleep([]),
+        load_rows=lambda: [{"basis": "established", "source": source}])
+    assert result["host_successes"] == [host]
+    assert mod.sanitize_host_successes(result["host_successes"]) == {host}
+
+
+@pytest.mark.parametrize("value", [None, {}, "reference.example", 1, True])
+def test_missing_or_malformed_success_history_is_empty(mod, value):
+    assert mod.sanitize_host_successes(value) == set()
+
+
+def test_success_history_drops_malformed_members_and_preserves_valid_hosts(mod):
+    assert mod.sanitize_host_successes([
+        "reference.example", None, [], {}, True, "REFERENCE.example", "a..b",
+        "https://reference.example/name", "reference.example\n", "reference.example",
+    ]) == {"reference.example"}
+
+
+def test_success_survives_a_later_fetch_command_failure(mod):
+    calls = []
+
+    def run_fetch():
+        calls.append(1)
+        return len(calls) == 1
+
+    rows = [{"basis": "established", "source": f"https://reference.example/{i}"}
+            for i in range(2)]
+    result = mod.fetch_until_stable(
+        run_fetch, lambda: [{"item_index": 0, "outcome": "fetched"},
+                           {"item_index": 1, "outcome": "refused:read-timeout"}],
+        lambda: {0, 1}, load_rows=lambda: rows, sleep=_fake_sleep([]))
+    assert result["ok"] is False
+    assert result["passes"] == 2
+    assert result["host_successes"] == ["reference.example"]
+
+
+@pytest.mark.parametrize("status", [403, 429])
+@pytest.mark.parametrize("prior_host", ["reference.example", "other.example"])
+def test_prepare_resumed_batch_routes_by_prior_host_success(
+        mod, tmp_path, monkeypatch, status, prior_host):
+    """Real preparation, fetch loop and state persistence; only commands are faked."""
+    durable = tmp_path / "durable"
+    verdict_dir = tmp_path / "verdict"
+    verdict_dir.mkdir()
+    for idx in (0, 1):
+        (tmp_path / f"approved-{idx}.json").write_text(json.dumps([
+            {"source_form": "Name", "basis": "established", "disposition": "accepted",
+             "source": f"https://{prior_host if idx == 0 else 'reference.example'}/{idx}"},
+        ]), encoding="utf-8")
+    scripted = {0: ["fetched"], 1: [f"http_error:{status}", "fetched"]}
+    fetch_calls = []
+
+    def build(calls):
+        idx = calls[0]["args"][0]
+        return {"approve": f"approve:{idx}", "approved": str(tmp_path / f"approved-{idx}.json"),
+                "fetch": f"fetch:{idx}", "index": str(tmp_path / f"index-{idx}.json"),
+                "judge": "judge-prompt"}
+
+    def run_command(cmd, *, timeout):
+        kind, idx = cmd.split(":")
+        idx = int(idx)
+        if kind == "fetch":
+            fetch_calls.append(cmd)
+            outcome = scripted[idx].pop(0)
+            (tmp_path / f"index-{idx}.json").write_text(json.dumps({"entries": [
+                {"item_index": 0, "outcome": outcome},
+            ]}), encoding="utf-8")
+        return 0, "", ""
+
+    monkeypatch.setattr(mod, "run_template_cmd", run_command)
+    ctx = SimpleNamespace(build=build, durable_root=durable, subst={"run_id": "runX"})
+    state = mod.fresh_state(durable, "runX")
+    first = mod.prepare_and_hand_back(ctx, {"index": 0}, 0, tmp_path / "fragment0.json", state)
+    assert first["state"] == "awaiting_judge"
+    mod.save_state(verdict_dir, state)
+    resumed = mod.load_state(verdict_dir, durable, "runX")
+    assert resumed["hostSuccesses"] == [prior_host]
+    result = mod.prepare_and_hand_back(ctx, {"index": 1}, 2, tmp_path / "fragment1.json", resumed)
+    assert result["attempt"] == 2
+    if prior_host == "reference.example":
+        assert fetch_calls == ["fetch:0", "fetch:1", "fetch:1"]
+        assert result["state"] == "awaiting_judge"
+        assert result["pending"]["attempt"] == 2
+    else:
+        assert fetch_calls == ["fetch:0", "fetch:1"]
+        assert result["state"] == "needs_repair"
+        assert result["failedPositions"] == [0]
+    assert resumed["hostRefusals"] == {"reference.example": {str(status): 1}}
+    assert "hostSuccesses" not in mod.load_state(verdict_dir, durable, "otherRun")
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +483,7 @@ def test_a_failed_fetch_command_short_circuits(mod):
     # `host_refusals` joined it for #919 -- the tally EARLIER passes
     # already produced survives a later pass's command failure, and on this
     # first-pass failure there is nothing to carry, so it is empty.
-    assert result == {"ok": False, "passes": 1, "host_refusals": {}}
+    assert result == {"ok": False, "passes": 1, "host_refusals": {}, "host_successes": []}
     assert calls["run_fetch"] == 1
     assert calls["read_pairs"] == 0
 
