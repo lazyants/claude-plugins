@@ -37,7 +37,7 @@
       "name": "db-guardrails",
       "source": "./plugins/db-guardrails",
       "description": "Stop AI coding agents from accidentally emptying your database. An always-on hook blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for database-level privilege separation and framework boot guards.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": {
         "name": "Lazy Ants"
       },

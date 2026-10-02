@@ -39,3 +39,26 @@ jobs:
       - name: tests/block-destructive-db.test.sh
         working-directory: plugins/db-guardrails
         run: bash tests/block-destructive-db.test.sh
+
+  rails-tasks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        rake: ['12.3.3', '13.4.2']
+    env:
+      GUARD_TEST_RAKE_VERSION: ${{ matrix.rake }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          ruby -v
+          gem install --user-install --no-document rake -v "$GUARD_TEST_RAKE_VERSION"
+          ruby -e 'gem "rake", ENV.fetch("GUARD_TEST_RAKE_VERSION"); require "rake"; puts "Rake #{Rake::VERSION}"'
+
+      - name: tests/rails-db-guardrails.test.rb
+        working-directory: plugins/db-guardrails
+        run: ruby tests/rails-db-guardrails.test.rb

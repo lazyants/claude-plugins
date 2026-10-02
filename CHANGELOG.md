@@ -2,6 +2,21 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [db-guardrails 1.0.1] — 2026-10-02
+
+### Fixed
+
+- **The Rails layer-2 guard blocks the first destructive task invocation (#20).**
+  Install `assets/rails-db_guardrails.rb` as `lib/tasks/db_guardrails.rake`,
+  replacing the old `config/initializers/db_guardrails.rb`. Initializers run
+  after Rake has copied the invoking task's prerequisites, so the old guard
+  never ran on that first call. The task file attaches the guard before
+  invocation, ahead of destructive prerequisites, and retains it when task
+  definitions load later. It boots the environment before checking the test
+  exemption or exact `ALLOW_DESTRUCTIVE=true` override. A real-Rake regression
+  suite covers all eight guarded tasks, both definition orders, exemptions,
+  destructive prerequisites and safe commands; CI runs it alongside the hook suite.
+
 ## [obsidian-project-vault 1.0.2] — 2026-10-02
 
 ### Fixed

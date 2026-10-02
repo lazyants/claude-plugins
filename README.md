@@ -7,7 +7,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | Plugin | Version | What it does |
 |---|---|---|
 | [`ai-cli-optout`](#ai-cli-optout--v113) | 1.1.3 | Opt out of telemetry across every locally installed AI CLI / AI-enabled IDE, plus Vercel CLI and macOS / Windows OS-level privacy surfaces. |
-| [`db-guardrails`](#db-guardrails--v100) | 1.0.0 | Stop AI coding agents from accidentally emptying your database — an always-on hook that blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for deeper safety layers. |
+| [`db-guardrails`](#db-guardrails--v101) | 1.0.1 | Stop AI coding agents from accidentally emptying your database — an always-on hook that blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for deeper safety layers. |
 | [`obsidian-project-vault`](#obsidian-project-vault--v102) | 1.0.2 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
 | [`cc-usage-coach`](#cc-usage-coach--v101) | 1.0.1 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
 | [`enduser-handbook`](#enduser-handbook--v1183) | 1.18.3 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
@@ -71,7 +71,7 @@ Trigger phrases: "disable telemetry", "opt out of telemetry", "privacy mode", et
 
 See [`DISCLAIMER.md`](./DISCLAIMER.md) for the full no-warranty statement.
 
-## `db-guardrails` — v1.0.0
+## `db-guardrails` — v1.0.1
 
 Stop AI coding agents from accidentally emptying your database. It exists because it happened — an agent ran `artisan migrate` with a test flag that did *not* isolate to the test database and wiped the development database. Twice. `db-guardrails` is the hardened, generalised result.
 
