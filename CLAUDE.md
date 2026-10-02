@@ -1,5 +1,31 @@
 # claude-plugins — working rules
 
+## Markdown linting is read-only
+
+Never run `markdownlint --fix` broadly in this repo. MD018 can turn a literal
+issue reference at the start of a wrapped paragraph into a heading; MD038 can
+remove the separator between adjacent code spans. A warning is not permission
+to rewrite pre-existing content. Long CHANGELOG lines (MD013) are house style.
+
+Use a warning-count comparison against the merge base instead:
+
+```sh
+npm install -g markdownlint-cli@0.46.0
+python3 tools/markdownlint_diff.py --base origin/main
+```
+
+The script lints temporary copies with the same default rules for both trees.
+It includes tracked Markdown and non-ignored untracked Markdown, including
+hidden skills, and reports deltas per file and rule. It reads working copies,
+so unstaged changes are included. Renames appear as a deletion and an addition.
+The report deliberately ignores repository lint configuration to keep the two
+trees comparable. Use the pinned CLI version above to match CI.
+
+Review the deltas and `git diff` together; equal counts do not prove unchanged
+content. Fix intended lines manually. Do not wrap old CHANGELOG entries or
+rewrite unrelated lines to reduce the baseline. Counts are advisory; tooling
+errors fail. CI runs the regression tests and the same read-only comparison.
+
 ## Run the suites in CI, not on this laptop
 
 Every plugin suite in this repo runs in **GitHub Actions** (`.github/workflows/<plugin>.yml`).
@@ -38,6 +64,7 @@ work, never the coverage: skipping a suite locally is right, skipping it remotel
 | `software-localizer.yml` | `tests/run-all.sh` (pytest, collected count asserted first), run from the plugin directory | Python 3.11 and 3.14 matrix (stdlib only at runtime) |
 | `skill-frontmatter.yml` | `tests/skill-frontmatter-limits.test.rb` | ruby (preinstalled) |
 | `citation-audit.yml` | `tools/tests` (pytest), then `tools/citation_audit.py check` over the tree | Python 3.14 + `pytest` (the tool itself is stdlib-only) |
+| `markdownlint-diff.yml` | Read-only lint report tests and merge-base warning deltas | Python 3.14, Node 22 + markdownlint-cli 0.46.0 |
 | `version-surfaces.yml` | `.claude/skills/plugin-repo-mechanics/scripts/check_version_surfaces.test.py`, then the checker itself over the tree | Python 3.14 (stdlib only) |
 
 `obsidian-project-vault` ships no tests, so it has no suite of its own — `version-surfaces.yml`

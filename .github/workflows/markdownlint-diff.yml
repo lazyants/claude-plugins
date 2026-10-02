@@ -1,0 +1,42 @@
+name: markdownlint-diff
+
+# The report reads all Markdown, including hidden skills. No path filter.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: markdownlint-diff-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install test and lint tools
+        run: |
+          python3 -m pip install --disable-pip-version-check 'pytest==9.1.1'
+          npm install -g markdownlint-cli@0.46.0
+          markdownlint --version
+      - name: Read-only report regression tests
+        run: python3 -m pytest tools/tests/test_markdownlint_diff.py -q
+      - name: Warning-count comparison (advisory)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || 'HEAD^' }}
+        run: python3 tools/markdownlint_diff.py --base "$BASE"
