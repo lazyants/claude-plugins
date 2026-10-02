@@ -188,6 +188,25 @@ class CredentialAssetsTest(unittest.TestCase):
                     self.assertNotIn(secret, result.stderr)
         self.assertEqual(self.entries(), [])
 
+    def test_mysql_identical_app_and_migrator_names_never_call_client(self):
+        for host in ("%", "localhost"):
+            with self.subTest(host=host):
+                result = self.mysql(MIGRATOR_USER="app", DB_APP_HOST=host)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("must be distinct usernames", result.stderr)
+                self.assertNotIn("applied:", result.stdout)
+        self.assertEqual(self.entries(), [], "identity collision must not reset passwords or apply grants")
+
+    def test_mysql_root_cannot_be_app_or_migrator_and_never_calls_client(self):
+        for key in ("MYSQL_USER", "MIGRATOR_USER"):
+            for account in ("root", "ROOT"):
+                with self.subTest(key=key, account=account):
+                    result = self.mysql(**{key: account})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("dedicated non-root accounts", result.stderr)
+                    self.assertNotIn("applied:", result.stdout)
+        self.assertEqual(self.entries(), [], "administrative accounts must not be altered")
+
     def test_mysql_rejects_dangerous_or_unverifiable_effective_grants(self):
         extras = [
             "GRANT ALL PRIVILEGES ON *.* TO `app`@`%`",

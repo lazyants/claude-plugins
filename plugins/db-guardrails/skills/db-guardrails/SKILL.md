@@ -77,7 +77,10 @@ the destructive rights and is used only for migrations.
   checked before success is reported. Keep the admin and migrator credentials
   outside the app's runtime environment.
 
-Generate the migrator password with `openssl rand -hex 24`. Store it in the
+Generate the migrator password with `openssl rand -hex 24` for MySQL/Postgres.
+For SQL Server, use a value that satisfies the server's password policy, for
+example `Aa1!$(openssl rand -hex 24)` (upper/lower/digit/symbol classes).
+Store it in the
 shell environment or a gitignored `.env`, **never** in a tracked file. Confirm
 the result: MySQL's installer checks effective grants and refuses inherited or
 global privileges it cannot establish as safe. Inspect `SHOW GRANTS` too.

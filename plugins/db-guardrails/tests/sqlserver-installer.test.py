@@ -102,6 +102,17 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 installer.install(self.env)
 
+    def test_sqlcmd_print_marker_on_stderr_is_accepted_after_successful_exit(self):
+        with patch.object(installer.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, "", "DB_GUARDRAILS_SQLSERVER_OK\n")):
+            installer.install(self.env)
+
+    def test_marker_on_stderr_does_not_override_client_failure(self):
+        with patch.object(installer.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 1, "", "DB_GUARDRAILS_SQLSERVER_OK\n")):
+            with self.assertRaises(RuntimeError):
+                installer.install(self.env)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -91,7 +91,9 @@ def install(env: dict[str, str]) -> None:
         suffix = f"; SQL Server error(s) {', '.join(dict.fromkeys(codes))}" if codes else ""
         raise RuntimeError(f"SQL Server did not confirm installation (sqlcmd exit {result.returncode}{suffix}). "
                            "Review account privileges/ownership and server diagnostics before retrying.")
-    if "DB_GUARDRAILS_SQLSERVER_OK" not in result.stdout:
+    # -r 1 sends PRINT messages to stderr in the ODBC client. Check both
+    # captured streams only after accepting its exit status; neither is echoed.
+    if "DB_GUARDRAILS_SQLSERVER_OK" not in result.stdout + result.stderr:
         raise RuntimeError("SQL Server did not return the installation verification marker")
     print(f"[db-guardrails] verified schema {schema}: {app} has DML; {migrator} is the database migrator")
 

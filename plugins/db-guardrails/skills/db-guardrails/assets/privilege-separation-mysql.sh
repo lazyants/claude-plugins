@@ -28,6 +28,7 @@
 # by the automated post-check; revoke them deliberately and re-run. Mandatory
 # MySQL roles also require manual removal/review. Only the named account/host
 # is checked; stored routines with elevated definers need separate review.
+# App and migrator must use distinct, dedicated usernames; neither may be root.
 #
 # By default a missing MIGRATOR_PASSWORD is a hard error — privilege
 # separation that silently did not run is worse than a loud failure. Set
@@ -80,6 +81,22 @@ validate_identifier() {  # $1 = label, $2 = value
 validate_identifier "MYSQL_DATABASE" "$MYSQL_DATABASE"
 validate_identifier "MYSQL_USER" "$MYSQL_USER"
 validate_identifier "MIGRATOR_USER" "$migrator_user"
+
+# Account changes and grants are not transactional. Reject identities that
+# would elevate the app again or overwrite an administrative password before
+# sending any SQL, rather than relying on the post-check after those changes.
+if [ "$MYSQL_USER" = "$migrator_user" ]; then
+  echo "[db-guardrails] MYSQL_USER and MIGRATOR_USER must be distinct usernames." >&2
+  exit 1
+fi
+for account in "$MYSQL_USER" "$migrator_user"; do
+  case "$account" in
+    [Rr][Oo][Oo][Tt])
+      echo "[db-guardrails] MYSQL_USER and MIGRATOR_USER must be dedicated non-root accounts." >&2
+      exit 1
+      ;;
+  esac
+done
 
 case "$app_host" in
   '' | *[!A-Za-z0-9_.%-]*)
