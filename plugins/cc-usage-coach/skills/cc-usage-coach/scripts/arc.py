@@ -8,6 +8,7 @@ opaque source_ref and NEVER printed."""
 import sys, os, re, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib_sessions as L
+import extract as E
 
 
 # ---------------------------------------------------------------------------
@@ -72,16 +73,22 @@ def _is_user(e):
     return etype == "user" or (etype is None and role == "user")
 
 
+def _is_human_user(e):
+    """Exclude synthetic transcript entries before interpreting user-role text."""
+    return _is_user(e) and not (
+        e.get("isMeta") or e.get("isSnapshotUpdate") or e.get("isVisibleInTranscriptOnly")
+        or e.get("isCompactSummary") or ("compactMetadata" in e)
+    )
+
+
 def iter_human_prompts(entries):
-    """Human-authored prompts only: skip meta/compact/tool-result turns, strip command
-    and reminder tags, collapse whitespace, redact paths, truncate to 200 chars."""
+    """Human-authored prompts only: skip synthetic/compact/tool-result turns, strip
+    command and reminder tags, collapse whitespace, redact paths, truncate to 200 chars."""
     out = []
     for i, e in enumerate(entries):
         if not isinstance(e, dict):
             continue
-        if e.get("isMeta") or e.get("isCompactSummary") or ("compactMetadata" in e):
-            continue
-        if not _is_user(e):
+        if not _is_human_user(e):
             continue
         raw = _text_of((e.get("message") or {}).get("content"))
         if not raw or not raw.strip():
@@ -124,9 +131,7 @@ def arc_markers(entries):
     for e in entries:
         if not isinstance(e, dict):
             continue
-        if e.get("isMeta") or e.get("isCompactSummary") or ("compactMetadata" in e):
-            continue
-        if not _is_user(e):
+        if not _is_human_user(e):
             continue
         raw = _text_of((e.get("message") or {}).get("content"))
         if not raw:
@@ -148,19 +153,9 @@ def resolve_ref(ref, index):
 
 
 def _project_from_cwd(cwd):
-    """Header 'project' = the cwd LEAF (e.g. /Users/alice/myrepo -> 'myrepo').
-
-    But if the cwd IS a home directory itself — its parent is /Users or /home, or it
-    equals the expanded home — then the leaf is the USERNAME, an identity leak. Suppress
-    it (return None -> omitted from the header) in that case. Normal repos still show."""
-    c = str(cwd).rstrip("/")
-    if not c:
-        return None
-    parent = os.path.dirname(c)
-    home = os.path.expanduser("~")
-    if parent in ("/Users", "/home") or (home and home != "~" and c == home.rstrip("/")):
-        return None
-    return redact_paths(os.path.basename(c))
+    """Reuse the extractor's cross-platform safe leaf; omit its unknown fallback."""
+    project = E.proj_of({"cwd": cwd}, None)
+    return redact_paths(project) if project != "unknown" else None
 
 
 def _meta_from_entries(entries, ref):

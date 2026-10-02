@@ -1,14 +1,19 @@
 {
   "baselines": {
     "cr_per_turn": {
-      "n": 34,
-      "p50": 18954.545454545456,
-      "p90": 52333.333333333336
+      "n": 31,
+      "p50": 18500.0,
+      "p90": 50000.0
+    },
+    "n_err": {
+      "n": 31,
+      "p50": 0.0,
+      "p90": 0.0
     },
     "peak_ctx": {
-      "n": 34,
+      "n": 31,
       "p50": 100000.0,
-      "p90": 140999.99999999997
+      "p90": 150000.0
     },
     "read_chars_per_call": {
       "n": 1,
@@ -16,14 +21,112 @@
       "p90": 20000.0
     },
     "recache_excess_proxy": {
-      "n": 34,
-      "p50": 113500.0,
-      "p90": 261999.99999999994
+      "n": 31,
+      "p50": 113000.0,
+      "p90": 150000.0
     },
     "turns": {
-      "n": 34,
+      "n": 31,
       "p50": 12.0,
       "p90": 14.0
+    }
+  },
+  "baselines_by_dir_class": {
+    "real": {
+      "cr_per_turn": {
+        "n": 31,
+        "p50": 18500.0,
+        "p90": 50000.0
+      },
+      "n_err": {
+        "n": 31,
+        "p50": 0.0,
+        "p90": 0.0
+      },
+      "peak_ctx": {
+        "n": 31,
+        "p50": 100000.0,
+        "p90": 150000.0
+      },
+      "read_chars_per_call": {
+        "n": 1,
+        "p50": 20000.0,
+        "p90": 20000.0
+      },
+      "recache_excess_proxy": {
+        "n": 31,
+        "p50": 113000.0,
+        "p90": 150000.0
+      },
+      "turns": {
+        "n": 31,
+        "p50": 12.0,
+        "p90": 14.0
+      }
+    },
+    "subagents": {
+      "cr_per_turn": {
+        "n": 2,
+        "p50": 55000.0,
+        "p90": 59000.0
+      },
+      "n_err": {
+        "n": 2,
+        "p50": 0.0,
+        "p90": 0.0
+      },
+      "peak_ctx": {
+        "n": 2,
+        "p50": 70000.0,
+        "p90": 78000.0
+      },
+      "read_chars_per_call": {
+        "n": 0,
+        "p50": null,
+        "p90": null
+      },
+      "recache_excess_proxy": {
+        "n": 2,
+        "p50": 140000.0,
+        "p90": 204000.0
+      },
+      "turns": {
+        "n": 2,
+        "p50": 4.0,
+        "p90": 5.6
+      }
+    },
+    "workflow": {
+      "cr_per_turn": {
+        "n": 1,
+        "p50": 40000.0,
+        "p90": 40000.0
+      },
+      "n_err": {
+        "n": 1,
+        "p50": 0,
+        "p90": 0
+      },
+      "peak_ctx": {
+        "n": 1,
+        "p50": 120000,
+        "p90": 120000
+      },
+      "read_chars_per_call": {
+        "n": 0,
+        "p50": null,
+        "p90": null
+      },
+      "recache_excess_proxy": {
+        "n": 1,
+        "p50": 280000,
+        "p90": 280000
+      },
+      "turns": {
+        "n": 1,
+        "p50": 10,
+        "p90": 10
+      }
     }
   },
   "behavior_color": {
@@ -70,19 +173,24 @@
     "items": [
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.765,
+          "cr_per_turn": 0.839,
+          "n_err": 1.0,
           "n_turns": 1.0,
           "peak_ctx": 1.0,
           "recache_excess_proxy": 1.0
         },
-        "anomaly_rank": 2,
+        "anomaly_rank": 3,
+        "baseline_scope": "real",
         "build_floor": 400000,
         "cost_pct": 16.485,
         "cost_rank": 1,
         "cr": 4000000,
         "cr_peak_mult": 10.0,
+        "d": "real",
+        "error_turn_rate": 0.0476,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 6,
         "n_models": 1,
         "n_turns": 120,
         "p": "proj_526ebec5ae",
@@ -97,6 +205,7 @@
         "selection_buckets": [
           "anomaly",
           "cost",
+          "signal:n_err",
           "signal:n_turns",
           "signal:peak_ctx",
           "signal:recache_excess_proxy"
@@ -104,24 +213,31 @@
         "source_ref": "sess_7e1db5521c",
         "why": [
           "recache_excess_proxy",
-          "peak_ctx"
+          "n_turns",
+          "peak_ctx",
+          "n_err"
         ]
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.882,
-          "n_turns": 0.971,
-          "peak_ctx": 0.941,
-          "recache_excess_proxy": 0.971
+          "cr_per_turn": 0.903,
+          "n_err": 0.0,
+          "n_turns": 0.968,
+          "peak_ctx": 0.935,
+          "recache_excess_proxy": 0.968
         },
-        "anomaly_rank": 3,
+        "anomaly_rank": 6,
+        "baseline_scope": "real",
         "build_floor": 200000,
         "cost_pct": 12.343,
         "cost_rank": 2,
         "cr": 3000000,
         "cr_peak_mult": 15.0,
+        "d": "real",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 60,
         "p": "proj_42dd348bad",
@@ -135,32 +251,35 @@
         "recache_excess_proxy": 2800000,
         "selection_buckets": [
           "anomaly",
-          "cost",
-          "signal:n_turns",
-          "signal:peak_ctx",
-          "signal:recache_excess_proxy"
+          "cost"
         ],
         "source_ref": "sess_9bc4f454bc",
         "why": [
           "recache_excess_proxy",
+          "n_turns",
           "peak_ctx"
         ]
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.971,
-          "n_turns": 0.941,
-          "peak_ctx": 0.971,
-          "recache_excess_proxy": 0.941
+          "cr_per_turn": 0.968,
+          "n_err": 0.968,
+          "n_turns": 0.935,
+          "peak_ctx": 0.968,
+          "recache_excess_proxy": 0.935
         },
-        "anomaly_rank": 4,
+        "anomaly_rank": 7,
+        "baseline_scope": "real",
         "build_floor": 900000,
         "cost_pct": 9.927,
         "cost_rank": 3,
         "cr": 2400000,
         "cr_peak_mult": 8.0,
+        "d": "real",
+        "error_turn_rate": 0.0741,
         "n_comp": 1,
         "n_epochs": 2,
+        "n_err": 2,
         "n_models": 2,
         "n_turns": 25,
         "p": "proj_526ebec5ae",
@@ -175,34 +294,38 @@
         "selection_buckets": [
           "anomaly",
           "cost",
-          "signal:cr_per_turn",
-          "signal:n_turns",
-          "signal:peak_ctx",
-          "signal:recache_excess_proxy"
+          "signal:n_err"
         ],
         "source_ref": "sess_7a9a52c624",
         "why": [
           "cr_per_turn",
           "recache_excess_proxy",
+          "n_turns",
           "peak_ctx",
+          "n_err",
           "compaction"
         ]
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.824,
-          "n_turns": 0.324,
-          "peak_ctx": 0.882,
-          "recache_excess_proxy": 0.912
+          "cr_per_turn": 1.0,
+          "n_err": 0.0,
+          "n_turns": 1.0,
+          "peak_ctx": 1.0,
+          "recache_excess_proxy": 1.0
         },
-        "anomaly_rank": 13,
+        "anomaly_rank": 5,
+        "baseline_scope": "workflow",
         "build_floor": 120000,
         "cost_pct": 1.681,
         "cost_rank": 4,
         "cr": 400000,
         "cr_peak_mult": 3.33,
+        "d": "workflow",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 10,
         "p": "proj_290f0fadd0",
@@ -215,28 +338,36 @@
         "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
         "recache_excess_proxy": 280000,
         "selection_buckets": [
-          "cost"
+          "anomaly",
+          "cost",
+          "signal:cr_per_turn",
+          "signal:n_turns",
+          "signal:peak_ctx",
+          "signal:recache_excess_proxy"
         ],
         "source_ref": "sess_c67df5bf86",
-        "why": [
-          "recache_excess_proxy"
-        ]
+        "why": []
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.794,
-          "n_turns": 0.147,
-          "peak_ctx": 0.912,
-          "recache_excess_proxy": 0.853
+          "cr_per_turn": 0.871,
+          "n_err": 0.0,
+          "n_turns": 0.097,
+          "peak_ctx": 0.903,
+          "recache_excess_proxy": 0.903
         },
-        "anomaly_rank": 7,
+        "anomaly_rank": 9,
+        "baseline_scope": "real",
         "build_floor": 150000,
         "cost_pct": 1.279,
         "cost_rank": 5,
         "cr": 300000,
         "cr_peak_mult": 2.0,
+        "d": "real",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 8,
         "p": "proj_9572d3c175",
@@ -263,25 +394,29 @@
         ],
         "source_ref": "sess_bb7d32d045",
         "why": [
-          "peak_ctx",
           "repeat_read"
         ]
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.882,
-          "n_turns": 0.118,
-          "peak_ctx": 0.088,
-          "recache_excess_proxy": 0.882
+          "cr_per_turn": 0.5,
+          "n_err": 0.0,
+          "n_turns": 1.0,
+          "peak_ctx": 1.0,
+          "recache_excess_proxy": 1.0
         },
-        "anomaly_rank": 14,
+        "anomaly_rank": 1,
+        "baseline_scope": "subagents",
         "build_floor": 80000,
         "cost_pct": 1.251,
         "cost_rank": 6,
         "cr": 300000,
         "cr_peak_mult": 3.75,
+        "d": "subagents",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 6,
         "p": "proj_b2c9fd9e39",
@@ -294,26 +429,39 @@
         "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
         "recache_excess_proxy": 220000,
         "selection_buckets": [
-          "cost"
+          "anomaly",
+          "cost",
+          "signal:n_turns",
+          "signal:peak_ctx",
+          "signal:recache_excess_proxy"
         ],
         "source_ref": "sess_8d8b8cd93b",
-        "why": []
+        "why": [
+          "recache_excess_proxy",
+          "n_turns",
+          "peak_ctx"
+        ]
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.206,
-          "n_turns": 0.912,
-          "peak_ctx": 0.853,
-          "recache_excess_proxy": 0.824
+          "cr_per_turn": 0.226,
+          "n_err": 0.0,
+          "n_turns": 0.903,
+          "peak_ctx": 0.871,
+          "recache_excess_proxy": 0.871
         },
-        "anomaly_rank": 8,
+        "anomaly_rank": 10,
+        "baseline_scope": "real",
         "build_floor": 100000,
         "cost_pct": 0.954,
         "cost_rank": 7,
         "cr": 224000,
         "cr_peak_mult": 2.24,
+        "d": "real",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 14,
         "p": "proj_526ebec5ae",
@@ -334,19 +482,24 @@
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.324,
-          "n_turns": 0.765,
-          "peak_ctx": 0.853,
-          "recache_excess_proxy": 0.794
+          "cr_per_turn": 0.355,
+          "n_err": 0.0,
+          "n_turns": 0.742,
+          "peak_ctx": 0.871,
+          "recache_excess_proxy": 0.839
         },
         "anomaly_rank": 34,
+        "baseline_scope": "real",
         "build_floor": 100000,
         "cost_pct": 0.95,
         "cost_rank": 8,
         "cr": 223000,
         "cr_peak_mult": 2.23,
+        "d": "real",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 13,
         "p": "proj_42dd348bad",
@@ -366,19 +519,24 @@
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.471,
-          "n_turns": 0.618,
-          "peak_ctx": 0.853,
-          "recache_excess_proxy": 0.765
+          "cr_per_turn": 0.516,
+          "n_err": 0.0,
+          "n_turns": 0.581,
+          "peak_ctx": 0.871,
+          "recache_excess_proxy": 0.806
         },
         "anomaly_rank": 29,
+        "baseline_scope": "real",
         "build_floor": 100000,
         "cost_pct": 0.946,
         "cost_rank": 9,
         "cr": 222000,
         "cr_peak_mult": 2.22,
+        "d": "real",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 12,
         "p": "proj_9572d3c175",
@@ -398,19 +556,24 @@
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.618,
-          "n_turns": 0.471,
-          "peak_ctx": 0.853,
-          "recache_excess_proxy": 0.735
+          "cr_per_turn": 0.677,
+          "n_err": 0.0,
+          "n_turns": 0.419,
+          "peak_ctx": 0.871,
+          "recache_excess_proxy": 0.774
         },
         "anomaly_rank": 24,
+        "baseline_scope": "real",
         "build_floor": 100000,
         "cost_pct": 0.942,
         "cost_rank": 10,
         "cr": 221000,
         "cr_peak_mult": 2.21,
+        "d": "real",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 11,
         "p": "proj_526ebec5ae",
@@ -430,83 +593,24 @@
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.147,
-          "n_turns": 0.912,
-          "peak_ctx": 0.853,
-          "recache_excess_proxy": 0.676
+          "cr_per_turn": 0.935,
+          "n_err": 0.0,
+          "n_turns": 0.065,
+          "peak_ctx": 0.065,
+          "recache_excess_proxy": 0.065
         },
-        "anomaly_rank": 9,
-        "build_floor": 100000,
-        "cost_pct": 0.934,
-        "cost_rank": 12,
-        "cr": 219000,
-        "cr_peak_mult": 2.19,
-        "n_comp": 0,
-        "n_epochs": 1,
-        "n_models": 1,
-        "n_turns": 14,
-        "p": "proj_9572d3c175",
-        "peak_ctx": 100000,
-        "read_evidence": {
-          "n_read": 0,
-          "read_chars": 0,
-          "repeat_reads": []
-        },
-        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
-        "recache_excess_proxy": 119000,
-        "selection_buckets": [
-          "anomaly"
-        ],
-        "source_ref": "sess_d4e7ac701d",
-        "why": []
-      },
-      {
-        "anomaly_factors": {
-          "cr_per_turn": 0.029,
-          "n_turns": 0.912,
-          "peak_ctx": 0.853,
-          "recache_excess_proxy": 0.235
-        },
-        "anomaly_rank": 10,
-        "build_floor": 100000,
-        "cost_pct": 0.873,
-        "cost_rank": 27,
-        "cr": 204000,
-        "cr_peak_mult": 2.04,
-        "n_comp": 0,
-        "n_epochs": 1,
-        "n_models": 1,
-        "n_turns": 14,
-        "p": "proj_9572d3c175",
-        "peak_ctx": 100000,
-        "read_evidence": {
-          "n_read": 0,
-          "read_chars": 0,
-          "repeat_reads": []
-        },
-        "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
-        "recache_excess_proxy": 104000,
-        "selection_buckets": [
-          "anomaly"
-        ],
-        "source_ref": "sess_8d54024acb",
-        "why": []
-      },
-      {
-        "anomaly_factors": {
-          "cr_per_turn": 0.912,
-          "n_turns": 0.088,
-          "peak_ctx": 0.118,
-          "recache_excess_proxy": 0.088
-        },
-        "anomaly_rank": 6,
+        "anomaly_rank": 8,
+        "baseline_scope": "real",
         "build_floor": 90000,
         "cost_pct": 0.69,
         "cost_rank": 32,
         "cr": 160000,
         "cr_peak_mult": 1.78,
+        "d": "real",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 3,
         "p": "proj_9572d3c175",
@@ -519,7 +623,8 @@
         "recache_excess_note": "ROUGH directional proxy, not a bound (can over/understate)",
         "recache_excess_proxy": 70000,
         "selection_buckets": [
-          "anomaly"
+          "anomaly",
+          "signal:n_err"
         ],
         "source_ref": "sess_620e1b440e",
         "why": [
@@ -529,18 +634,23 @@
       {
         "anomaly_factors": {
           "cr_per_turn": 1.0,
-          "n_turns": 0.029,
-          "peak_ctx": 0.059,
-          "recache_excess_proxy": 0.029
+          "n_err": 0.0,
+          "n_turns": 0.032,
+          "peak_ctx": 0.032,
+          "recache_excess_proxy": 0.032
         },
-        "anomaly_rank": 1,
+        "anomaly_rank": 2,
+        "baseline_scope": "real",
         "build_floor": 70000,
         "cost_pct": 0.516,
         "cost_rank": 33,
         "cr": 120000,
         "cr_peak_mult": 1.71,
+        "d": "real",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 1,
         "p": "proj_42dd348bad",
@@ -563,19 +673,24 @@
       },
       {
         "anomaly_factors": {
-          "cr_per_turn": 0.941,
-          "n_turns": 0.059,
-          "peak_ctx": 0.029,
-          "recache_excess_proxy": 0.059
+          "cr_per_turn": 1.0,
+          "n_err": 0.0,
+          "n_turns": 0.5,
+          "peak_ctx": 0.5,
+          "recache_excess_proxy": 0.5
         },
-        "anomaly_rank": 5,
+        "anomaly_rank": 4,
+        "baseline_scope": "subagents",
         "build_floor": 60000,
         "cost_pct": 0.512,
         "cost_rank": 34,
         "cr": 120000,
         "cr_peak_mult": 2.0,
+        "d": "subagents",
+        "error_turn_rate": 0.0,
         "n_comp": 0,
         "n_epochs": 1,
+        "n_err": 0,
         "n_models": 1,
         "n_turns": 2,
         "p": "proj_b2c9fd9e39",
@@ -599,8 +714,8 @@
     ],
     "omitted_candidate_counts": {
       "post_cap": 0,
-      "post_dedup": 15,
-      "pre_dedup": 32
+      "post_dedup": 13,
+      "pre_dedup": 35
     }
   },
   "corpus": {
@@ -609,8 +724,11 @@
       "2026-06-02",
       "2026-06-09"
     ],
+    "error_turn_note": "Observed error/empty assistant turns in retained dataset sessions only; files with no counted usage turns are omitted. n_turns excludes these errors; error_turn_rate is n_err / (n_turns + n_err), not a retry token-cost estimate.",
+    "error_turn_rate": 0.0147,
     "input": 161500,
     "insufficient_data": false,
+    "n_err": 8,
     "n_projects": 5,
     "n_sessions": 34,
     "n_turns": 535,
@@ -695,7 +813,7 @@
       }
     ]
   },
-  "schema_version": 3,
+  "schema_version": 4,
   "session_length": {
     "by_dir_class": {
       "real": 31,
@@ -738,29 +856,35 @@
       {
         "chars_per_call": 4000,
         "est_tokens": 300000,
-        "pct": 45.5,
+        "pct": 40.5,
         "tool": "Read"
       },
       {
         "chars_per_call": 1600,
         "est_tokens": 200000,
-        "pct": 30.3,
+        "pct": 27.0,
         "tool": "Bash"
       },
       {
         "chars_per_call": 2000,
         "est_tokens": 60000,
-        "pct": 9.1,
+        "pct": 8.1,
         "tool": "Edit"
       },
       {
         "chars_per_call": 10000,
         "est_tokens": 100000,
-        "pct": 15.2,
+        "pct": 13.5,
         "tool": "Agent"
+      },
+      {
+        "chars_per_call": 16000,
+        "est_tokens": 80000,
+        "pct": 10.8,
+        "tool": "tool_8a137abe7b"
       }
     ],
-    "injection_to_creation_mult": 36.7,
+    "injection_to_creation_mult": 32.7,
     "note": "injection_to_creation_mult is an aggregate ratio, not a per-chunk re-cache count"
   },
   "version_signals_by_model": [

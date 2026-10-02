@@ -6,6 +6,7 @@ dataset/
 signal_pack.json
 source_index.json
 project_index.json
+tool_index.json
 results.json
 
 # Local screencast recordings (capture real paths + prompt text)

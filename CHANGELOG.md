@@ -2,6 +2,20 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [cc-usage-coach 1.1.0] — 2026-10-02
+
+### Added
+
+- Signal-pack schema 4 exposes baselines by directory class and observed error counts/rates for retained dataset sessions. Candidates compare against their own class; errors do not imply a measured retry token cost (#40, #156).
+- Custom tool labels become stable opaque IDs in the shareable pack, with a private `tool_index.json` for local report resolution (#41).
+- Extractor-to-signals integration tests cover the emitted schema, deduplication, epoch/model floors, tool attribution, and private/shareable output boundaries (#157).
+
+### Fixed
+
+- Long-session candidate reasons use the turn-count baseline (#39). Repeated Read paths and project labels containing lone surrogates no longer abort extraction or pack generation (#26, #42).
+- Arc headers reuse the extractor's project normalization, and synthetic snapshot/transcript-only entries no longer inflate human prompts or textual markers (#37, #158). The skill accurately describes the prompt/marker digest and its missing edit/agent activity evidence (#36).
+- Extraction streams two passes rather than retaining whole session entries, preserves forward tool-result attribution, and accumulates build floors without per-turn history (#159). Unused legacy cold-cache/pricing machinery is removed from the shared helpers (#38).
+
 ## [ai-cli-optout 1.2.0] — 2026-10-02
 
 ### Added

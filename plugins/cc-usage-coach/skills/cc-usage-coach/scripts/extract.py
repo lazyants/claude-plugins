@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-extract.py — ONE streaming pass over all CC session logs, emitting a rich per-turn and
-per-session dataset for downstream token/limit-saving analysis. Reuses the verified
-lib_sessions primitives + the measure.py dedup discipline (composite key AFTER validity).
+extract.py — two bounded streaming passes per CC session log, emitting a rich per-turn
+and per-session dataset for downstream token/limit-saving analysis. The first retains
+only tool IDs/names for attribution; the second retains rollups and dedup IDs, not raw
+entries. Assistant turns use composite-key dedup AFTER validity.
 
 Outputs (under ../dataset/):
-  turns.jsonl     one record per assistant-with-usage turn (deduped, matches measure.py totals)
+  turns.jsonl     one record per valid assistant-with-usage turn (deduped)
   sessions.jsonl  per-session rollups
   tools.json      tool-use frequency + tool_result byte/est-token cost by tool (approx)
-  meta.json       corpus totals for cross-validation vs results.json
+  meta.json       corpus totals, including errors in files with no retained session
 
-Run: python3 tools/extract.py
+Run: python3 scripts/extract.py
 """
 import hashlib, json, os, sys, ntpath
 from collections import defaultdict
@@ -22,7 +23,7 @@ import lib_sessions as L
 
 
 def auf(entry):
-    """usage-fields for a non-error assistant-with-usage entry; else None (mirrors measure.py)."""
+    """Usage fields for a non-error assistant-with-usage entry; otherwise None."""
     msg = entry.get("message") or {}
     if msg.get("role") != "assistant":
         return None
@@ -121,19 +122,35 @@ def tool_result_chars(block):
         return 0
 
 
+class _BuildFloor:
+    """Incremental build-floor retaining model maxima only for the current epoch."""
+
+    def __init__(self):
+        self.peaks = {}
+        self.total = self.epochs = self.groups = 0
+
+    def add(self, boundary, model, ctx):
+        if boundary and self.peaks:
+            self.total += sum(self.peaks.values())
+            self.epochs += 1
+            self.groups += len(self.peaks)
+            self.peaks.clear()
+        self.peaks[model] = max(self.peaks.get(model, 0), ctx)
+
+    def result(self):
+        return (self.total + sum(self.peaks.values()),
+                self.epochs + bool(self.peaks), self.groups + len(self.peaks))
+
+
 def segmented_build_floor(floor_seq):
-    """Build-floor = one build per (compaction-epoch x model). SKILL_PLAN R3/R4.
-    floor_seq: ordered list of {"boundary":bool, "model":str, "ctx":int} for emitted turns;
+    """Build-floor = one build per (compaction-epoch x model).
+    floor_seq: ordered iterable of {"boundary":bool, "model":str, "ctx":int} for emitted turns;
     boundary=True means a compaction marker fired since the previous emitted turn (opens a new epoch).
     Returns (build_floor, n_epochs, n_model_epoch_groups)."""
-    epoch = 0
-    peak = {}
+    floor = _BuildFloor()
     for t in floor_seq:
-        if t["boundary"]:
-            epoch += 1
-        k = (epoch, t["model"])
-        peak[k] = max(peak.get(k, 0), t["ctx"])   # always record the (epoch,model) group
-    return sum(peak.values()), len({k[0] for k in peak}), len(peak)
+        floor.add(t["boundary"], t["model"], t["ctx"])
+    return floor.result()
 
 
 def _run():
@@ -160,14 +177,14 @@ def _run():
         # (the real stem) is kept LOCAL-ONLY in sessions.jsonl for the local report's readability.
         sid = L.session_id(path)
         dc = dir_class(path)
-        entries = [o for o in L.iter_entries(path) if isinstance(o, dict)]   # skip non-dict JSON lines
-        if not entries:
-            continue
         seen_tr = set()        # intra-file tool_result dedup (codex review LOW)
 
-        # tool_use_id -> tool name (for attributing tool_result sizes)
+        # Compact attribution prepass: results can precede their tool_use in a log.
+        # Re-stream below rather than retaining the parsed entries or result contents.
         tuid_name = {}
-        for o in entries:
+        for o in L.iter_entries(path):
+            if not isinstance(o, dict):
+                continue
             for b in blocks((o.get("message") or {}).get("content"), "tool_use"):
                 tuid_name[b.get("id")] = b.get("name")
 
@@ -179,12 +196,14 @@ def _run():
                 "n_5m": 0, "n_1h": 0, "n_comp": 0, "n_err": 0,
                 "n_read": 0, "read_chars": 0, "read_paths": defaultdict(int),
                 "start": None, "end": None}
-        # build-floor by compaction-epoch x model (one build per (epoch,model)) — SKILL_PLAN R3/R4
-        floor_seq = []
+        # One build per compaction epoch/model, without retaining per-turn records.
+        floor = _BuildFloor()
         pending_boundary = False
 
         prev_entry = None
-        for o in entries:
+        for o in L.iter_entries(path):
+            if not isinstance(o, dict):
+                continue
             if o.get("isMeta") or o.get("isSnapshotUpdate") or o.get("isVisibleInTranscriptOnly"):
                 prev_entry = o
                 continue
@@ -221,7 +240,7 @@ def _run():
                 prev_entry = o
                 continue
 
-            # composite-key dedup AFTER validity (codex round-3) — keeps corpus totals == measure.py
+            # Composite-key dedup AFTER validity: an error cannot hide a later valid retry.
             u = o.get("uuid")
             if u is not None:
                 eid = (u, o.get("agentId"), o.get("parentUuid"))
@@ -263,7 +282,7 @@ def _run():
             srow["in"] += uf["input"]; srow["cr"] += uf["creation"]
             srow["rd"] += uf["read"]; srow["out"] += uf["output"]
             srow["peak_ctx"] = max(srow["peak_ctx"], ctx)
-            floor_seq.append({"boundary": pending_boundary, "model": model, "ctx": ctx})
+            floor.add(pending_boundary, model, ctx)
             pending_boundary = False
             if srow["first_cr"] is None and uf["creation"] > 0:
                 srow["first_cr"] = uf["creation"]
@@ -293,9 +312,9 @@ def _run():
         # session's primary project = the one with the most quota in it (codex review HIGH);
         # n_proj flags multi-project sessions so downstream can split if needed.
         prim = max(srow["proj_q"].items(), key=lambda kv: kv[1])[0] if srow["proj_q"] else "?"
-        build_floor, n_epochs, n_model_epoch_groups = segmented_build_floor(floor_seq)
+        build_floor, n_epochs, n_model_epoch_groups = floor.result()
         repeat_reads = sorted(
-            ([leaf + "#" + hashlib.sha1(p.encode()).hexdigest()[:6], c]
+            ([leaf + "#" + hashlib.sha1(p.encode("utf-8", errors="surrogatepass")).hexdigest()[:6], c]
              for p, c in srow["read_paths"].items()
              if c > 1 and (leaf := _safe_leaf(p))),   # leaf=None (leaky) -> entry dropped
             key=lambda x: (-x[1], x[0]))[:5]

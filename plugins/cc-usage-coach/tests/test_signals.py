@@ -1,8 +1,8 @@
 """
-Tests for the signals.py session_length block (schema_version 2's new top-level key)
-plus the cross-cutting invariants that must hold for the frozen fixture.
+Tests for the signals.py session_length block, class-specific baselines, observed errors,
+and shareable-tool privacy plus the cross-cutting invariants for the frozen fixture.
 
-Covers, on the frozen fixture: all 13 required keys (incl. session_length); by_dir_class
+Covers, on the frozen fixture: all 14 required keys (incl. session_length); by_dir_class
 sums to corpus.n_sessions; real_turns.histogram counts sum to by_dir_class.real;
 non-null percentiles monotone (p50<=p90<=p99<=max); real_with_side_turns <= real.
 Plus degenerate cases on synthetic corpora: empty corpus, all-side corpus, all-dur-None
@@ -42,12 +42,12 @@ def sess(s, d="real", n_turns=10, n_side=0, dur_min=60.0):
 
 
 # --- 1. frozen-fixture invariants -------------------------------------------
-def test_fixture_has_13_keys_incl_session_length():
+def test_fixture_has_14_keys_incl_session_length():
     sessions, turns, tools = _load()
     pack = S.build_pack(sessions, iter(turns), tools)
-    assert pack["schema_version"] == 3
+    assert pack["schema_version"] == 4
     assert "session_length" in pack
-    assert len(pack) == 13
+    assert len(pack) == 14
 
 
 def test_by_dir_class_sums_to_n_sessions():
@@ -242,3 +242,164 @@ def test_source_ref_opaque_even_for_stale_filename_s():
     # with no source_path, it still yields an opaque token (hashes the stale s, never echoes it)
     ref2 = S._source_ref({"s": "CLIENTACME-debugging-abc123"})
     assert re.match(r"^sess_[0-9a-f]{10}$", ref2) and "CLIENTACME" not in ref2
+
+
+# --- 7. per-class baselines, long-session reasons, and observed errors -------
+def _candidate(pack, session):
+    return next(it for it in pack["candidate_sessions"]["items"]
+                if it["source_ref"] == S._source_ref(session))
+
+
+def test_real_baselines_and_factors_ignore_many_side_threads():
+    reals = [sess(f"real-{i}", n_turns=n) for i, n in enumerate((100, 120, 140))]
+    for s in reals:
+        s.update(cr=2_000_000, quota=2_010_000)
+    sides = ([sess(f"sub-{i}", d="subagents", n_turns=1 + i % 3) for i in range(18)] +
+             [sess(f"wf-{i}", d="workflow", n_turns=2 + i % 3) for i in range(9)])
+    only_real = S.build_pack(reals, iter([]), _empty_tools())
+    mixed = S.build_pack(reals + sides, iter([]), _empty_tools())
+    assert mixed["baselines"] == only_real["baselines"]
+    assert mixed["baselines"]["turns"] == {"p50": 120, "p90": 136, "n": 3}
+    assert mixed["baselines_by_dir_class"]["subagents"]["turns"]["p90"] == 3
+    assert mixed["baselines_by_dir_class"]["workflow"]["turns"]["p90"] == 4
+    middle = _candidate(mixed, reals[1])
+    assert middle["d"] == middle["baseline_scope"] == "real"
+    assert middle["anomaly_factors"] == _candidate(only_real, reals[1])["anomaly_factors"]
+    assert middle["anomaly_factors"]["n_turns"] == 0.667
+    assert "n_turns" not in middle["why"]
+
+
+def test_long_session_why_uses_turns_baseline_key():
+    sessions = [sess(f"long-{i}", n_turns=n) for i, n in enumerate((10, 11, 120))]
+    pack = S.build_pack(sessions, iter([]), _empty_tools())
+    assert pack["baselines"]["turns"]["p90"] < 120
+    assert "n_turns" in _candidate(pack, sessions[-1])["why"]
+    assert "n_turns" not in _candidate(pack, sessions[0])["why"]
+
+
+def test_all_side_baselines_remain_class_specific():
+    sessions = [sess("sub-short", d="subagents", n_turns=1),
+                sess("sub-long", d="subagents", n_turns=9),
+                sess("wf-short", d="workflow", n_turns=100),
+                sess("wf-long", d="workflow", n_turns=200)]
+    pack = S.build_pack(sessions, iter([]), _empty_tools())
+    assert all(bl == {"p50": None, "p90": None, "n": 0} for bl in pack["baselines"].values())
+    assert pack["baselines_by_dir_class"]["subagents"]["turns"]["p90"] == 8.2
+    assert pack["baselines_by_dir_class"]["workflow"]["turns"]["p90"] == 190
+    for session in sessions:
+        candidate = _candidate(pack, session)
+        assert candidate["baseline_scope"] == candidate["d"] == session["d"]
+    assert "n_turns" in _candidate(pack, sessions[1])["why"]
+    assert "n_turns" in _candidate(pack, sessions[3])["why"]
+
+
+def test_observed_errors_surface_with_counted_and_error_turn_denominator():
+    sessions = [G._session(f"err-{i}", "project-a", n_turns=7, n_err=n)
+                for i, n in enumerate((0, 0, 3))]
+    turns = [G._turn(f"err-{i}", "project-a") for i in range(3) for _ in range(7)]
+    pack = S.build_pack(sessions, iter(turns), _empty_tools())
+    assert pack["corpus"]["n_err"] == 3
+    assert pack["corpus"]["n_turns"] == 21
+    assert pack["corpus"]["error_turn_rate"] == 0.125  # 3 / (21 + 3)
+    note = pack["corpus"]["error_turn_note"]
+    assert "retained dataset sessions only" in note
+    assert "files with no counted usage turns are omitted" in note
+    assert "not a retry token-cost estimate" in note
+    failing = _candidate(pack, sessions[-1])
+    assert failing["n_err"] == 3 and failing["error_turn_rate"] == 0.3  # 3 / (7 + 3)
+    assert "n_err" in failing["why"]
+    assert failing["anomaly_factors"]["n_err"] == 1.0
+    assert _candidate(pack, sessions[0])["anomaly_factors"]["n_err"] == 0.0
+
+
+def test_no_errors_have_zero_error_factor_and_empty_rate():
+    sessions = [sess(f"noerr-{i}", n_turns=i + 1) for i in range(3)]
+    pack = S.build_pack(sessions, iter([]), _empty_tools())
+    assert pack["corpus"]["n_err"] == 0 and pack["corpus"]["error_turn_rate"] == 0.0
+    assert all(it["anomaly_factors"]["n_err"] == 0.0 for it in pack["candidate_sessions"]["items"])
+    empty = S.build_pack([], iter([]), _empty_tools())
+    assert empty["corpus"]["error_turn_rate"] == 0.0
+    assert empty["baselines_by_dir_class"]["real"]["n_err"]["n"] == 0
+
+
+# --- 8. custom tool labels are private at the pack boundary -----------------
+def test_tool_labels_allowlist_exact_native_names_and_hash_every_other_name():
+    import re
+    custom_names = ("mcp__synthetic-client__project-c_lookup", "project-c_custom_tool", "read", "?")
+    tools = {"tool_result_bytes": {
+        name: {"chars": 40, "est_tokens": 10, "count": 2}
+        for name in ("Read", "Bash") + custom_names
+    }, "tool_use_freq": {custom_names[0]: 100}}
+    pack = S.build_pack([], iter([]), tools)
+    rows = pack["tool_injection"]["by_tool"]
+    assert [row["tool"] for row in rows[:2]] == ["Read", "Bash"]
+    assert all(re.fullmatch(r"tool_[0-9a-f]{10}", row["tool"]) for row in rows[2:])
+    assert all(row["chars_per_call"] == 20 for row in rows)
+    assert sum(row["est_tokens"] for row in rows) == 60
+    # Serialize the entire pack: neither object keys nor row values may leak a custom label.
+    blob = json.dumps(pack)
+    for name in custom_names[:2]:
+        assert name not in blob
+    assert "synthetic-client" not in blob and "mcp__" not in blob
+    assert S._tool_index(tools) == {S._tool_label(name): name for name in custom_names}
+
+
+def test_main_writes_tool_index_local_only_and_masks_pack(tmp_path, monkeypatch, capsys):
+    import re
+    out = tmp_path / "out"
+    _seed_dataset(str(out))
+    monkeypatch.setenv("CC_COACH_OUT", str(out))
+    assert S.main() == 0
+    streams = capsys.readouterr()
+    idx = out / "tool_index.json"
+    assert (idx.stat().st_mode & 0o777) == 0o600
+    mapping = json.loads(idx.read_text())
+    assert mapping == {S._tool_label(G.CUSTOM_TOOL): G.CUSTOM_TOOL}
+    assert all(re.fullmatch(r"tool_[0-9a-f]{10}", key) for key in mapping)
+    pack = json.loads((out / "signal_pack.json").read_text())
+    assert S._tool_label(G.CUSTOM_TOOL) in [row["tool"] for row in pack["tool_injection"]["by_tool"]]
+    assert G.CUSTOM_TOOL not in json.dumps(pack) + streams.out + streams.err
+
+
+def test_main_refuses_symlinked_tool_index(tmp_path, monkeypatch, capsys):
+    if not hasattr(os, "O_NOFOLLOW"):
+        import pytest
+        pytest.skip("O_NOFOLLOW unavailable on this platform")
+    out = tmp_path / "out"
+    _seed_dataset(str(out))
+    target = tmp_path / "local_index_target"
+    target.write_text("keep")
+    (out / "tool_index.json").symlink_to(target)
+    monkeypatch.setenv("CC_COACH_OUT", str(out))
+    assert S.main() == 1
+    streams = capsys.readouterr()
+    assert target.read_text() == "keep"
+    assert str(out) not in streams.err and "could not" in streams.err
+
+
+# --- 9. surrogate-bearing labels hash without aliasing literal '?' ----------
+def test_surrogate_hashes_preserve_distinct_labels():
+    import re
+    for label, question in (("\ud800", "?"), ("project-\udc80", "project-?")):
+        assert re.fullmatch(r"proj_[0-9a-f]{10}", S._proj_id(label))
+        assert S._proj_id(label) != S._proj_id(question)
+        assert S._read_token(label) != S._read_token(question)
+        assert S._tool_label(label) != S._tool_label(question)
+        assert S._proj_id(label) == S._proj_id(label)
+
+
+def test_main_preserves_surrogate_project_resolution(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    _seed_dataset(str(out))
+    ds = out / "dataset"
+    sessions = S.load_sessions(str(ds))
+    label = "project-\udc80"
+    sessions[0]["p"] = label
+    (ds / "sessions.jsonl").write_text("".join(json.dumps(s) + "\n" for s in sessions))
+    monkeypatch.setenv("CC_COACH_OUT", str(out))
+    assert S.main() == 0
+    mapping = json.loads((out / "project_index.json").read_text())
+    assert mapping[S._proj_id(label)] == label
+    pack = json.loads((out / "signal_pack.json").read_text())
+    assert any(it["p"] == S._proj_id(label) for it in pack["candidate_sessions"]["items"])
+    assert label not in json.dumps(pack)
