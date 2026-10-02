@@ -124,6 +124,96 @@ assert_contains "LOCALAPPDATA with shell syntax: reports the literal path" '- %L
 assert_not_contains "LOCALAPPDATA with shell syntax: literal file present" '(not present)' "$literal_out"
 assert "Windows environment paths: shell syntax never executes" test ! -e "$tmp/sentinel"
 
+# Exercise shipped platform maps rather than recreating the vendor paths in a
+# clean schema fixture. Linux uses separate overridden config and data roots.
+cp "$SKILL_DIR/vendors/zed.json" "$SKILL_DIR/vendors/antigravity.json" "$tmp/report/vendors/"
+platform_home="$tmp/platform home"
+xdg_config="$tmp/active config"
+xdg_data="$tmp/active data"
+local_appdata="$tmp/Windows User/AppData/Local"
+mkdir -p "$xdg_config/zed" "$xdg_data/zed/logs" "$platform_home/.config/zed" \
+  "$platform_home/Library/Logs/Zed" "$windows_appdata/Zed" "$local_appdata/Zed/logs"
+printf '{}\n' >"$xdg_config/zed/settings.json"
+printf '{}\n' >"$platform_home/.config/zed/settings.json"
+printf '{}\n' >"$windows_appdata/Zed/settings.json"
+for product in Antigravity 'Antigravity IDE'; do
+  for product_root in "$xdg_config/$product" "$platform_home/Library/Application Support/$product" "$windows_appdata/$product"; do
+    mkdir -p "$product_root/Crashpad" "$product_root/logs" "$product_root/CachedData"
+    printf 'installation identifier\n' >"$product_root/machineid"
+  done
+done
+for platform_case in linux darwin win32; do
+  case "$platform_case" in
+    linux) kernel=Linux; zed_settings="$xdg_config/zed/settings.json"; zed_logs="$xdg_data/zed/logs"; antigravity_root="$xdg_config" ;;
+    darwin) kernel=Darwin; zed_settings='~/.config/zed/settings.json'; zed_logs='~/Library/Logs/Zed'; antigravity_root='~/Library/Application Support' ;;
+    win32) kernel=MINGW64_NT-10.0; zed_settings='%APPDATA%/Zed/settings.json'; zed_logs='%LOCALAPPDATA%/Zed/logs'; antigravity_root='%APPDATA%' ;;
+  esac
+  zed_out="$(PATH="$tmp/bin:$PATH" TEST_KERNEL="$kernel" WSL_INTEROP= WSL_DISTRO_NAME= HOME="$platform_home" XDG_CONFIG_HOME="$xdg_config" XDG_DATA_HOME="$xdg_data" APPDATA="$windows_appdata" LOCALAPPDATA="$local_appdata" bash "$tmp/report/scripts/report_persistent_files.sh" zed 2>&1)"
+  assert_eq "Zed platform report ($platform_case): exit 0" "0" "$?"
+  assert_contains "Zed platform report ($platform_case): selected settings path" "- $zed_settings  [" "$zed_out"
+  assert_contains "Zed platform report ($platform_case): selected logs path" "- $zed_logs  [" "$zed_out"
+  assert_not_contains "Zed platform report ($platform_case): files present" '(not present)' "$zed_out"
+  assert_not_contains "Zed platform report ($platform_case): paths resolved" '(skipped:' "$zed_out"
+
+  antigravity_out="$(PATH="$tmp/bin:$PATH" TEST_KERNEL="$kernel" WSL_INTEROP= WSL_DISTRO_NAME= HOME="$platform_home" XDG_CONFIG_HOME="$xdg_config" APPDATA="$windows_appdata" bash "$tmp/report/scripts/report_persistent_files.sh" antigravity 2>&1)"
+  assert_eq "Antigravity platform report ($platform_case): exit 0" "0" "$?"
+  assert_eq "Antigravity platform report ($platform_case): eight product paths" "8" "$(printf '%s\n' "$antigravity_out" | awk '/^- /{count++} END {print count+0}')"
+  for product in Antigravity 'Antigravity IDE'; do
+    assert_contains "Antigravity platform report ($platform_case): $product root" "- $antigravity_root/$product/logs  [" "$antigravity_out"
+  done
+  assert_not_contains "Antigravity platform report ($platform_case): files present" '(not present)' "$antigravity_out"
+  assert_not_contains "Antigravity platform report ($platform_case): paths resolved" '(skipped:' "$antigravity_out"
+done
+
+# A missing map entry is inapplicable, not evidence that a file is absent. A
+# generic .path remains the fallback when the map does not cover this platform.
+xdg_state="$tmp/active state"
+mkdir -p "$xdg_state"
+printf 'state\n' >"$xdg_state/state.json"
+jq '.persistent_files = [
+  {paths: {darwin: "~/mac-only.json"}, note: "macOS-only state"},
+  {paths: {darwin: "~/other-mac.json"}, path: "${XDG_STATE_HOME}/state.json", note: "generic fallback state"}
+]' "$SKILL_DIR/vendors/zed.json" >"$tmp/report/vendors/platform-fixture.json"
+fallback_out="$(PATH="$tmp/bin:$PATH" TEST_KERNEL=Linux WSL_INTEROP= WSL_DISTRO_NAME= HOME="$platform_home" XDG_STATE_HOME="$xdg_state" bash "$tmp/report/scripts/report_persistent_files.sh" platform-fixture 2>&1)"
+assert_contains "Missing platform map: explicitly skipped" '[(skipped: no persistent path configured for linux)]' "$fallback_out"
+assert_contains "Platform map: generic .path fallback resolves state override" "- $xdg_state/state.json  [" "$fallback_out"
+assert_not_contains "Missing platform map: no false absent claim" '(not present)' "$fallback_out"
+assert_not_contains "Platform map: another OS path is not reported" '~/mac-only.json' "$fallback_out"
+
+# Unset/empty XDG roots use their standard defaults. The fixture covers all
+# three allowlisted placeholders; unsupported placeholders remain unresolved.
+for default_dir in .config .local/share .local/state; do
+  mkdir -p "$platform_home/$default_dir"
+  printf '{}\n' >"$platform_home/$default_dir/defaults.json"
+done
+jq '.persistent_files = [
+  {path: "${XDG_CONFIG_HOME}/defaults.json"},
+  {path: "${XDG_DATA_HOME}/defaults.json"},
+  {path: "${XDG_STATE_HOME}/defaults.json"}
+]' "$SKILL_DIR/vendors/zed.json" >"$tmp/report/vendors/xdg-fixture.json"
+default_out="$(PATH="$tmp/bin:$PATH" TEST_KERNEL=Linux WSL_INTEROP= WSL_DISTRO_NAME= HOME="$platform_home" XDG_CONFIG_HOME= XDG_DATA_HOME= XDG_STATE_HOME= bash "$tmp/report/scripts/report_persistent_files.sh" xdg-fixture 2>&1)"
+for default_dir in .config .local/share .local/state; do
+  assert_contains "Empty XDG root: standard $default_dir path" "- $platform_home/$default_dir/defaults.json  [" "$default_out"
+done
+assert_not_contains "Empty XDG roots: default files present" '(not present)' "$default_out"
+relative_out="$(PATH="$tmp/bin:$PATH" TEST_KERNEL=Linux WSL_INTEROP= WSL_DISTRO_NAME= HOME="$platform_home" XDG_CONFIG_HOME=relative XDG_DATA_HOME=relative XDG_STATE_HOME=relative bash "$tmp/report/scripts/report_persistent_files.sh" xdg-fixture 2>&1)"
+for xdg_var in XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME; do
+  assert_contains "Relative $xdg_var: explicitly skipped" "[(skipped: $xdg_var must be an absolute path)]" "$relative_out"
+done
+assert_not_contains "Relative XDG roots: no false absent claim" '(not present)' "$relative_out"
+
+literal_xdg="$tmp/"'$(touch xdg-sentinel)'
+mkdir -p "$literal_xdg"
+printf '{}\n' >"$literal_xdg/defaults.json"
+literal_xdg_out="$(cd "$tmp" && PATH="$tmp/bin:$PATH" TEST_KERNEL=Linux WSL_INTEROP= WSL_DISTRO_NAME= HOME="$platform_home" XDG_CONFIG_HOME="$literal_xdg" XDG_DATA_HOME="$literal_xdg" XDG_STATE_HOME="$literal_xdg" bash "$tmp/report/scripts/report_persistent_files.sh" xdg-fixture 2>&1)"
+assert_contains "XDG shell syntax: concrete literal path reported" "- $literal_xdg/defaults.json  [" "$literal_xdg_out"
+assert_not_contains "XDG shell syntax: literal file present" '(not present)' "$literal_xdg_out"
+assert "XDG environment paths: shell syntax never executes" test ! -e "$tmp/xdg-sentinel"
+jq '.persistent_files = [{path: "${HOME}/defaults.json"}]' "$SKILL_DIR/vendors/zed.json" >"$tmp/report/vendors/unsupported-fixture.json"
+unsupported_out="$(PATH="$tmp/bin:$PATH" TEST_KERNEL=Linux WSL_INTEROP= WSL_DISTRO_NAME= HOME="$platform_home" bash "$tmp/report/scripts/report_persistent_files.sh" unsupported-fixture 2>&1)"
+assert_contains "Non-allowlisted variable: explicitly skipped" '[(skipped: unsupported variable placeholder)]' "$unsupported_out"
+assert_not_contains "Non-allowlisted variable: no false absent claim" '(not present)' "$unsupported_out"
+
 echo "== check_new_optouts.sh =="
 
 # Build an isolated skill layout so VENDORS_DIR resolves to our fixture.

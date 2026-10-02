@@ -18,7 +18,7 @@ bash tests/run-all.sh
   - `shell_commands[]` is always `platforms`-gated
   - `platforms` values restricted to `darwin` / `linux` / `win32`
 - **`scripts.test.sh`** — smoke tests for the shipped bash scripts:
-  - `report_persistent_files.sh`: literal and glob paths, multiple versions, spaces, native/WSL Windows path conversion and explicit unresolved/foreign-platform skips
+  - `report_persistent_files.sh`: literal and glob paths, multiple versions, spaces, active XDG roots, native/WSL Windows path conversion, platform/product maps and explicit unresolved/foreign-platform skips
   - `check_new_optouts.sh`: deterministic `file://` docs, real shipped Anthropic vendor data, baseline subtraction and new-token discovery
 - **`new-vendors.test.sh`** — executes shipped inventory checks and command strings against isolated CLI fixtures: exact enabled Vercel registrations, Windsurf/Codeium detection, Flatpak capability/scope checks and literal PowerShell arguments. It never changes real account, app or system settings.
 

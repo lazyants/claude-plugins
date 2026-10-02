@@ -129,6 +129,18 @@ for config in "$VENDORS_DIR"/*.json; do
   assert "settings paths cover every declared platform" jq -e \
     '.platforms as $platforms | all(.settings_files[]? | select(has("paths"));
       .paths as $paths | all($platforms[]?; $paths[.] != null))' "$config"
+  assert "persistent files define path xor paths" jq -e \
+    'all(.persistent_files[]?; has("path") != has("paths"))' "$config"
+  assert "persistent path is nonempty" jq -e \
+    'all(.persistent_files[]? | select(has("path")); .path | type == "string" and length > 0)' "$config"
+  assert "persistent paths map contains valid platform strings" jq -e --argjson valid "$VALID_PLATFORMS" \
+    'all(.persistent_files[]? | select(has("paths"));
+      (.paths | type == "object") and (.paths | length > 0) and
+      ((.paths | keys) - $valid | length == 0) and
+      all(.paths[]; type == "string" and length > 0))' "$config"
+  assert "persistent paths cover every declared platform" jq -e \
+    '.platforms as $platforms | all(.persistent_files[]? | select(has("paths"));
+      .paths as $paths | all($platforms[]?; $paths[.] != null))' "$config"
   assert "settings key_mode is literal or dotted" jq -e \
     'all(.settings_files[]?; (.key_mode // "dotted") as $mode | $mode == "literal" or $mode == "dotted")' "$config"
   assert "existing_only is boolean when present" jq -e \
@@ -306,6 +318,21 @@ assert "Anthropic ships only the standard settings target" jq -e \
 assert "Codex profile edits contain analytics only" jq -e \
   'all(.settings_files[]; [.profile_files.edits[].key] == ["analytics.enabled"] and
     [.profile_edits[].key] == ["analytics.enabled"] and .home_env == "CODEX_HOME")' "$VENDORS_DIR/codex.json"
+
+for inventory_platform in darwin linux win32; do
+  case "$inventory_platform" in
+    darwin) inventory_root='~/Library/Application Support/' ;;
+    linux) inventory_root='${XDG_CONFIG_HOME}/' ;;
+    win32) inventory_root='%APPDATA%/' ;;
+  esac
+  assert "Antigravity inventory covers both products on $inventory_platform" jq -e \
+    --arg platform "$inventory_platform" --arg root "$inventory_root" \
+    '[.persistent_files[].paths[$platform]] | sort ==
+      (["Antigravity", "Antigravity IDE"] as $products |
+       ["Crashpad", "logs", "machineid", "CachedData"] as $items |
+       [$products[] as $product | $items[] | $root + $product + "/" + .] | sort)' \
+    "$VENDORS_DIR/antigravity.json"
+done
 
 if [ "$TESTS_FAILED" -eq 0 ]; then
   echo "vendor-schema: $TESTS_RUN ok"

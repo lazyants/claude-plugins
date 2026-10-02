@@ -73,20 +73,68 @@
   "shell_env_vars": [],
   "persistent_files": [
     {
-      "path": "~/Library/Application Support/Antigravity/Crashpad",
-      "note": "Crash dumps queued for upload."
+      "paths": {
+        "darwin": "~/Library/Application Support/Antigravity/Crashpad",
+        "linux": "${XDG_CONFIG_HOME}/Antigravity/Crashpad",
+        "win32": "%APPDATA%/Antigravity/Crashpad"
+      },
+      "note": "Legacy Antigravity: crash dumps queued for upload."
     },
     {
-      "path": "~/Library/Application Support/Antigravity/logs",
-      "note": "Session logs (timestamped)."
+      "paths": {
+        "darwin": "~/Library/Application Support/Antigravity/logs",
+        "linux": "${XDG_CONFIG_HOME}/Antigravity/logs",
+        "win32": "%APPDATA%/Antigravity/logs"
+      },
+      "note": "Legacy Antigravity: session logs (timestamped)."
     },
     {
-      "path": "~/Library/Application Support/Antigravity/machineid",
-      "note": "Persistent installation ID."
+      "paths": {
+        "darwin": "~/Library/Application Support/Antigravity/machineid",
+        "linux": "${XDG_CONFIG_HOME}/Antigravity/machineid",
+        "win32": "%APPDATA%/Antigravity/machineid"
+      },
+      "note": "Legacy Antigravity: persistent installation ID."
     },
     {
-      "path": "~/Library/Application Support/Antigravity/CachedData",
-      "note": "Extension + interaction cache."
+      "paths": {
+        "darwin": "~/Library/Application Support/Antigravity/CachedData",
+        "linux": "${XDG_CONFIG_HOME}/Antigravity/CachedData",
+        "win32": "%APPDATA%/Antigravity/CachedData"
+      },
+      "note": "Legacy Antigravity: extension + interaction cache."
+    },
+    {
+      "paths": {
+        "darwin": "~/Library/Application Support/Antigravity IDE/Crashpad",
+        "linux": "${XDG_CONFIG_HOME}/Antigravity IDE/Crashpad",
+        "win32": "%APPDATA%/Antigravity IDE/Crashpad"
+      },
+      "note": "Antigravity IDE: crash dumps queued for upload."
+    },
+    {
+      "paths": {
+        "darwin": "~/Library/Application Support/Antigravity IDE/logs",
+        "linux": "${XDG_CONFIG_HOME}/Antigravity IDE/logs",
+        "win32": "%APPDATA%/Antigravity IDE/logs"
+      },
+      "note": "Antigravity IDE: session logs (timestamped)."
+    },
+    {
+      "paths": {
+        "darwin": "~/Library/Application Support/Antigravity IDE/machineid",
+        "linux": "${XDG_CONFIG_HOME}/Antigravity IDE/machineid",
+        "win32": "%APPDATA%/Antigravity IDE/machineid"
+      },
+      "note": "Antigravity IDE: persistent installation ID."
+    },
+    {
+      "paths": {
+        "darwin": "~/Library/Application Support/Antigravity IDE/CachedData",
+        "linux": "${XDG_CONFIG_HOME}/Antigravity IDE/CachedData",
+        "win32": "%APPDATA%/Antigravity IDE/CachedData"
+      },
+      "note": "Antigravity IDE: extension + interaction cache."
     }
   ],
   "diff_patterns": {

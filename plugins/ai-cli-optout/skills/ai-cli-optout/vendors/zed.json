@@ -48,11 +48,22 @@
     }
   ],
   "persistent_files": [
-    { "path": "~/.config/zed/settings.json", "note": "Default macOS/Linux user settings; source supports JSON comments. Honor XDG_CONFIG_HOME on Linux." },
-    { "path": "%APPDATA%/Zed/settings.json", "note": "Windows user settings. Expand using the Windows environment, not a guessed home-relative path." },
-    { "path": "~/Library/Logs/Zed", "note": "macOS editor logs. Report only; no deletion." },
-    { "path": "~/.local/share/zed/logs", "note": "Default Linux editor logs; honor XDG_DATA_HOME. Report only." },
-    { "path": "%LOCALAPPDATA%/Zed/logs", "note": "Windows editor logs. Report only." }
+    {
+      "paths": {
+        "darwin": "~/.config/zed/settings.json",
+        "linux": "${XDG_CONFIG_HOME}/zed/settings.json",
+        "win32": "%APPDATA%/Zed/settings.json"
+      },
+      "note": "User settings for the current platform; Linux honors XDG_CONFIG_HOME with ~/.config as its standard fallback. Zed supports JSON comments. Resolve Flatpak or --user-data-dir overrides through the app before interpreting a missing default-path file. Report only."
+    },
+    {
+      "paths": {
+        "darwin": "~/Library/Logs/Zed",
+        "linux": "${XDG_DATA_HOME}/zed/logs",
+        "win32": "%LOCALAPPDATA%/Zed/logs"
+      },
+      "note": "Editor logs for the current platform; Linux honors XDG_DATA_HOME with ~/.local/share as its standard fallback. Flatpak and custom data roots may use another location, which must be resolved from the app. Report only; never delete logs."
+    }
   ],
   "diff_patterns": {
     "env_regex": "(ZED_|TELEMETRY|DISABLE|OPT_?OUT|PRIVACY)",

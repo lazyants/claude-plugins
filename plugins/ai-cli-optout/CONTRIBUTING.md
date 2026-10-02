@@ -32,6 +32,8 @@ An editor that can overwrite a settings file must declare `process_check.cmd` or
 
 The workflow consumes `notes[]` before applying settings and includes the notes in its report. Put machine-applicable work in structured fields where possible: Codex `profile_files` describes existing profile overlays, and `profile_edits` covers older nested profiles. An instruction printed in a note is not an applied opt-out. Report unresolved scopes as pending.
 
+Persistent-state entries can use `path` or a platform `paths` map too. Select the host's path before checking existence; do not claim a macOS default is absent evidence about Linux or Windows. Linux paths may use `${XDG_CONFIG_HOME}`, `${XDG_DATA_HOME}` and `${XDG_STATE_HOME}` with their standard home-relative defaults. The reporter expands these roots without eval and reports unsupported or unresolved paths separately from checked-but-absent files. Custom editor/server roots that cannot be resolved by the helper still need manual inspection and remain pending in the workflow report.
+
 ### Vendor doc research: seed `doc_urls[]` with every relevant page
 
 `scripts/check_new_optouts.sh` only diffs the URLs listed in a vendor's `doc_urls[]`. Miss a page at authoring time and the script can never surface flags added there.
