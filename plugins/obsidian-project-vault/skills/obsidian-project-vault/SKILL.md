@@ -493,13 +493,17 @@ separate.
    headings, and block IDs; check identity and scope against source evidence. Choose the retained
    path using the project's schema and navigation conventions, recording why. Do not choose by
    filename, age, or size alone. Record donor paths and inventory their unique contributions before
-   editing.
+   editing. Resolve donor outbound links, embeds, and citation paths in their original locations;
+   record the actual target paths and fragments, not just their written destinations.
 2. **Preserve content and evidence.** Fold donor facts, analysis, citations, and relevant properties
    into the canonical page. Keep conflicting claims attributed to their sources with their
    uncertainty intact; do not silently choose the newer claim. Preserve meaningful former names as
    schema-supported aliases after checking collisions. Retain referenced headings/block IDs, or
    record an old-fragment → new-fragment mapping when they change, including ID collisions. Resolve
-   property conflicts explicitly; keep both pages if preservation remains uncertain. Raw payloads
+   property conflicts explicitly; keep both pages if preservation remains uncertain. Rebase copied
+   Markdown destinations and reference definitions from the canonical page's location so they
+   still point to the recorded targets. Resolve copied wikilinks and same-note fragments there too;
+   disambiguate or map them explicitly if their meaning changes after moving. Raw payloads
    and source ingest state stay unchanged.
 3. **Retarget incoming links.** Use Lint's Link Integrity inventory below across the vault,
    configured raw-source directories (read-only), and any other incoming-link locations declared in
@@ -513,7 +517,8 @@ separate.
    preserve an old path. Report retained donors and ambiguous/unreadable references.
 4. **Verify before deletion.** Compare the canonical page against the donor inventory: every unique
    contribution and citation must survive. Resolve rewritten links and their fragments, check the
-   canonical page's outbound links, and verify no alias became ambiguous. Delete only individual
+   canonical page's outbound links against their recorded original targets and fragments, and
+   verify no alias became ambiguous. A different existing file is not the same citation. Delete only individual
    donor wiki files with no remaining incoming references and complete preservation evidence. Keep
    donors whenever a check is incomplete; repeat content and link checks after deletion. Report
    intentional redirects/archives separately, using exclusions only if declared in the schema.

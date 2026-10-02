@@ -115,18 +115,27 @@ db-guardrails/
 │   ├── assets/                     # scaffolding for layers 1–3
 │   └── references/framework-guards.md
 └── tests/
-    └── block-destructive-db.test.sh
+    ├── block-destructive-db.test.sh
+    └── rails-db-guardrails.test.rb
 ```
 
 ## Tests
 
 ```sh
 bash tests/block-destructive-db.test.sh
+ruby tests/rails-db-guardrails.test.rb
 ```
 
 Covers blocked commands, legitimate look-alikes that must pass (`truncate -s 0`
 the coreutil, `php artisan migrate`, `DELETE ... WHERE`, `rm -rf node_modules`),
 and the bypass env var.
+
+The Rails suite invokes real Rake tasks with a stub Rails environment and
+database marker actions. It covers the first invocation, either task-definition
+order, destructive prerequisites (including concurrent Rake invocation),
+test/override exemptions and safe commands.
+The Rails asset installs at `lib/tasks/db_guardrails.rake`; replace the old
+`config/initializers/db_guardrails.rb` placement when upgrading.
 
 ## License
 

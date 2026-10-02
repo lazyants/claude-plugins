@@ -13,6 +13,23 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 - Setup ships a complete `.mcp.json` document with a named server inside `mcpServers` (#55). Setup, Audit, Ingest, Query, and Lint share the project's per-type frontmatter schema (#30), and operational log entries use the documented bracketed-date H2 format (#29).
 - Lint checks wikilinks and embeds as well as Markdown links, resolves paths and fragments, and reports ambiguous targets (#31). Generated audit reports are excluded from orphan candidates (#54). Merely reading or mechanically repairing a page preserves its content-update date (#148), and knowledge-gap stub creation becomes a suggestion instead of an automatic source of orphan pages (#151).
 
+## [db-guardrails 1.0.1] — 2026-10-02
+
+### Fixed
+
+- **The Rails layer-2 guard blocks the first destructive task invocation (#20).**
+  Install `assets/rails-db_guardrails.rb` as `lib/tasks/db_guardrails.rake`,
+  replacing the old `config/initializers/db_guardrails.rb`. Initializers run
+  after Rake has copied the invoking task's prerequisites, so the old guard
+  never ran on that first call. The task file attaches the guard before
+  invocation, completes it before dispatching destructive prerequisites (also
+  in Rake's concurrent `--multitask` mode), and retains it when task
+  definitions load later. It boots the environment before checking the test
+  exemption or exact `ALLOW_DESTRUCTIVE=true` override on every execution,
+  including after a single-task re-enable. A real-Rake regression
+  suite covers all eight guarded tasks, both definition orders, exemptions,
+  destructive prerequisites and safe commands; CI runs it alongside the hook suite.
+
 ## [obsidian-project-vault 1.0.2] — 2026-10-02
 
 ### Fixed

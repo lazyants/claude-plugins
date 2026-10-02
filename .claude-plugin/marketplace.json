@@ -37,7 +37,7 @@
       "name": "db-guardrails",
       "source": "./plugins/db-guardrails",
       "description": "Stop AI coding agents from accidentally emptying your database. An always-on hook blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for database-level privilege separation and framework boot guards.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": {
         "name": "Lazy Ants"
       },
@@ -116,7 +116,7 @@
       "name": "literary-translator",
       "source": "./plugins/literary-translator",
       "description": "High-fidelity literary book translation from a Gutenberg EPUB source (expert-mode `custom` extractor also supported), run to convergence through a codex-translate -> false-green gate -> codex-review -> Claude-fix loop over a frozen name/realia canon, with configurable verse policy, ledger resumability, and optional assembly into a rendered Obsidian glossary-wiki.",
-      "version": "1.221.0",
+      "version": "1.222.0",
       "author": {
         "name": "Lazy Ants"
       },

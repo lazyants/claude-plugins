@@ -57,7 +57,7 @@ work, never the coverage: skipping a suite locally is right, skipping it remotel
 | --- | --- | --- |
 | `ai-cli-optout.yml` | `tests/run-all.sh` | bash, jq, curl (preinstalled) |
 | `cc-usage-coach.yml` | `tests/run-all.sh` (pytest) | Python 3.14 |
-| `db-guardrails.yml` | `tests/block-destructive-db.test.sh` | bash, python3, jq (preinstalled) |
+| `db-guardrails.yml` | `tests/block-destructive-db.test.sh`, `tests/rails-db-guardrails.test.rb` | bash, python3, jq, ruby + rake (preinstalled) |
 | `enduser-handbook.yml` | `node --test tests/*.test.mjs`, then `tests/reference-assets.test.sh` | Node 22, ruby (preinstalled), esbuild (best-effort) |
 | `literary-translator.yml` | `python3 -m pytest -q`, run **from the plugin directory** | Python 3.14 + `requirements.txt`, Node 22 |
 | `multi-profile-plugins.yml` | `tests/inspect_codex_profiles.test.py`, `tests/report_limits.test.py` and `tests/install_code_limit.test.py`, then the report script and the Codex script, each against an empty `HOME` | Python 3.11 and 3.14 matrix (stdlib only) |

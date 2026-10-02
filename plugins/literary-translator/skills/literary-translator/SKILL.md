@@ -3213,13 +3213,13 @@ rendered prompt out as `needs_fix` and truncates the template before every
 top-level preflight, so no audit call site exists on this route. Say what
 that check actually is, because "the fix turn is unaudited" understates it:
 it is a COPY-FIDELITY comparison of every file Step 0a copied into the
-durable root against the plugin bytes it came from — 55 scripts, the three
-workflow templates, 27 schemas and the 6 language files, 91 artifacts — run
+durable root against the plugin bytes it came from — 56 scripts, the three
+workflow templates, 27 schemas and the 6 language files, 92 artifacts — run
 after every dispatched fix call on the fallback. What the default path has
 in its place is the #396 rule below: `scaffold_setup.py --verify` before
 each driver launch, which compares the two BUNDLES — 22 scripts plus
 `mass-translate-wf.template.js` and `glossary-pass-wf.template.js`, 24
-members. So 67 copied artifacts have no byte comparison on this path,
+members. So 68 copied artifacts have no byte comparison on this path,
 including every durable schema, every language preset,
 `skeptic-pass-wf.template.js`, and the W7/W8 entry points `final_audit.py`
 and `assemble.py` — and `final_audit.py` is in NO bundle hash by design (see
@@ -3302,6 +3302,14 @@ NOT that every segment converged; read the printed JSON's
 `summary.failed`/`summary.needs_fix`. Exit 1 means a gate refused before any
 dispatch (lock contention, the Step 1 re-translate gate, the volume cap, a
 `--resume-from-run-id` refusal). Exit 2 is a usage/environment error.
+
+**Worker usage investigation (#962).** For explicit Claude session, Codex session
+or `codex exec --json` records, run `assets/scripts/worker_usage.py` from the plugin
+with `--format`, `--worker-class` and the record paths. It is read-only, returns
+observed input/cache counts with provenance, and launches no workers. See
+[lean-worker-investigation.md](references/lean-worker-investigation.md) for real-job
+measurements, the companion's isolation limitations and the blind A/B gate before
+any transport switch. Counts do not attribute task versus inherited context.
 
 **While it runs: `driver_status.py` (#765).** The driver prints its one JSON
 line only when the batch is over, so for the hours in between there was no
