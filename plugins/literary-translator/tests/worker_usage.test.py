@@ -127,6 +127,10 @@ def test_synthetic_error_message_is_not_a_zero_input_request(tmp_path):
     ("codex-session", codex(), {"type": "event_msg", "payload": {}}),
     ("codex-session", codex(), {"type": "event_msg", "payload": {"type": "token_count"}}),
     ("codex-session", codex(), {"type": "turn_context", "payload": None}),
+    ("claude-session", claude(), {}),
+    ("codex-session", codex(), {"type": None}),
+    ("codex-exec", {"type": "turn.completed", "usage": {
+        "input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 10}}, {"type": ""}),
 ])
 def test_malformed_row_never_produces_partial_success(tmp_path, fmt, valid, bad):
     proc, _ = invoke(tmp_path, fmt, [valid, bad])

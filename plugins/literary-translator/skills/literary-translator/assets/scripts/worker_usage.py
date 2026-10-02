@@ -76,6 +76,8 @@ def summarize(path, fmt):
                 raise UsageError(f"line {line_number}: invalid JSON") from exc
             if not isinstance(row, dict):
                 raise UsageError(f"line {line_number}: expected an object")
+            if not isinstance(row.get("type"), str) or not row["type"]:
+                raise UsageError(f"line {line_number}: missing or invalid record type")
             rows.append(row)
     except (OSError, UnicodeError) as exc:
         raise UsageError(f"cannot read UTF-8 record: {exc}") from exc
