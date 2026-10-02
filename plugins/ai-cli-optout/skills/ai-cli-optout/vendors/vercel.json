@@ -20,8 +20,8 @@
     { "path": "~/Library/Application Support/com.vercel.cli/auth.json", "note": "macOS: OAuth token. Verify permissions are 0600 — leaking this grants account access." },
     { "path": "~/.local/share/com.vercel.cli/config.json", "note": "Linux XDG_DATA_HOME path for the same config file." },
     { "path": "~/.local/share/com.vercel.cli/auth.json", "note": "Linux XDG_DATA_HOME path for the auth token. Same 0600 guidance as macOS." },
-    { "path": "%APPDATA%\\Roaming\\xdg.data\\com.vercel.cli\\config.json", "note": "Windows path per Vercel's global-configuration docs (XDG-style under %APPDATA%\\Roaming). Unverified locally — reported for completeness." },
-    { "path": "%APPDATA%\\Roaming\\xdg.data\\com.vercel.cli\\auth.json", "note": "Windows auth token location. Same 0600 guidance applies once the file exists." }
+    { "path": "%APPDATA%\\com.vercel.cli\\Data\\config.json", "note": "Windows default from the CLI's xdg-app-paths dataDirs() implementation: %APPDATA% already includes Roaming. XDG_DATA_HOME overrides the default. Sources: https://github.com/vercel/vercel/blob/main/packages/cli-config/src/paths.ts and https://github.com/rivy/js.xdg-app-paths/blob/v5.1.0/index.js ." },
+    { "path": "%APPDATA%\\com.vercel.cli\\Data\\auth.json", "note": "Windows default auth-token location. Review Windows account ACLs before copying or sharing this file." }
   ],
   "diff_patterns": {
     "env_regex": "(VERCEL_|TELEMETRY|DISABLE|OPT_?OUT|TRACK|METRICS)",

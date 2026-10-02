@@ -3,19 +3,28 @@
   "display": "Visual Studio Code",
   "detect_cmd": "code",
   "detect_paths": [
-    "~/.vscode",
-    "~/Library/Application Support/Code",
-    "/Applications/Visual Studio Code.app"
+    "/Applications/Visual Studio Code.app",
+    "~/Applications/Visual Studio Code.app",
+    "/usr/bin/code",
+    "/snap/bin/code",
+    "%LOCALAPPDATA%/Programs/Microsoft VS Code/Code.exe",
+    "%ProgramFiles%/Microsoft VS Code/Code.exe"
   ],
-  "platforms": ["darwin"],
+  "platforms": ["darwin", "linux", "win32"],
   "doc_urls": [
     "https://github.com/microsoft/vscode-docs/blob/main/docs/configure/telemetry.md",
-    "https://code.visualstudio.com/docs/configure/telemetry"
+    "https://code.visualstudio.com/docs/configure/telemetry",
+    "https://code.visualstudio.com/docs/configure/settings"
   ],
   "settings_files": [
     {
-      "path": "~/Library/Application Support/Code/User/settings.json",
+      "paths": {
+        "darwin": "~/Library/Application Support/Code/User/settings.json",
+        "linux": "~/.config/Code/User/settings.json",
+        "win32": "%APPDATA%/Code/User/settings.json"
+      },
       "format": "json",
+      "key_mode": "literal",
       "edits": [
         { "key": "telemetry.telemetryLevel", "value": "off", "disables": "All VS Code telemetry tiers (crash, error, usage). Supersedes deprecated telemetry.enableTelemetry / telemetry.enableCrashReporter — never write both." }
       ]
@@ -34,11 +43,16 @@
     "settings_regex": "^telemetry\\."
   },
   "process_check": {
-    "cmd": "pgrep -i 'Visual Studio Code'",
+    "commands": {
+      "darwin": "pgrep -if '/Visual Studio Code[.]app/Contents/'",
+      "linux": "pgrep -ix code",
+      "win32": "powershell.exe -NoProfile -Command 'try { if (Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -eq \"Code\" }) { exit 0 }; exit 1 } catch { [Console]::Error.WriteLine($_); exit 2 }'"
+    },
     "if_running": "Quit VS Code before editing settings.json — graceful-shutdown rewrite can clobber manual edits."
   },
   "notes": [
-    "telemetry.telemetryLevel is the one canonical key — never double-write the deprecated enableTelemetry / enableCrashReporter alongside it."
+    "telemetry.telemetryLevel is the one canonical key — never double-write the deprecated enableTelemetry / enableCrashReporter alongside it.",
+    "Settings paths are the documented default user paths. If XDG_CONFIG_HOME, VSCODE_APPDATA, portable mode or --user-data-dir is in use, resolve the active user settings file first. Existing VS Code profile-specific settings can override the default user setting; inspect those profiles before claiming all-profile coverage."
   ],
   "caveats": [
     {

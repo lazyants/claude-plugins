@@ -2,7 +2,7 @@
   "name": "gemini",
   "display": "Google Gemini CLI",
   "detect_cmd": "gemini",
-  "detect_paths": ["~/.gemini"],
+  "detect_paths": [],
   "doc_urls": [
     "https://google-gemini.github.io/gemini-cli/docs/cli/telemetry.html"
   ],

@@ -2,9 +2,7 @@
   "name": "macos-privacy",
   "display": "macOS system privacy",
   "detect_cmd": "sw_vers",
-  "detect_paths": [
-    "/Library/Application Support/CrashReporter/DiagnosticMessagesHistory.plist"
-  ],
+  "detect_paths": [],
   "platforms": ["darwin"],
   "doc_urls": [
     "https://support.apple.com/guide/mac-help/apple-intelligence-and-privacy-mchlfc0d4779/mac",
@@ -42,7 +40,7 @@
     {
       "name": "Apple Intelligence features",
       "ui_path": "System Settings → Apple Intelligence & Siri → toggle Apple Intelligence OFF (or granular per-feature toggles: Writing Tools, Genmoji, Image Playground, Mail/Notes/Safari summaries)",
-      "reason": "com.apple.applicationaccess allow* keys are MDM-only — plain `defaults write` no-ops on unmanaged Macs. Automated path requires a signed .mobileconfig restrictions profile installed via `sudo profiles install -path <profile>`; this skill does NOT ship or install such a profile."
+      "reason": "com.apple.applicationaccess allow* restriction keys are managed-device MDM controls. On unmanaged Macs use the supported System Settings controls above; this skill does not install a configuration profile or claim that defaults writes disable Apple Intelligence."
     },
     {
       "name": "Improve Siri & Dictation",

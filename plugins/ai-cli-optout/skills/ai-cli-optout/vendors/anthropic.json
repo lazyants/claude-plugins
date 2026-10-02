@@ -2,7 +2,7 @@
   "name": "anthropic",
   "display": "Anthropic Claude Code",
   "detect_cmd": "claude",
-  "detect_paths": ["~/.claude"],
+  "detect_paths": [],
   "doc_urls": [
     "https://code.claude.com/docs/en/env-vars.md",
     "https://code.claude.com/docs/en/data-usage.md",
@@ -20,21 +20,7 @@
         { "key": "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "value": "1", "disables": "In-session numeric rating prompt" },
         { "key": "env.DISABLE_FEEDBACK_COMMAND", "value": "1", "disables": "/feedback command" },
         { "key": "skipWebFetchPreflight", "value": true, "disables": "Hostname preflight to api.anthropic.com" }
-      ],
-      "_hook_note": "Usually blocked by Self-Modification hook — expect to fall back to manual paste."
-    },
-    {
-      "path": "~/.claude-bm/settings.json",
-      "format": "json",
-      "edits": [
-        { "key": "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "value": "1", "disables": "Kill switch", "requires_confirmation": true, "tradeoff_note": "Disables the remote feature-flag fetch itself, not just telemetry, so any capability delivered behind a feature flag silently stops being offered and the client's built-in defaults are what remain. Measured against Claude Code 2.1.241 on 2026-08-24: that build gates /remote-control, /feedback, /design-sync, Projects and --enable-live-preview on this variable. /remote-control stops being offered because its visibility resolves through a flag whose built-in default is off. Upstream anthropics/claude-code#34178 was closed 2026-04-12 without the behaviour changing; it still reproduces. Bisection and re-measurement: https://github.com/lazyants/claude-plugins/issues/142. Users who need any of those capabilities should decline this edit; declining leaves the narrow opt-out, which does not touch the feature-flag fetch. One exception to state when surfacing this: that bundle's DISABLE_FEEDBACK_COMMAND disables /feedback by design, so omit it if the user wants that command." },
-        { "key": "env.DISABLE_TELEMETRY", "value": "1", "disables": "Statsig operational metrics", "requires_confirmation": true, "tradeoff_note": "Sufficient ON ITS OWN, isolated by bisection 2026-04-24. Disables the remote feature-flag fetch itself, not just telemetry, so any capability delivered behind a feature flag silently stops being offered and the client's built-in defaults are what remain. Measured against Claude Code 2.1.241 on 2026-08-24: that build gates /remote-control, /feedback, /design-sync, Projects and --enable-live-preview on this variable. /remote-control stops being offered because its visibility resolves through a flag whose built-in default is off. Upstream anthropics/claude-code#34178 was closed 2026-04-12 without the behaviour changing; it still reproduces. Bisection and re-measurement: https://github.com/lazyants/claude-plugins/issues/142. Users who need any of those capabilities should decline this edit; declining leaves the narrow opt-out, which does not touch the feature-flag fetch. One exception to state when surfacing this: that bundle's DISABLE_FEEDBACK_COMMAND disables /feedback by design, so omit it if the user wants that command." },
-        { "key": "env.DISABLE_ERROR_REPORTING", "value": "1", "disables": "Sentry crash/error reports" },
-        { "key": "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "value": "1", "disables": "In-session rating prompt" },
-        { "key": "env.DISABLE_FEEDBACK_COMMAND", "value": "1", "disables": "/feedback command" },
-        { "key": "skipWebFetchPreflight", "value": true, "disables": "Hostname preflight to api.anthropic.com" }
-      ],
-      "_hook_note": "Partial block — agent edits allowed for env block and new top-level keys. DO NOT anchor edits near skipDangerousModePermissionPrompt / skipAutoPermissionPrompt."
+      ]
     }
   ],
   "shell_env_vars": [],
@@ -43,7 +29,7 @@
   ],
   "diff_patterns": {
     "env_regex": "(NONESSENTIAL|TELEMETRY|FEEDBACK|ERROR_REPORT|OPT_?OUT|SURVEY|PRIVACY|ANALYTICS|TRAFFIC|DO_NOT_TRACK)",
-    "settings_regex": "`skip[A-Z][A-Za-z]+`"
+    "settings_regex": "skip[A-Z][A-Za-z]+"
   },
   "provider_switches": [
     { "var": "CLAUDE_CODE_USE_BEDROCK", "value": "1", "note": "Routes to AWS Bedrock; telemetry off by default there" },

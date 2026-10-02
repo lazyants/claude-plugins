@@ -1,0 +1,46 @@
+{
+  "name": "windsurf",
+  "display": "Windsurf / Codeium (Devin Desktop)",
+  "detect_cmd": "",
+  "detect_paths": [],
+  "detect_check": "command -v windsurf >/dev/null 2>&1 || command -v devin-desktop >/dev/null 2>&1 || { for editor in code cursor; do if command -v \"$editor\" >/dev/null 2>&1 && extension_inventory=$(\"$editor\" --list-extensions 2>/dev/null) && printf '%s\\n' \"$extension_inventory\" | grep -Eiq '^codeium\\.codeium$'; then exit 0; fi; done; exit 1; }",
+  "doc_urls": [
+    "https://docs.windsurf.com/troubleshooting/plugins-common-issues",
+    "https://docs.devin.ai/desktop/troubleshooting/plugins-common-issues",
+    "https://docs.devin.ai/desktop/getting-started",
+    "https://docs.devin.ai/admin/security",
+    "https://windsurf.com/settings",
+    "https://windsurf.com/terms-of-service-individual",
+    "https://marketplace.visualstudio.com/items?itemName=Codeium.codeium"
+  ],
+  "settings_files": [],
+  "shell_env_vars": [],
+  "manual_only": true,
+  "manual_instructions": [
+    "Sign in to the Windsurf/Codeium account used by your editor or extension at https://windsurf.com/settings. The official General Issues documentation directs code-snippet telemetry opt-out to that account page; disable code-snippet telemetry/data sharing there and verify the saved account setting. Use the same account for the Windsurf editor and Codeium extensions.",
+    "Current vendor documentation calls the renamed editor Devin Desktop. For paid Devin accounts, the official Security page says training can be disabled on the Data Controls settings page, enabling Zero Data Retention with model providers; on Teams only an administrator can opt out, and Enterprise terms govern the organization's controls. Follow the account's actual plan/admin controls rather than assuming every account exposes the same toggle.",
+    "If an account/control is unavailable, report opt-out as unverified and use the vendor's support/account administrator; do not write guessed codeium.enableTelemetry or codeium.enableSnippetTelemetry settings. Local editor telemetry settings do not prove cloud code-snippet/training collection is disabled.",
+    "Editor extensions have separate telemetry streams. Review each extension's own documented privacy controls. Account opt-out does not prevent code/context being sent for cloud inference or retroactively erase previously collected data."
+  ],
+  "process_check": {
+    "commands": {
+      "darwin": "pgrep -x Windsurf || pgrep -x Devin",
+      "linux": "pgrep -x windsurf || pgrep -x devin-desktop",
+      "win32": "powershell.exe -NoProfile -Command 'try { $running = Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -match \"^(Windsurf|Devin)$\" }; if ($running) { exit 0 } else { exit 1 } } catch { exit 2 }'"
+    },
+    "if_running": "The account-level privacy change is made in the browser. Restart/reconnect the editor or extension after saving it and verify the same account's setting; this entry does not edit a running editor's settings.json."
+  },
+  "persistent_files": [
+    { "path": "~/.codeium/windsurf", "note": "Officially documented editor local configuration/state directory, including during the Devin Desktop rename. Report only; not an installation detector and never deleted." }
+  ],
+  "diff_patterns": {
+    "env_regex": "(CODEIUM_|WINDSURF_|DEVIN_|TELEMETRY|DISABLE|OPT_?OUT|PRIVACY)",
+    "settings_regex": "(telemetry|snippet|training|privacy|retention|data.controls)"
+  },
+  "notes": [
+    "Research baseline: Windsurf docs redirect to the vendor's Devin Desktop docs. The documented new desktop launcher is devin-desktop; the separate devin CLI binary alone is not desktop detection.",
+    "Automatic detection covers the windsurf/devin-desktop launchers and the exact Codeium.codeium extension ID in VS Code/Cursor inventories. For an editor without a launcher or Codeium installed in another IDE, verify the installed app/plugin in that IDE's inventory and select this vendor explicitly; do not treat leftover ~/.codeium state as proof of installation.",
+    "This entry uses the current vendor-documented account privacy control. The issue's claim that a local telemetry key exists is not sufficient evidence of a supported key; no undocumented setting or environment variable is shipped."
+  ],
+  "caveats": []
+}

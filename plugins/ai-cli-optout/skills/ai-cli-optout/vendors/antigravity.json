@@ -1,45 +1,110 @@
 {
   "name": "antigravity",
   "display": "Google Antigravity IDE",
-  "detect_cmd": "antigravity",
-  "detect_paths": [
-    "~/.antigravity",
-    "~/Library/Application Support/Antigravity",
-    "/Applications/Antigravity.app"
+  "detect_cmd": "",
+  "detect_paths": [],
+  "platforms": [
+    "darwin",
+    "linux",
+    "win32"
   ],
-  "platforms": ["darwin"],
   "doc_urls": [
     "https://antigravity.google/terms",
     "https://discuss.ai.google.dev/t/antigravity-privacy/138277",
-    "https://discuss.ai.google.dev/t/antigravity-data-training-opt-out/125236"
+    "https://discuss.ai.google.dev/t/antigravity-data-training-opt-out/125236",
+    "https://antigravity.google/docs/settings",
+    "https://antigravity.google/download",
+    "https://antigravity.google/download/linux"
   ],
   "settings_files": [
     {
-      "path": "~/Library/Application Support/Antigravity/User/settings.json",
+      "paths": {
+        "darwin": "~/Library/Application Support/Antigravity/User/settings.json",
+        "linux": "~/.config/Antigravity/User/settings.json",
+        "win32": "%APPDATA%/Antigravity/User/settings.json"
+      },
+      "install_check": {
+        "darwin": "for app in /Applications/'Antigravity.app' \"$HOME/Applications/Antigravity.app\"; do if [ -x \"$app/Contents/Resources/app/bin/antigravity\" ] && [ -f \"$app/Contents/Resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity\" and .applicationName == \"antigravity\"' \"$app/Contents/Resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1",
+        "linux": "launcher=$(command -v antigravity) || exit 1; command -v readlink >/dev/null || exit 2; launcher=$(readlink -f \"$launcher\") || exit 2; for root in \"$(dirname \"$launcher\")\" \"$(dirname \"$(dirname \"$launcher\")\")\"; do if [ -x \"$launcher\" ] && [ -f \"$root/resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity\" and .applicationName == \"antigravity\"' \"$root/resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1",
+        "win32": "powershell.exe -NoProfile -Command 'try { $roots = @((Join-Path $env:LOCALAPPDATA \"Programs/Antigravity\"), (Join-Path $env:ProgramFiles \"Antigravity\")); foreach ($root in $roots) { $metadata = Join-Path $root \"resources/app/product.json\"; if ((Test-Path -LiteralPath (Join-Path $root \"Antigravity.exe\") -PathType Leaf -ErrorAction Stop) -and (Test-Path -LiteralPath $metadata -PathType Leaf -ErrorAction Stop)) { $product = Get-Content -LiteralPath $metadata -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; if ($product.nameShort -eq \"Antigravity\" -and $product.applicationName -eq \"antigravity\") { exit 0 } } }; exit 1 } catch { [Console]::Error.WriteLine($_); exit 2 }'"
+      },
       "format": "json",
+      "key_mode": "literal",
       "edits": [
-        { "key": "telemetry.telemetryLevel", "value": "off", "disables": "VS Code-layer telemetry (Application Insights). Does NOT confirm-stop Google's Interactions/training pipeline." },
-        { "key": "telemetry.enableCrashReporter", "value": false, "disables": "Crash dumps to Google (VS Code deprecated key, still honored in the fork)" }
+        {
+          "key": "telemetry.telemetryLevel",
+          "value": "off",
+          "disables": "VS Code-layer telemetry (Application Insights). Does NOT confirm-stop Google's Interactions/training pipeline."
+        },
+        {
+          "key": "telemetry.enableCrashReporter",
+          "value": false,
+          "disables": "Crash dumps to Google (VS Code deprecated key, still honored in the fork)"
+        }
+      ]
+    },
+    {
+      "paths": {
+        "darwin": "~/Library/Application Support/Antigravity IDE/User/settings.json",
+        "linux": "~/.config/Antigravity IDE/User/settings.json",
+        "win32": "%APPDATA%/Antigravity IDE/User/settings.json"
+      },
+      "install_check": {
+        "darwin": "for app in /Applications/'Antigravity IDE.app' \"$HOME/Applications/Antigravity IDE.app\"; do if [ -x \"$app/Contents/Resources/app/bin/antigravity-ide\" ] && [ -f \"$app/Contents/Resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity IDE\" and .applicationName == \"antigravity-ide\"' \"$app/Contents/Resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1",
+        "linux": "launcher=$(command -v antigravity-ide) || exit 1; command -v readlink >/dev/null || exit 2; launcher=$(readlink -f \"$launcher\") || exit 2; for root in \"$(dirname \"$launcher\")\" \"$(dirname \"$(dirname \"$launcher\")\")\"; do if [ -x \"$launcher\" ] && [ -f \"$root/resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity IDE\" and .applicationName == \"antigravity-ide\"' \"$root/resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1",
+        "win32": "powershell.exe -NoProfile -Command 'try { $roots = @((Join-Path $env:LOCALAPPDATA \"Programs/Antigravity IDE\"), (Join-Path $env:ProgramFiles \"Antigravity IDE\")); foreach ($root in $roots) { $metadata = Join-Path $root \"resources/app/product.json\"; if ((Test-Path -LiteralPath (Join-Path $root \"Antigravity IDE.exe\") -PathType Leaf -ErrorAction Stop) -and (Test-Path -LiteralPath $metadata -PathType Leaf -ErrorAction Stop)) { $product = Get-Content -LiteralPath $metadata -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; if ($product.nameShort -eq \"Antigravity IDE\" -and $product.applicationName -eq \"antigravity-ide\") { exit 0 } } }; exit 1 } catch { [Console]::Error.WriteLine($_); exit 2 }'"
+      },
+      "format": "json",
+      "key_mode": "literal",
+      "edits": [
+        {
+          "key": "telemetry.telemetryLevel",
+          "value": "off",
+          "disables": "VS Code-layer telemetry (Application Insights). Does NOT confirm-stop Google's Interactions/training pipeline."
+        },
+        {
+          "key": "telemetry.enableCrashReporter",
+          "value": false,
+          "disables": "Crash dumps to Google (VS Code deprecated key, still honored in the fork)"
+        }
       ]
     }
   ],
   "shell_env_vars": [],
   "persistent_files": [
-    { "path": "~/Library/Application Support/Antigravity/Crashpad", "note": "Crash dumps queued for upload." },
-    { "path": "~/Library/Application Support/Antigravity/logs", "note": "Session logs (timestamped)." },
-    { "path": "~/Library/Application Support/Antigravity/machineid", "note": "Persistent installation ID." },
-    { "path": "~/Library/Application Support/Antigravity/CachedData", "note": "Extension + interaction cache." }
+    {
+      "path": "~/Library/Application Support/Antigravity/Crashpad",
+      "note": "Crash dumps queued for upload."
+    },
+    {
+      "path": "~/Library/Application Support/Antigravity/logs",
+      "note": "Session logs (timestamped)."
+    },
+    {
+      "path": "~/Library/Application Support/Antigravity/machineid",
+      "note": "Persistent installation ID."
+    },
+    {
+      "path": "~/Library/Application Support/Antigravity/CachedData",
+      "note": "Extension + interaction cache."
+    }
   ],
   "diff_patterns": {
     "env_regex": "(ANTIGRAVITY_|GOOGLE_|TELEMETRY|DISABLE|OPT_?OUT|TRACK|CRASH)",
     "settings_regex": "^telemetry\\."
   },
   "process_check": {
-    "cmd": "pgrep -i Antigravity",
-    "if_running": "Quit Antigravity (including helper processes) before editing settings.json — Electron rewrites on shutdown and will clobber manual edits."
+    "if_running": "Quit Antigravity (including helper processes) before editing settings.json — Electron rewrites on shutdown and will clobber manual edits.",
+    "commands": {
+      "darwin": "pgrep -if '/[A]ntigravity( IDE)?[.]app/Contents/'",
+      "linux": "pgrep -ix 'antigravity|antigravity-ide'",
+      "win32": "powershell.exe -NoProfile -Command 'try { if (Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -match \"^Antigravity( IDE)?$\" }) { exit 0 }; exit 1 } catch { [Console]::Error.WriteLine($_); exit 2 }'"
+    }
   },
   "notes": [
-    "Google-branded VS Code fork (v1.107.0). No env var or CLI flag documented — see caveat for the training-pipeline opt-out."
+    "Supports the legacy Antigravity VS Code fork and the current Antigravity IDE application. The separate Antigravity 2.0 app and Antigravity CLI are not identified as an IDE just by their shared brand; settings targets require the associated IDE executable and product.json metadata.",
+    "Default user-data roots and product names were verified in Google's official Linux distributions: Antigravity 1.23.2 at https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/1.23.2-4781536860569600/linux-x64/Antigravity.tar.gz and Antigravity IDE 2.5.5 at https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/2.5.5-4923483625488384/linux-x64/Antigravity%20IDE.tar.gz. Both use APPDATA on Windows, ~/Library/Application Support on macOS and XDG_CONFIG_HOME or ~/.config on Linux, joined with the exact product name.",
+    "Resolve XDG_CONFIG_HOME, VSCODE_APPDATA, portable mode or --user-data-dir before applying to a custom user-data location. If an IDE is installed in a custom root that the install checks cannot verify, report detection as unresolved and provide the editor UI path instead of creating a guessed settings file."
   ],
   "caveats": [
     {
@@ -47,5 +112,10 @@
       "framing": "AI training opt-out is EMAIL-ONLY — no settings key or env var. Send a request to antigravity-support@google.com to delete your Interactions data. Google otherwise uses Interactions for ML training unless accessed via Workspace/GCP.",
       "auto_apply": false
     }
-  ]
+  ],
+  "detect_check": {
+    "darwin": "( for app in /Applications/'Antigravity IDE.app' \"$HOME/Applications/Antigravity IDE.app\"; do if [ -x \"$app/Contents/Resources/app/bin/antigravity-ide\" ] && [ -f \"$app/Contents/Resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity IDE\" and .applicationName == \"antigravity-ide\"' \"$app/Contents/Resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1 ); probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; ( for app in /Applications/'Antigravity.app' \"$HOME/Applications/Antigravity.app\"; do if [ -x \"$app/Contents/Resources/app/bin/antigravity\" ] && [ -f \"$app/Contents/Resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity\" and .applicationName == \"antigravity\"' \"$app/Contents/Resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1 )",
+    "linux": "( launcher=$(command -v antigravity-ide) || exit 1; command -v readlink >/dev/null || exit 2; launcher=$(readlink -f \"$launcher\") || exit 2; for root in \"$(dirname \"$launcher\")\" \"$(dirname \"$(dirname \"$launcher\")\")\"; do if [ -x \"$launcher\" ] && [ -f \"$root/resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity IDE\" and .applicationName == \"antigravity-ide\"' \"$root/resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1 ); probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; ( launcher=$(command -v antigravity) || exit 1; command -v readlink >/dev/null || exit 2; launcher=$(readlink -f \"$launcher\") || exit 2; for root in \"$(dirname \"$launcher\")\" \"$(dirname \"$(dirname \"$launcher\")\")\"; do if [ -x \"$launcher\" ] && [ -f \"$root/resources/app/product.json\" ]; then jq -e '.nameShort == \"Antigravity\" and .applicationName == \"antigravity\"' \"$root/resources/app/product.json\" >/dev/null; probe_result=$?; [ \"$probe_result\" -eq 0 ] && exit 0; [ \"$probe_result\" -gt 1 ] && exit 2; fi; done; exit 1 )",
+    "win32": "powershell.exe -NoProfile -Command 'try { foreach ($name in @(\"Antigravity IDE\", \"Antigravity\")) { $binary = if ($name -eq \"Antigravity IDE\") { \"antigravity-ide\" } else { \"antigravity\" }; $roots = @((Join-Path $env:LOCALAPPDATA (\"Programs/\" + $name)), (Join-Path $env:ProgramFiles $name)); foreach ($root in $roots) { $metadata = Join-Path $root \"resources/app/product.json\"; if ((Test-Path -LiteralPath (Join-Path $root ($name + \".exe\")) -PathType Leaf -ErrorAction Stop) -and (Test-Path -LiteralPath $metadata -PathType Leaf -ErrorAction Stop)) { $product = Get-Content -LiteralPath $metadata -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; if ($product.nameShort -eq $name -and $product.applicationName -eq $binary) { exit 0 } } } }; exit 1 } catch { [Console]::Error.WriteLine($_); exit 2 }'"
+  }
 }

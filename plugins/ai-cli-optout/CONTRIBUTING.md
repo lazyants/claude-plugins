@@ -22,7 +22,15 @@ The `detect_paths[]` array is an OR fallback for when `detect_cmd` is missing fr
 
 ### Forbidden shared-ancestor paths
 
-`tests/vendor-schema.test.sh` ships a `FORBIDDEN_DETECT_PATHS` array that blocks 16 known shared / ancestor paths: `~`, `~/Library`, `~/Library/Application Support`, `~/Library/Caches`, `~/Library/Preferences`, `~/.config`, `~/.cache`, `~/.local`, `~/.local/share`, JetBrains config roots, `/Applications`, `/Library`, `/opt`, `/usr/local`, `/etc`, `/var`, `/tmp`. If you hit a new sibling-config trap that isn't covered, add the ancestor to the array and file (or update) a GitHub issue labeled `plugin:ai-cli-optout`.
+`tests/vendor-schema.test.sh` rejects known shared ancestors, vendor config/state roots and config-file paths. If you hit a new sibling-config trap that isn't covered, extend the guard and file (or update) a GitHub issue labeled `plugin:ai-cli-optout`. OS privacy entries rely on their platform command, not on a retained preference plist. Plugins without their own executable may declare a read-only `detect_check` that verifies the exact installed plugin identity; the host CLI's presence alone does not prove the plugin is installed.
+
+### Settings paths, process checks and notes
+
+For cross-platform editors, supply `settings_files[].paths` keyed by `darwin`, `linux` and `win32`; the workflow selects exactly the current platform's path. `%APPDATA%` and `%LOCALAPPDATA%` are Windows environment roots, and `%APPDATA%` already includes `Roaming`. Never copy a path from a different platform or create a directory for an unresolved placeholder. Paths for a custom active profile must use that profile's configured root; author-local names such as `~/.claude-bm` are not shipped defaults.
+
+An editor that can overwrite a settings file must declare `process_check.cmd` or per-platform `process_check.commands`, plus `if_running`. Exit 0 means running, 1 means stopped, and 2+ or a missing tool means the check failed. The workflow defers writes on running/error results and checks again after the user quits. JSONC editor settings preserve literal dotted keys and comments; TOML keys and Anthropic `env.*` keys are nested.
+
+The workflow consumes `notes[]` before applying settings and includes the notes in its report. Put machine-applicable work in structured fields where possible: Codex `profile_files` describes existing profile overlays, and `profile_edits` covers older nested profiles. An instruction printed in a note is not an applied opt-out. Report unresolved scopes as pending.
 
 ### Vendor doc research: seed `doc_urls[]` with every relevant page
 
@@ -82,11 +90,10 @@ A binary patch carries a different risk profile than a documented opt-out: it br
 bash plugins/ai-cli-optout/tests/run-all.sh
 ```
 
-Two files, ~300 assertions. Required to pass before any PR merges.
+Required to pass in GitHub Actions before any PR merges. Follow the root `CLAUDE.md`: locally run only the changed test file and cheap static checks, never the full suite. The runner discovers every `*.test.sh` in this directory.
 
 ## Out of scope for PRs
 
-- Changes to `~/.claude-bm/settings.json` semantics — the `-bm` profile is a user-specific convention (bypass mode), not a distribution target.
-- Linux-only OS privacy surfaces (flatpak reports, GNOME/KDE agents) — not scoped, see #145.
+- Author-specific profile conventions such as `~/.claude-bm` — honor an explicitly configured active profile root instead.
 - Vendor additions that can't pass the `detect_paths` rule above.
 - Binary-patch workarounds for features a kill-switch disables — see "Never point users at a patched binary" above.

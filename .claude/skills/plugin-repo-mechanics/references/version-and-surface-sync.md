@@ -10,6 +10,8 @@ A plugin's version lives in FOUR places. A bump that touches only the first two 
    - **Per-plugin CHANGELOG trap:** `literary-translator` keeps its OWN `plugins/literary-translator/CHANGELOG.md` (format `## X.Y.Z — DATE`, no `[name]` prefix). The ROOT `CHANGELOG.md` is LEGACY for it, frozen at its `## [literary-translator 1.1.0]` entry — editing the root one for a littrans bump is WRONG. Before bumping, check `git log -1 -- CHANGELOG.md` vs `git log -1 -- plugins/<name>/CHANGELOG.md` to find which surface a plugin actually uses.
 4. `README.md` → BOTH the table row version cell AND the `## \`<name>\` — vX.Y.Z` section header.
 
+The plugin's `plugin.json` also owns its canonical one-line `description`. Copy that string verbatim into the corresponding marketplace entry whenever changing it or cutting a release, so installed-plugin and marketplace discovery describe the same capabilities. The README table may elaborate for readers; it must still describe the current coverage. The version checker does not enforce description equality, so compare both JSON fields explicitly before publishing.
+
 ### README anchor-slug gotcha (surface #4)
 
 The README table link is `[\`<name>\`](#<name>--vXYZ)`. GitHub slugifies the header `## \`enduser-handbook\` — v1.0.3` to `enduser-handbook--v103`: backticks + em-dash dropped, spaces→`-`, dots stripped → a DOUBLE hyphen before `v`. Bumping the displayed version means editing the anchor digits too, or the table link 404s. The `## ` header must wrap the name in BACKTICKS (`## \`<name>\` — vX.Y.Z`) like every sibling — slugify strips them so the anchor still resolves, but omitting them renders the name as plain text (a review-bot drift finding).

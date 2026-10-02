@@ -6,7 +6,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 
 | Plugin | Version | What it does |
 |---|---|---|
-| [`ai-cli-optout`](#ai-cli-optout--v113) | 1.1.3 | Opt out of telemetry across every locally installed AI CLI / AI-enabled IDE, plus Vercel CLI and macOS / Windows OS-level privacy surfaces. |
+| [`ai-cli-optout`](#ai-cli-optout--v120) | 1.2.0 | Privacy opt-outs for AI CLIs and IDEs, Vercel CLI and its Claude Code plugin, plus macOS / Windows / Linux controls. |
 | [`db-guardrails`](#db-guardrails--v101) | 1.0.1 | Stop AI coding agents from accidentally emptying your database — an always-on hook that blocks destructive DB commands across 15+ frameworks, plus a stack-aware installer for deeper safety layers. |
 | [`obsidian-project-vault`](#obsidian-project-vault--v110) | 1.1.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
 | [`cc-usage-coach`](#cc-usage-coach--v101) | 1.0.1 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
@@ -31,13 +31,13 @@ claude plugin update <plugin-name>@lazyants
 claude plugin uninstall <plugin-name>@lazyants
 ```
 
-## `ai-cli-optout` — v1.1.3
+## `ai-cli-optout` — v1.2.0
 
-Opts out of telemetry, error reporting, analytics, feedback surveys, and related data collection across every locally installed AI CLI and AI-enabled IDE, plus Vercel CLI (adjacent developer tooling) and macOS / Windows OS-level privacy surfaces. One skill, thirteen vendors, data-driven. 369 test assertions guard vendor-schema invariants and script behavior.
+Applies documented opt-outs for telemetry, error reporting, analytics, feedback surveys and related data collection across installed AI CLIs and IDEs, Vercel CLI and its Claude Code plugin, and macOS / Windows / Linux privacy controls. One skill, seventeen vendor entries, data-driven. Automated checks guard vendor schemas, platform paths, installation markers and helper behavior. Notes and platform limits are surfaced before changes; settings edits wait until the app is stopped, and Codex analytics covers existing profile overlays as well as the main config.
 
 Trigger phrases: "disable telemetry", "opt out of telemetry", "privacy mode", etc. — full list in `plugins/ai-cli-optout/skills/ai-cli-optout/SKILL.md`.
 
-### Vendors covered (baseline 2026-04-24)
+### Vendors covered
 
 | Vendor | Platform | Kind |
 |---|---|---|
@@ -47,21 +47,27 @@ Trigger phrases: "disable telemetry", "opt out of telemetry", "privacy mode", et
 | GitHub Copilot CLI + `gh` | any | `gh config set` + env |
 | Cursor | darwin | manual only — Cmd+Shift+J → Privacy Mode |
 | Cursor CLI (`cursor-agent`) | any | manual only — account-level Privacy Mode |
-| Google Antigravity | darwin | settings.json (AI-training opt-out is email-only) |
-| VS Code | darwin | settings.json (Copilot extension does not inherit) |
+| Google Antigravity | darwin, linux, win32 | settings.json + separate AI-training controls (see vendor sources) |
+| VS Code | darwin, linux, win32 | platform-specific settings.json (Copilot extension does not inherit) |
 | PhpStorm | darwin | manual only — Settings → Tools → Usage Statistics |
 | Vercel CLI | any | `vercel telemetry disable` (persistent) + `VERCEL_TELEMETRY_DISABLED=1` (per-run) |
-| Vercel Claude Code plugin | any | env — `VERCEL_PLUGIN_TELEMETRY=off` (interim, not yet first-class) |
+| Vercel Claude Code plugin | any | installed-plugin check + `VERCEL_PLUGIN_TELEMETRY=off` |
+| Windsurf / Codeium (Devin Desktop) | any | manual account privacy / Data Controls |
+| Zed | darwin, linux, win32 | settings.json telemetry controls |
+| Ollama | any | manual server privacy guidance + optional cloud opt-out *(confirmation-gated — see warnings)* |
 | macOS system privacy | darwin | `defaults write` (AdLib, CrashReporter) |
 | Windows system privacy | win32 | `reg add` (Recall, Copilot, Telemetry, AdvertisingInfo) |
+| Linux system privacy | linux | Flatpak OS-info header opt-out + manual GNOME/KDE controls |
 
 ### Warnings before you run it
 
-- **Anthropic Claude Code users:** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_TELEMETRY=1` do more than stop telemetry. Both switch off the remote feature-flag fetch itself, so *any* capability delivered behind a feature flag silently stops being offered — the client's built-in defaults are what remain. Measured against Claude Code **2.1.241 on 2026-08-24**, that build gates `/remote-control`, `/feedback`, `/design-sync`, Projects, and `--enable-live-preview` on this variable; several say so in their own error text, and `/remote-control` simply stops being offered, since its visibility resolves through a flag whose built-in default is off. Upstream [anthropics/claude-code#34178](https://github.com/anthropics/claude-code/issues/34178) was closed on 2026-04-12 **without the behaviour changing** — it still reproduces, which is why #142 stays open. `DO_NOT_TRACK` and `DISABLE_GROWTHBOOK` belong to the same set; **do not set `DISABLE_GROWTHBOOK` as an opt-out** — it disables feature-flag delivery and buys no additional privacy over the narrow bundle below. The skill gates both edits behind `requires_confirmation: true` so you see the trade-off and can decline. Declining leaves you the narrow opt-out (`DISABLE_ERROR_REPORTING=1`, `DISABLE_FEEDBACK_COMMAND=1`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, `skipWebFetchPreflight: true`), which touches no feature-flag-gated capability — with one deliberate exception: `DISABLE_FEEDBACK_COMMAND` turns off `/feedback` by design, so omit it if you want that command. Full bisection in #142.
+- **Anthropic Claude Code users:** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_TELEMETRY=1` do more than stop telemetry: they can also disable remote feature-flag delivery and hide features. The bisection recorded in [#142](https://github.com/lazyants/claude-plugins/issues/142) measured this against Claude Code **2.1.241 on 2026-08-24**; exact affected features depend on the installed build. Both edits require confirmation and show their trade-offs. Declining leaves the narrower bundle (`DISABLE_ERROR_REPORTING=1`, `DISABLE_FEEDBACK_COMMAND=1`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, `skipWebFetchPreflight: true`). `DISABLE_FEEDBACK_COMMAND` deliberately disables `/feedback`; omit it to keep that command. Avoid using `DISABLE_GROWTHBOOK` as a privacy opt-out.
 - **Cursor:** quit the app before the skill edits any JSON — Cursor's Electron process rewrites settings on graceful quit and will overwrite your changes.
-- **Antigravity:** the AI-training opt-out is **email-only** to `antigravity-support@google.com`; no CLI / setting exists. The skill surfaces this in its report but cannot automate it.
+- **VS Code and Antigravity:** quit the app before settings edits; a failed process check defers the edit. Editor telemetry and AI-training controls are separate; follow the vendor's current instructions for both.
 - **Vercel CLI:** the subcommand `vercel telemetry disable` is persistent; `VERCEL_TELEMETRY_DISABLED=1` is per-run only and does **not** change the persisted status reported by `vercel telemetry status`. The skill applies both so you're covered either way.
-- **Vercel Claude Code plugin (separate from the Vercel CLI):** if installed, it sends every bash command string to `telemetry.vercel.com` by default. Interim opt-out: `VERCEL_PLUGIN_TELEMETRY=off`. Not yet a first-class vendor in this skill — tracked in #144.
+- **Vercel Claude Code plugin (separate from the Vercel CLI):** opt out with `VERCEL_PLUGIN_TELEMETRY=off` in the environment that launches Claude Code. The [current upstream policy](https://github.com/vercel/vercel-plugin#telemetry) describes anonymous usage events and excludes prompt text and raw bash commands; older releases differed, as recorded in [#144](https://github.com/lazyants/claude-plugins/issues/144). The CLI opt-out does not cover the plugin.
+- **Ollama:** cloud opt-outs also disable cloud models and web search. They require a separate confirmation; local inference and model downloads are different network surfaces.
+- **OS limits:** Apple Intelligence restrictions keys require device management; use System Settings on unmanaged Macs. [Windows diagnostic data off](https://learn.microsoft.com/en-us/windows/privacy/configure-windows-diagnostic-data-in-your-organization#diagnostic-data-off) is available on Enterprise, Education and Server; Home and Pro retain the Required floor. Flatpak's `report-os-info` controls its OS-info request header, not applications' own telemetry; GNOME/KDE reporting controls depend on the installed desktop.
 
 ### What this does **not** cover
 

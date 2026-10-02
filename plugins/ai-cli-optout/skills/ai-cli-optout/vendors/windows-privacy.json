@@ -38,7 +38,7 @@
     },
     {
       "command": "reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\DataCollection\" /v AllowTelemetry /t REG_DWORD /d 0 /f",
-      "disables": "Windows diagnostic data (Enterprise/Education/Server: sets to Security; Home: value 0 unsupported, effective floor is Required [1])",
+      "disables": "Windows diagnostic data (Enterprise/Education/Server: Diagnostic data off [0]; Home and Pro: value 0 unsupported, effective floor is Required [1])",
       "requires_admin": true,
       "scope": "system_wide",
       "ui_path": "Settings → Privacy & security → Diagnostics & feedback → Diagnostic data",
@@ -105,8 +105,8 @@
   ],
   "caveats": [
     {
-      "var": "home_edition_telemetry_floor",
-      "framing": "On Windows Home, AllowTelemetry=0 is silently bumped to 1 (Required). Effective floor is Required. Confirm the target machine is Pro / Enterprise / Education before expecting Security-level off.",
+      "var": "edition_telemetry_floor",
+      "framing": "Windows Home and Pro support Required diagnostic data as their minimum; AllowTelemetry=0 does not switch diagnostic data off on those editions. Diagnostic data off [0] is supported on Enterprise, Education and Windows Server. Confirm the target edition before claiming off, and report Home/Pro as Required rather than fully opted out.",
       "auto_apply": false
     }
   ]
