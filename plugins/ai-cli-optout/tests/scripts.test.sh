@@ -126,7 +126,7 @@ assert "Windows environment paths: shell syntax never executes" test ! -e "$tmp/
 
 # Exercise shipped platform maps rather than recreating the vendor paths in a
 # clean schema fixture. Linux uses separate overridden config and data roots.
-cp "$SKILL_DIR/vendors/zed.json" "$SKILL_DIR/vendors/antigravity.json" "$tmp/report/vendors/"
+cp "$SKILL_DIR/vendors/zed.json" "$SKILL_DIR/vendors/antigravity.json" "$SKILL_DIR/vendors/code.json" "$tmp/report/vendors/"
 platform_home="$tmp/platform home"
 xdg_config="$tmp/active config"
 xdg_data="$tmp/active data"
@@ -136,6 +136,9 @@ mkdir -p "$xdg_config/zed" "$xdg_data/zed/logs" "$platform_home/.config/zed" \
 printf '{}\n' >"$xdg_config/zed/settings.json"
 printf '{}\n' >"$platform_home/.config/zed/settings.json"
 printf '{}\n' >"$windows_appdata/Zed/settings.json"
+for code_root in "$xdg_config/Code" "$platform_home/Library/Application Support/Code" "$windows_appdata/Code"; do
+  mkdir -p "$code_root/User/globalStorage" "$code_root/logs"
+done
 for product in Antigravity 'Antigravity IDE'; do
   for product_root in "$xdg_config/$product" "$platform_home/Library/Application Support/$product" "$windows_appdata/$product"; do
     mkdir -p "$product_root/logs" "$product_root/CachedData"
@@ -154,6 +157,14 @@ for platform_case in linux darwin win32; do
   assert_contains "Zed platform report ($platform_case): selected logs path" "- $zed_logs  [" "$zed_out"
   assert_not_contains "Zed platform report ($platform_case): files present" '(not present)' "$zed_out"
   assert_not_contains "Zed platform report ($platform_case): paths resolved" '(skipped:' "$zed_out"
+
+  code_out="$(PATH="$tmp/bin:$PATH" TEST_KERNEL="$kernel" WSL_INTEROP= WSL_DISTRO_NAME= HOME="$platform_home" XDG_CONFIG_HOME="$xdg_config" APPDATA="$windows_appdata" bash "$tmp/report/scripts/report_persistent_files.sh" code 2>&1)"
+  assert_eq "VS Code platform report ($platform_case): exit 0" "0" "$?"
+  assert_eq "VS Code platform report ($platform_case): two persistent paths" "2" "$(printf '%s\n' "$code_out" | awk '/^- /{count++} END {print count+0}')"
+  assert_contains "VS Code platform report ($platform_case): selected globalStorage path" "- $antigravity_root/Code/User/globalStorage  [" "$code_out"
+  assert_contains "VS Code platform report ($platform_case): selected logs path" "- $antigravity_root/Code/logs  [" "$code_out"
+  assert_not_contains "VS Code platform report ($platform_case): files present" '(not present)' "$code_out"
+  assert_not_contains "VS Code platform report ($platform_case): paths resolved" '(skipped:' "$code_out"
 
   antigravity_out="$(PATH="$tmp/bin:$PATH" TEST_KERNEL="$kernel" WSL_INTEROP= WSL_DISTRO_NAME= HOME="$platform_home" XDG_CONFIG_HOME="$xdg_config" APPDATA="$windows_appdata" bash "$tmp/report/scripts/report_persistent_files.sh" antigravity 2>&1)"
   assert_eq "Antigravity platform report ($platform_case): exit 0" "0" "$?"

@@ -264,6 +264,11 @@ for editor in code antigravity; do
     '.platforms | sort == ["darwin","linux","win32"]' "$VENDORS_DIR/$editor.json"
   assert "$editor preserves literal telemetry setting IDs" jq -e \
     'all(.settings_files[]; .key_mode == "literal")' "$VENDORS_DIR/$editor.json"
+  assert "$editor Linux settings use the active XDG config root" jq -e \
+    --arg editor "$editor" \
+    '[.settings_files[].paths.linux] ==
+      (if $editor == "code" then ["Code"] else ["Antigravity", "Antigravity IDE"] end |
+       map("${XDG_CONFIG_HOME}/" + . + "/User/settings.json"))' "$VENDORS_DIR/$editor.json"
   assert "$editor Windows process check uses native PowerShell" jq -e \
     '.process_check.commands.win32 | startswith("powershell.exe -NoProfile -Command ") and contains("exit 2")' "$VENDORS_DIR/$editor.json"
 done

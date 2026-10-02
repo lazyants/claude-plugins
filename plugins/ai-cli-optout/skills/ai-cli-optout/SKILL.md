@@ -17,7 +17,7 @@ Covered vendors (see each vendor's sources and limitations):
 | OpenAI Codex CLI | any | `~/.codex/config.toml` (`analytics.enabled`, `feedback.enabled`) | — |
 | Google Gemini CLI | any | `~/.gemini/settings.json` + `GEMINI_TELEMETRY_ENABLED=false` | — |
 | GitHub Copilot CLI + gh | any | `~/.config/gh/config.yml` via `gh config set` + `GH_TELEMETRY=false` | `COPILOT_OFFLINE=true` disables features too — never auto-apply |
-| Cursor | darwin | manual_only — Cmd+Shift+J → Privacy Mode | Electron rewrite on graceful quit — quit before JSON edits |
+| Cursor | any | manual_only — Cursor Settings → Privacy Mode | Account privacy control; see vendor instructions |
 | Cursor CLI (cursor-agent) | any | manual_only — account-level Privacy Mode covers it | Distinct binary from editor; bundled native modules unsigned (Gatekeeper friction on Mac) |
 | Google Antigravity | darwin, linux, win32 | Platform-specific `settings.json` (`telemetry.telemetryLevel`) | See vendor instructions for the separate AI-training control |
 | VS Code | darwin, linux, win32 | Platform-specific `settings.json` (`telemetry.telemetryLevel`) | Copilot extension does NOT inherit — manual per-extension |
@@ -29,7 +29,7 @@ Covered vendors (see each vendor's sources and limitations):
 | Ollama | any | Manual local-inference and server cloud controls | Resolve the server owner/home; cloud opt-out also loses web search |
 | macOS system privacy | darwin | `defaults write` (AdLib, CrashReporter plist) | Apple Intelligence keys are MDM-only on unmanaged Macs |
 | Windows system privacy | win32 | `reg add` (Recall, Copilot, AllowTelemetry, AdvertisingInfo) | Home/Pro: diagnostic data floor is Required |
-| Linux system privacy | linux | Flatpak HTTP telemetry + manual desktop controls | GNOME/KDE controls vary by installed desktop; no universal OS switch |
+| Linux system privacy | linux | Flatpak OS-info reporting + manual desktop controls | GNOME/KDE controls vary by installed desktop; no universal OS switch |
 
 ## Trigger phrases
 

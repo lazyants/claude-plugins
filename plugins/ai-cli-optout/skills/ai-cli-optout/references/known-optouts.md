@@ -73,13 +73,13 @@ Original baseline: 2026-04-24. Platform, profile and new-vendor coverage updated
 - Docs: https://antigravity.google/terms · https://antigravity.google/docs/settings · https://antigravity.google/docs/faq
 
 ## Visual Studio Code (macOS / Linux / Windows)
-- Settings: `~/Library/Application Support/Code/User/settings.json` on macOS, `~/.config/Code/User/settings.json` on Linux, `%APPDATA%/Code/User/settings.json` on Windows; resolve custom roots and profile overrides first:
+- Settings: `~/Library/Application Support/Code/User/settings.json` on macOS, `$XDG_CONFIG_HOME/Code/User/settings.json` (default `~/.config/Code/User/settings.json`) on Linux, `%APPDATA%/Code/User/settings.json` on Windows; resolve custom roots and profile overrides first:
   - `"telemetry.telemetryLevel": "off"` — covers crash, error, usage tiers. Supersedes deprecated `telemetry.enableTelemetry` / `telemetry.enableCrashReporter` (do NOT double-write).
 - CLI flag: `--disable-telemetry` — per-invocation only, not persistent.
 - **GitHub Copilot extension does NOT inherit `telemetry.telemetryLevel`** per Microsoft docs — check each extension's own telemetry docs.
 - Detection fallback includes `/Applications/Visual Studio Code.app` (fresh installs lack the `code` shim until palette → "Install 'code' command in PATH").
 - Running or failed process checks defer file edits; the literal dotted JSON key is preserved along with comments and unrelated settings.
-- Persistent: `~/Library/Application Support/Code/{User/globalStorage,logs}`
+- Persistent: the vendor inventory selects `Code/{User/globalStorage,logs}` under the platform's supported root. Custom user-data/log paths and named profiles require active-location inspection before claiming full retained-state coverage.
 - Docs: https://github.com/microsoft/vscode-docs/blob/main/docs/configure/telemetry.md · https://code.visualstudio.com/docs/configure/telemetry
 
 ## JetBrains PhpStorm (macOS) — manual-only
