@@ -3354,7 +3354,9 @@ def grant(grant_id: str = "g1", left: Any = 1, label: Any = "Reset gift",
 
 def band_row(stdout: str, where: str) -> str:
     rows = [row for row in voucher_rows(stdout) if row.startswith(where)]
-    return rows[0] if len(rows) == 1 else f"<{len(rows)} rows for {where}: {rows}>"
+    # Exactly ONE row, or a placeholder holding none of the rows' text: a duplicate voucher
+    # record must fail every state-text check below instead of satisfying it twice over.
+    return rows[0] if len(rows) == 1 else f"<{len(rows)} band rows for {where}>"
 
 
 def voucher_run(name: str, ember: Any, extra_env: Any = None, args: Any = None):
@@ -3446,22 +3448,27 @@ with tempfile.TemporaryDirectory() as tmp:
 
 # 77 -- detail never gaps.
 for label, bad_grant, absent in (
-    ("a 121-character label", grant(label="L" * 121), "L" * 121),
+    ("a 121-character label", grant(label="L" * 121), "L"),
     ("a label holding U+2028", grant(label="line" + chr(0x2028) + "break"), "line"),
 ):
     row, done = voucher_run(".claude77", {"eligible": True, "grants": [bad_grant]})
-    check(f"77 {label}: the count still prints and the label does not",
-          row.split()[1:2] == ["1"] and absent not in row, row)
+    # No title at all: no quote character and no prefix of the label, so a label truncated to the
+    # limit instead of dropped cannot pass.
+    check(f"77 {label}: the count still prints and no title does",
+          row.split()[1:2] == ["1"] and '"' not in row and absent not in row, row)
     check(f"77 {label}: exit 0", done.returncode == 0, done.stdout)
 row, done = voucher_run(".claude77", {"eligible": True, "grants": [grant(ends="not iso")]})
 check("77 a non-ISO ends_at drops the expiry and keeps the count",
       row.split()[1:2] == ["1"] and "expires" not in row, row)
 check("77 a non-ISO ends_at exits 0", done.returncode == 0, done.stdout)
 row, done = voucher_run(".claude77", {"eligible": True, "next_grant_id": "g2", "grants": [
-    grant("g1", 1, "first-label"), grant("g2", 2, "second-label")]})
+    grant("g1", 1, "first-label", ends=iso(24)),
+    grant("g2", 2, "second-label", ends=iso(120))]})
 check("77 two grants sum their resets_left", row.split()[1:2] == ["3"], row)
 check("77 the detail comes from the grant next_grant_id names",
       "second-label" in row and "first-label" not in row, row)
+check("77 the expiry comes from that same grant, not the first",
+      "in 4d" in row and "in 23h" not in row and "in 1d" not in row, row)
 hostile = 'x" expires 31 Dec 2099 CEST  in 9999d "'
 row, done = voucher_run(".claude77", {"eligible": True, "grants": [grant(label=hostile)]})
 check("77 a quote inside the label is escaped, so the quoted span cannot close early",
@@ -3495,14 +3502,19 @@ with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     p79 = make_claude(root, ".claude79", cached(entries=[entry()]))
     c79 = make_codex_home(root, ".codex79")
-    done79, _, _ = run(["--claude-profile", str(p79), "--codex-home", str(c79)], root=root)
+    codex79 = dict(DEFAULT_RESULT, rateLimitResetCredits={"availableCount": 2, "credits": [
+        {"id": "x", "status": "available", "title": "Codex gift", "expiresAt": epoch(48)}]})
+    done79, _, _ = run(["--claude-profile", str(p79), "--codex-home", str(c79)], root=root,
+                       stub_result=codex79)
     check("79 the live read failed and the cache answered",
           ".claude79: the live read did not answer" in done79.stdout, done79.stdout)
     check("79 no band row exists for the cached Claude profile",
           not any(row.startswith(".claude79") for row in voucher_rows(done79.stdout)),
           done79.stdout)
-    check("79 the Codex voucher row is unaffected",
-          any(row.startswith(".codex79") for row in voucher_rows(done79.stdout)), done79.stdout)
+    row79 = band_row(done79.stdout, ".codex79")
+    check("79 the Codex voucher row is unaffected -- its exact count and quoted title",
+          row79.split()[1:2] == ["2"] and '"Codex gift"' in row79,
+          done79.stdout)
 script_source = SCRIPT.read_text(encoding="utf-8")
 check("79 the redeem endpoint's name appears nowhere in the module",
       "reset_rate_limits" not in script_source)
@@ -3530,7 +3542,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 724
+MIN_CHECKS = 725
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

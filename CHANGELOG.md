@@ -22,8 +22,9 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 ### Changed
 
 - **The live Claude Code read now requests `/api/oauth/usage?cedar_ember=1&skip_spend=1` and sends
-  the User-Agent the installed Claude Code sends**, `claude-cli/VERSION (external, cli)`, with
-  `VERSION` read once per run from `claude --version` (about 10 ms, writes nothing). The request
+  the User-Agent Claude Code sends from its default `cli` entry point**,
+  `claude-cli/VERSION (external, cli)`, with `VERSION` taken from the installed
+  `claude --version` (read once per run; about 10 ms, writes nothing). The request
   count is unchanged: one per profile. The backend offers resets only to the Claude Code surface:
   any other User-Agent gets `ineligible_reason` `surface`, and a made-up version gets
   `cli_version`.

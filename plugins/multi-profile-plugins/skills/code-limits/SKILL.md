@@ -183,9 +183,9 @@ the same `NOT checked` warning and exit 1 `--live` would have given it.
 **The query and the User-Agent.** The query string is the one Claude Code itself sends when it
 reads reset status. It is the same single request per profile, and the reply is the same usage
 object plus a `cedar_ember` block that carries the reset vouchers. The backend offers resets
-only to the Claude Code surface, so the request also sends the `User-Agent` the installed Claude
-Code sends, `claude-cli/VERSION (external, cli)`. `VERSION` is read once per run from
-`claude --version`. Any other User-Agent, or none, comes back with `ineligible_reason`
+only to the Claude Code surface, so the request also sends the `User-Agent` Claude Code sends from
+its default `cli` entry point, `claude-cli/VERSION (external, cli)`, with `VERSION` taken from the
+installed `claude --version` (read once per run). Any other User-Agent, or none, comes back with `ineligible_reason`
 `surface`; a version the backend does not know comes back with `cli_version`. The query string
 and the path are frozen literals, and the request is a `GET`.
 
@@ -197,8 +197,9 @@ does. Measured around a single `account/rateLimits/read` call against one home: 
 before, 5 521 after -- new `-wal`/`-shm` companions and migrated sqlite state. Contention with a
 Codex client running concurrently against the same home is an accepted, unmeasured risk.
 
-Every run also spawns `claude --version` once, to learn which version to put in the User-Agent
-(about 10 ms; it writes nothing). If that gives no version, the request goes out without the
+A run that reaches the live read for at least one Claude Code profile spawns `claude --version`
+once, to learn which version to put in the User-Agent (about 10 ms; it writes nothing). If that
+gives no version, the request goes out without the
 Claude Code User-Agent and the voucher row reads `not read`.
 
 Every run, in default mode as well as under `--live`, also reads each Claude Code profile's login
@@ -238,7 +239,8 @@ A row has one of four states:
 
 - A number. It is bold and green above 0, and dimmed at 0 with no label or expiry.
 - `not offered (REASON)` when the backend says the account is not eligible. `REASON` is the
-  backend's `ineligible_reason`, for example `surface` or `cli_version`.
+  backend's `ineligible_reason`, for example `surface` or `cli_version`. The row reads plain
+  `not offered` when the backend gives no reason, or a reason the report will not print.
 - `not reported` when the reply has no voucher block.
 - `not read` when `claude --version` gave no version, so the backend could not be asked as
   Claude Code.
