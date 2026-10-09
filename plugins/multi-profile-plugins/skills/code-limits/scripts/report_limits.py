@@ -13,8 +13,10 @@ still render as `stale-after-reset`, never presented as current usage. `--live` 
 never falls back, so a failed read gaps the profile instead of quietly reading the disk.
 
 Codex answers live: `codex app-server` exposes the read-only JSON-RPC method
-`account/rateLimits/read`. It is the only source carrying `rateLimitResetCredits` -- the "usage
-limit reset" the Codex TUI offers -- and the only one enumerating the per-model pools.
+`account/rateLimits/read`. It carries `rateLimitResetCredits` -- the "usage limit reset" the
+Codex TUI offers -- and is the only source enumerating the per-model pools. Claude Code's own
+reset vouchers (the ones `/limit-reset` offers) arrive in the `cedar_ember` block of the same
+usage reply the live read already fetches, so both sources can fill the RESET VOUCHERS band.
 
 This script writes nothing itself. Spawning the vendor's app-server does make it open and migrate
 its own state databases under the selected CODEX_HOME, exactly as any `codex` invocation does;
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import functools
 import hashlib
 import http.client
 import json
@@ -122,7 +125,10 @@ _RATE_LIMITS_ID = 2
 # new origin. An HTTPSConnection consults no proxy variable and follows no redirect, so both ways
 # of moving a bearer off this host stop existing instead of being guarded against.
 API_HOST = "api.anthropic.com"
-API_PATH = "/api/oauth/usage"
+# The query is what makes the reply carry the `cedar_ember` block (Claude Code's reset vouchers):
+# it is the exact path Claude Code's own status read uses. Still ONE frozen literal -- nothing is
+# interpolated into it, and it is the only path this module ever requests.
+API_PATH = "/api/oauth/usage?cedar_ember=1&skip_spend=1"
 HTTP_TIMEOUT = 15.0
 HTTPSConnection = http.client.HTTPSConnection  # module-level so a test can substitute it
 
@@ -907,13 +913,17 @@ def _claude_token(profile: Path) -> str:
 
 def _claude_live(profile: Path) -> list[Record]:
     token = _claude_token(profile)
+    agent = _claude_user_agent()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    if agent:  # no agent means exactly the headers this module always sent
+        headers["User-Agent"] = agent
     conn = HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT)
     try:
         try:
-            conn.request("GET", API_PATH, headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-            })
+            conn.request("GET", API_PATH, headers=headers)
             response = conn.getresponse()
             body = response.read()
             status = response.status
@@ -943,7 +953,99 @@ def _claude_live(profile: Path) -> list[Record]:
     records = _claude_rows(inner, f"live {_local(now)}", now)
     if not records:
         raise Malformed("response-malformed")
+    # Appended AFTER the emptiness check: a reply carrying only a voucher block is still a reply
+    # with no usage, and gaps as before. _row_or_gap catches everything, so a voucher read that
+    # fails -- for a reason nobody foresaw included -- gaps its own record and never discards the
+    # usage rows of the same reply.
+    records.append(_row_or_gap(VOUCHER_NAME, lambda: _claude_vouchers(blob, agent)))
     return records
+
+
+@functools.lru_cache(maxsize=1)
+def _claude_user_agent() -> str:
+    """The User-Agent Claude Code itself would send, or "" when the installed version is unknown.
+
+    The backend offers reset vouchers only to that surface. Measured: no User-Agent,
+    `Python-urllib/3.14`, `claude-cli` and `claude-cli/2.1.295` all answered `eligible: false`
+    (`surface`); `claude-cli/2.1.295 (external, cli)` answered eligible. Claude Code builds that
+    string as `claude-cli/<VERSION> (external, <CLAUDE_CODE_ENTRYPOINT or "cli">)`.
+
+    Memoised so a run spawns `claude --version` once however many profiles it reads. The digits-
+    and-dots shape check is what makes the value safe to place in a header: nothing else from the
+    child's output is ever used.
+    """
+    try:
+        done = subprocess.run(["claude", "--version"], capture_output=True, text=True,
+                              timeout=10.0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # ValueError: text=True decoding raises UnicodeDecodeError, a ValueError subclass.
+        return ""
+    if done.returncode != 0:
+        return ""
+    words = done.stdout.split()
+    version = words[0] if words else ""
+    parts = version.split(".")
+    if len(parts) != 3 or not all(part.isascii() and part.isdigit() for part in parts):
+        return ""
+    return f"claude-cli/{version} (external, cli)"
+
+
+def _claude_vouchers(blob: dict, agent: str) -> Record:
+    """The `cedar_ember` block as ONE voucher record. Reads, never redeems.
+
+    Claiming is a different request (a POST); this module has no call site for it. A malformed
+    block raises Malformed so _row_or_gap turns it into a gapped voucher record. That is stricter
+    than Claude Code's own parser, which drops an unreadable grant silently: here an unreadable
+    grant is reported rather than quietly left out of the count.
+    """
+    if not agent:
+        return Record(VOUCHER_NAME, NO_CURRENT, freshness="not read", info=True,
+                      note="`claude --version` gave no version, so the backend could not be"
+                           " asked as Claude Code")
+    block = blob.get("cedar_ember")
+    if block is None:
+        return Record(VOUCHER_NAME, NO_CURRENT, freshness="not reported", info=True,
+                      note="the backend provided no reset-voucher data")
+    block = _obj(block)
+    eligible = _flag(block.get("eligible"))
+    grants = block.get("grants")
+    if grants is None:
+        grants = []
+    elif not isinstance(grants, list):
+        raise Malformed("payload-malformed")
+    for grant in grants:
+        _text(_obj(grant).get("id"), 64)
+        _nonneg_int(grant.get("resets_left"))
+    if not eligible:
+        # The reason is vendor text that gets PRINTED, so it passes the same refusal as a title;
+        # one that fails it reads as no reason rather than gapping a plain "not offered".
+        try:
+            reason = _safe_name(_text(block.get("ineligible_reason"), 40))
+        except Malformed:
+            reason = ""
+        return Record(VOUCHER_NAME, NO_CURRENT, info=True,
+                      freshness=f"not offered ({reason})" if reason else "not offered",
+                      note="the backend does not offer this profile a reset")
+    count = sum(grant["resets_left"] for grant in grants)
+    # The grant shown is the one Claude Code would use next; failing that, the first with a
+    # reset left. Detail only -- a refused value is dropped and never gaps the count.
+    next_id = block.get("next_grant_id")
+    chosen = next((grant for grant in grants if grant["id"] == next_id), None)
+    if chosen is None:
+        chosen = next((grant for grant in grants if grant["resets_left"] > 0), None)
+    expires, title = None, ""
+    if chosen is not None:
+        try:
+            title = _text(chosen.get("label"), 120)
+        except Malformed:
+            title = ""
+        try:
+            expires = _from_iso(chosen.get("ends_at"))
+        except Malformed:
+            expires = None
+    return Record(VOUCHER_NAME, REPORTED, freshness=str(count), info=True,
+                  expires=expires, title=title,
+                  note="read only; redeem one in Claude Code with /limit-reset, never from here")
 
 
 # --- Codex ---------------------------------------------------------------------------------
@@ -1379,7 +1481,8 @@ def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
     if not vouchers and not infos:
         return
     print(f"  {paint('RESET VOUCHERS', CYAN + ';' + BOLD)}   "
-          + paint("a one-shot rate-limit reset -- redeem in the Codex TUI with /usage", DIM))
+          + paint("a one-shot limit reset -- redeem with /limit-reset (Claude Code)"
+                  " or /usage (Codex)", DIM))
     home_width = max([_width(_safe_name(row.where)) for row in vouchers]
                      + [_width(_safe_name(row.record.name)) for row in infos] + [8]) + 2
     for _ident, where, _group, record in vouchers:
@@ -1399,7 +1502,11 @@ def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
                 # would when the payload omits `expiresAt`. It is also the one printed field that
                 # would otherwise render a no-break space as an invisible space rather than as an
                 # escape, because it is the only one that never passed through _safe_name.
-                body += f'  "{_safe_name(record.title)}"'
+                # json.dumps escapes a quote inside the label, so it cannot close the quoted
+                # span early and continue as text that poses as the report's own `expires`.
+                # json.dumps runs FIRST: _safe_name adds backslashes of its own (`\xa0`) and
+                # never a quote, so the other order made json.dumps escape those a second time.
+                body += "  " + _safe_name(json.dumps(record.title, ensure_ascii=False))
             if record.expires is not None:
                 # A voucher that has already lapsed is not a window that reset: `_relative` would
                 # say "400d ago", which is the wrong vocabulary for the wrong noun, and a

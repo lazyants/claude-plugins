@@ -6,7 +6,8 @@ description: >-
   profile under `~/.claude*` (`CLAUDE_CONFIG_DIR`) and every discovered Codex home under
   `~/.codex*` (`CODEX_HOME`).
   Use when asked how much usage-limit budget is left, when a five-hour or weekly window resets,
-  which profile or account is nearly out, or how many Codex "usage limit reset" vouchers remain.
+  which profile or account is nearly out, or how many Claude Code or Codex "usage limit reset"
+  vouchers remain.
   Ships `scripts/report_limits.py`, installable on PATH as `code-limit`, one table covering both
   CLIs: Claude Code read live by default, on-disk cache as fallback (`--live` skips it), and Codex
   read live over `codex app-server`'s `account/rateLimits/read` JSON-RPC call. Not the sibling
@@ -22,12 +23,14 @@ description: >-
 One report across every usage-limit pool this machine draws on: every discovered Claude Code
 profile under `~/.claude*` and every discovered Codex home under `~/.codex*`.
 
-It opens with the **reset vouchers** -- the one-shot rate-limit resets the Codex TUI redeems --
-because a voucher expires whether or not anyone looks, and the count alone never says when. Each
-home's row carries the vendor's own title and expiry date, and the time left beside it. A home
-that reported a count of zero reads `0` -- the integer it measured, never a word standing in for
-it -- while one whose backend sent no voucher data at all reads `not reported`. Those are two
-different facts and the report keeps them apart. The credit balance follows in the same band, labelled with the home it belongs to.
+It opens with the **reset vouchers** -- the one-shot rate-limit resets that Claude Code redeems
+with `/limit-reset` and the Codex TUI redeems with `/usage` -- because a voucher expires whether or
+not anyone looks, and the count alone never says when. Each Claude Code profile read live and each
+Codex home gets a row carrying the vendor's own title and expiry date, and the time left beside
+it. An account that reported a count of zero reads `0` -- the integer it measured, never a word
+standing in for it -- while one whose backend sent no voucher data at all reads `not reported`.
+Those are two different facts and the report keeps them apart. The credit balance follows in the
+same band, labelled with the home it belongs to.
 
 Then one **table of allowances**, ordered by candidate and then by allowance, alphabetically.
 Every profile and home on this machine is on it, its rows adjacent, in the same order on every
@@ -149,9 +152,9 @@ a Codex home was actually examined this run.
 
 ## Claude Code live reads: default mode and `--live`
 
-Calling `GET https://api.anthropic.com/api/oauth/usage` is how a Claude Code row is read live, and
-that call happens in both modes now: default mode makes it first, before opening the cache at
-all, and `--live` makes the same call and never opens the cache. The token mechanics below are the
+Calling `GET https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1` is how a
+Claude Code row is read live, and that call happens in both modes now: default mode makes it
+first, before opening the cache at all, and `--live` makes the same call and never opens the cache. The token mechanics below are the
 same call either way. It reads the profile's OAuth token from `.credentials.json` when that file is
 present and parses; when the login it holds is absent or expired, the macOS Keychain item the
 profile's config directory maps to is consulted as well, and that keychain read prompts the
@@ -177,6 +180,15 @@ with the failure's diagnostic code folded into the fallback note rather than int
 unless that cache read also has nothing, in which case default mode gaps the profile too, with
 the same `NOT checked` warning and exit 1 `--live` would have given it.
 
+**The query and the User-Agent.** The query string is the one Claude Code itself sends when it
+reads reset status. It is the same single request per profile, and the reply is the same usage
+object plus a `cedar_ember` block that carries the reset vouchers. The backend offers resets
+only to the Claude Code surface, so the request also sends the `User-Agent` Claude Code sends from
+its default `cli` entry point, `claude-cli/VERSION (external, cli)`, with `VERSION` taken from the
+installed `claude --version` (read once per run). Any other User-Agent, or none, comes back with `ineligible_reason`
+`surface`; a version the backend does not know comes back with `cli_version`. The query string
+and the path are frozen literals, and the request is a `GET`.
+
 ## What the report touches
 
 Stated plainly, not softened: the script itself writes nothing, but `codex app-server` opens and
@@ -184,6 +196,11 @@ migrates its own state databases under each `CODEX_HOME` exactly as any other `c
 does. Measured around a single `account/rateLimits/read` call against one home: 5 516 files
 before, 5 521 after -- new `-wal`/`-shm` companions and migrated sqlite state. Contention with a
 Codex client running concurrently against the same home is an accepted, unmeasured risk.
+
+A run that reaches the live read for at least one Claude Code profile spawns `claude --version`
+once, to learn which version to put in the User-Agent (about 10 ms; it writes nothing). If that
+gives no version, the request goes out without the
+Claude Code User-Agent and the voucher row reads `not read`.
 
 Every run, in default mode as well as under `--live`, also reads each Claude Code profile's login
 -- its `.credentials.json` or its Keychain item -- and, when it finds a usable one, sends that
@@ -207,6 +224,37 @@ worth reading. A shape the schema does not permit at all still gaps, as before.
 
 ## Reset vouchers
 
+### Claude Code
+
+The live read carries a `cedar_ember` block. The report reads three things from it, and nothing
+else:
+
+- **The count** is the sum of `resets_left` over all grants.
+- **The label and the expiry** (`label`, `ends_at`) come from the grant that `next_grant_id`
+  names, or, if none matches, from the first grant with `resets_left` above 0. Each is read
+  separately. A value the report cannot show is dropped; it never gaps the row.
+- **Eligibility** (`eligible`, `ineligible_reason`).
+
+A row has one of four states:
+
+- A number. It is bold and green above 0, and dimmed at 0 with no label or expiry.
+- `not offered (REASON)` when the backend says the account is not eligible. `REASON` is the
+  backend's `ineligible_reason`, for example `surface` or `cli_version`. The row reads plain
+  `not offered` when the backend gives no reason, or a reason the report will not print.
+- `not reported` when the reply has no voucher block.
+- `not read` when `claude --version` gave no version, so the backend could not be asked as
+  Claude Code.
+
+A voucher block that cannot be read (for example an `eligible` that is not true or false, or a
+grant whose `resets_left` is not a non-negative integer) gaps only the voucher record: a `reset
+vouchers` table row and a warning, exit 1. The usage rows of the same reply still render.
+
+Redeem in Claude Code with `/limit-reset`. The report never redeems: it sends one `GET` and
+nothing else. A profile that fell back to the on-disk cache has no voucher row, because Claude
+Code does not cache voucher data.
+
+### Codex
+
 `rateLimitResetCredits.availableCount` is what the Codex TUI's own `/usage` calls "usage limit
 reset available" -- a voucher that lifts a rate limit early. The report READS this count and
 prints it.
@@ -228,6 +276,10 @@ available credit and renders them in the voucher band. Both are optional in that
 neither may ever gap a run: a home reporting a bare count still renders, with less to say. The
 expiry is worth surfacing precisely because a voucher lapses whether or not anyone is watching,
 and the count on its own never says when.
+
+The band heading names both redeem commands: "a one-shot limit reset -- redeem with /limit-reset
+(Claude Code) or /usage (Codex)". A title, from either vendor, prints JSON-quoted, so a quote
+inside a vendor label is escaped and cannot pose as the report's own `expires` text.
 
 An omitted or null `rateLimitResetCredits` renders as a known absence -- the row reads "not
 reported" and the run stays clean -- because the vendor's schema allows the field to be absent.
