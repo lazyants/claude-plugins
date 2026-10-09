@@ -978,6 +978,7 @@ def _claude_user_agent() -> str:
         done = subprocess.run(["claude", "--version"], capture_output=True, text=True,
                               timeout=10.0)
     except (OSError, ValueError, subprocess.SubprocessError):
+        # ValueError: text=True decoding raises UnicodeDecodeError, a ValueError subclass.
         return ""
     if done.returncode != 0:
         return ""
@@ -1028,9 +1029,10 @@ def _claude_vouchers(blob: dict, agent: str) -> Record:
     count = sum(grant["resets_left"] for grant in grants)
     # The grant shown is the one Claude Code would use next; failing that, the first with a
     # reset left. Detail only -- a refused value is dropped and never gaps the count.
-    chosen = next((g for g in grants if g["id"] == block.get("next_grant_id")), None)
+    next_id = block.get("next_grant_id")
+    chosen = next((grant for grant in grants if grant["id"] == next_id), None)
     if chosen is None:
-        chosen = next((g for g in grants if g["resets_left"] > 0), None)
+        chosen = next((grant for grant in grants if grant["resets_left"] > 0), None)
     expires, title = None, ""
     if chosen is not None:
         try:
@@ -1502,7 +1504,9 @@ def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
                 # escape, because it is the only one that never passed through _safe_name.
                 # json.dumps escapes a quote inside the label, so it cannot close the quoted
                 # span early and continue as text that poses as the report's own `expires`.
-                body += "  " + json.dumps(_safe_name(record.title), ensure_ascii=False)
+                # json.dumps runs FIRST: _safe_name adds backslashes of its own (`\xa0`) and
+                # never a quote, so the other order made json.dumps escape those a second time.
+                body += "  " + _safe_name(json.dumps(record.title, ensure_ascii=False))
             if record.expires is not None:
                 # A voucher that has already lapsed is not a window that reset: `_relative` would
                 # say "400d ago", which is the wrong vocabulary for the wrong noun, and a

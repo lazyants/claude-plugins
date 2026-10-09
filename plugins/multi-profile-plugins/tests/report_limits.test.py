@@ -1428,8 +1428,7 @@ import report_limits as R  # noqa: E402
 
 # The in-process cases below call `_claude_live` in THIS interpreter's own environment, which
 # now spawns `claude --version`. Put the same fixture stub first on PATH once, so none of them can
-# reach the operator's real `claude`; the cache is cleared around each substituted connection so
-# the version is read afresh and one case's agent cannot leak into the next.
+# reach the operator's real `claude`.
 INPROC_BIN = Path(tempfile.mkdtemp(prefix="report-limits-claude-"))
 (INPROC_BIN / "claude").write_text(STUB_CLAUDE, encoding="utf-8")
 (INPROC_BIN / "claude").chmod(0o755)
@@ -1470,7 +1469,6 @@ with tempfile.TemporaryDirectory() as tmp:
     original = R.HTTPSConnection
     try:
         R.HTTPSConnection = Redirecting
-        R._claude_user_agent.cache_clear()
         try:
             R._claude_live(profile)
             outcome = "no-error"
@@ -1504,7 +1502,6 @@ with tempfile.TemporaryDirectory() as tmp:
             "claudeAiOauth": {"accessToken": SENTINEL_TOKEN + "\n", "expiresAt": now_ms(24)}
         }), encoding="utf-8")
         R.HTTPSConnection = Raising
-        R._claude_user_agent.cache_clear()
         raise_out, raise_err = io.StringIO(), io.StringIO()
         try:
             with contextlib.redirect_stdout(raise_out), \
@@ -1521,7 +1518,6 @@ with tempfile.TemporaryDirectory() as tmp:
                          code)
     finally:
         R.HTTPSConnection = original
-        R._claude_user_agent.cache_clear()
 
     # 25b -- the credential oracle around an execution that ACTUALLY READS the sentinel.
     #
@@ -1557,7 +1553,6 @@ with tempfile.TemporaryDirectory() as tmp:
     out_buf, err_buf = io.StringIO(), io.StringIO()
     try:
         R.HTTPSConnection = Recording
-        R._claude_user_agent.cache_clear()
         with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
             produced = R._claude_live(reader)
             # Drive the REAL renderer, not a per-record helper: the oracle below asks whether a
@@ -1567,7 +1562,6 @@ with tempfile.TemporaryDirectory() as tmp:
                       codex_examined=False)
     finally:
         R.HTTPSConnection = original
-        R._claude_user_agent.cache_clear()
 
     check("25b the token really WAS read (else the oracle proves nothing)",
           any(SENTINEL_TOKEN in header.get("Authorization", "")
@@ -1648,12 +1642,10 @@ with tempfile.TemporaryDirectory() as tmp:
         os.environ["STUB_SECURITY_MARKER"] = str(key_marker)
         os.environ["STUB_SECURITY_PAYLOAD"] = stored
         R.HTTPSConnection = KeyRecording
-        R._claude_user_agent.cache_clear()
         with contextlib.redirect_stdout(key_out), contextlib.redirect_stderr(key_err):
             key_records = R._claude_live(keyprofile)
     finally:
         R.HTTPSConnection = original
-        R._claude_user_agent.cache_clear()
         for name, value in saved_env.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -1783,11 +1775,9 @@ with tempfile.TemporaryDirectory() as tmp:
         os.environ["STUB_SECURITY_PAYLOAD"] = stored_d
         token_d = R._claude_token(profile_d)
         R.HTTPSConnection = KVRecording
-        R._claude_user_agent.cache_clear()
         R._claude_live(profile_d)
     finally:
         R.HTTPSConnection = original_d
-        R._claude_user_agent.cache_clear()
         for name, value in saved_env_d.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -2449,6 +2439,9 @@ with tempfile.TemporaryDirectory() as tmp:
     band = voucher_rows(nbsp.stdout)
     check("51 an invisible space in a title is escaped, not printed",
           bool(band) and chr(0xA0) not in band[0] and "xa0" in band[0], str(band))
+    # Pinned exactly: ONE literal backslash before xa0, not the doubled one a second escaping adds.
+    check("51 the escape is a single backslash, not doubled",
+          bool(band) and '"Full\\xa0reset"' in band[0] and "\\\\xa0" not in band[0], str(band))
 
     # An expired voucher is not a window that reset. `_relative`'s "reset ... ago" is the wrong
     # noun, and a lapsed voucher is exactly the case the operator needs stated plainly.
@@ -3359,7 +3352,7 @@ def band_row(stdout: str, where: str) -> str:
     return rows[0] if len(rows) == 1 else f"<{len(rows)} band rows for {where}>"
 
 
-def voucher_run(name: str, ember: Any, extra_env: Any = None, args: Any = None):
+def cedar_run(name: str, ember: Any, extra_env: Any = None, args: Any = None):
     """One Claude profile + one Codex home through the script; returns (stdout row, done)."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         root = Path(tmp_dir)
@@ -3373,7 +3366,7 @@ def voucher_run(name: str, ember: Any, extra_env: Any = None, args: Any = None):
 
 
 # 72 -- an eligible account: count, quoted label and expiry in the band; usage row intact.
-row72, done72 = voucher_run(".claude72", {"eligible": True, "next_grant_id": "g1",
+row72, done72 = cedar_run(".claude72", {"eligible": True, "next_grant_id": "g1",
                                           "grants": [grant()]})
 check("72 the band row for the Claude profile reads the count", row72.split()[1:2] == ["1"], row72)
 check("72 the label is quoted", '"Reset gift"' in row72, row72)
@@ -3402,12 +3395,12 @@ with tempfile.TemporaryDirectory() as tmp:
           done73.claude_calls == ["--version"], str(done73.claude_calls))
 
 # 74 -- the backend does not offer a reset to this surface/account.
-row74, done74 = voucher_run(".claude74", {"eligible": False, "ineligible_reason": "surface"})
+row74, done74 = cedar_run(".claude74", {"eligible": False, "ineligible_reason": "surface"})
 check("74 the row reads `not offered (surface)`", "not offered (surface)" in row74, row74)
 check("74 the run is clean", done74.returncode == 0, done74.stdout)
 
 # 75 -- no block at all is a known absence, not a gap.
-row75, done75 = voucher_run(".claude75", UNSET)
+row75, done75 = cedar_run(".claude75", UNSET)
 check("75 an absent block reads `not reported`", "not reported" in row75, row75)
 check("75 the run is clean", done75.returncode == 0, done75.stdout)
 
@@ -3422,7 +3415,7 @@ for label, ember in (
     ("a grant with no id", {"eligible": True, "grants": [
         {"label": "x", "resets_left": 1, "ends_at": iso(48)}]}),
 ):
-    row, done = voucher_run(".claude76", ember)
+    row, done = cedar_run(".claude76", ember)
     check(f"76 {label}: a `reset vouchers` row carries a bracketed diagnostic",
           any("reset vouchers" in line and re.search(r"\[[a-z-]+\]", line)
               for line in done.stdout.splitlines()), done.stdout)
@@ -3451,17 +3444,17 @@ for label, bad_grant, absent in (
     ("a 121-character label", grant(label="L" * 121), "L"),
     ("a label holding U+2028", grant(label="line" + chr(0x2028) + "break"), "line"),
 ):
-    row, done = voucher_run(".claude77", {"eligible": True, "grants": [bad_grant]})
+    row, done = cedar_run(".claude77", {"eligible": True, "grants": [bad_grant]})
     # No title at all: no quote character and no prefix of the label, so a label truncated to the
     # limit instead of dropped cannot pass.
     check(f"77 {label}: the count still prints and no title does",
           row.split()[1:2] == ["1"] and '"' not in row and absent not in row, row)
     check(f"77 {label}: exit 0", done.returncode == 0, done.stdout)
-row, done = voucher_run(".claude77", {"eligible": True, "grants": [grant(ends="not iso")]})
+row, done = cedar_run(".claude77", {"eligible": True, "grants": [grant(ends="not iso")]})
 check("77 a non-ISO ends_at drops the expiry and keeps the count",
       row.split()[1:2] == ["1"] and "expires" not in row, row)
 check("77 a non-ISO ends_at exits 0", done.returncode == 0, done.stdout)
-row, done = voucher_run(".claude77", {"eligible": True, "next_grant_id": "g2", "grants": [
+row, done = cedar_run(".claude77", {"eligible": True, "next_grant_id": "g2", "grants": [
     grant("g1", 1, "first-label", ends=iso(24)),
     grant("g2", 2, "second-label", ends=iso(120))]})
 check("77 two grants sum their resets_left", row.split()[1:2] == ["3"], row)
@@ -3470,7 +3463,7 @@ check("77 the detail comes from the grant next_grant_id names",
 check("77 the expiry comes from that same grant, not the first",
       "in 4d" in row and "in 23h" not in row and "in 1d" not in row, row)
 hostile = 'x" expires 31 Dec 2099 CEST  in 9999d "'
-row, done = voucher_run(".claude77", {"eligible": True, "grants": [grant(label=hostile)]})
+row, done = cedar_run(".claude77", {"eligible": True, "grants": [grant(label=hostile)]})
 check("77 a quote inside the label is escaped, so the quoted span cannot close early",
       len(re.findall(r'(?<!\\)"', row)) == 2 and '\\"' in row, row)
 check("77 only the report's own text follows the closing quote",
@@ -3542,7 +3535,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 725
+MIN_CHECKS = 726
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
