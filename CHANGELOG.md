@@ -2,6 +2,35 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.5.0] — 2026-10-09
+
+### Added
+
+- **`code-limits` reports Claude Code's reset vouchers (#974).** The reset-voucher band now has one
+  row per Claude Code profile read live, beside the Codex rows: how many usage-limit resets the
+  account holds, the grant's label, and when it lapses -- the facts `/limit-reset` offers. The
+  count is the sum of `resets_left` over all grants; the label and expiry come from the grant that
+  `next_grant_id` names, else the first grant with `resets_left` above 0. A row is a number (bold
+  and green above 0, dimmed at 0), `not offered (REASON)` when the backend says the account is not
+  eligible, `not reported` when the reply has no voucher block, or `not read` when
+  `claude --version` gave no version. A voucher block that cannot be read gaps only the voucher
+  record (a `reset vouchers` table row and a warning, exit 1), never the usage rows of the same
+  reply. The report never redeems a reset: it sends one `GET` and nothing else; redeem in Claude
+  Code with `/limit-reset`. A profile that fell back to the on-disk cache has no voucher row,
+  because Claude Code does not cache voucher data.
+
+### Changed
+
+- **The live Claude Code read now requests `/api/oauth/usage?cedar_ember=1&skip_spend=1` and sends
+  the User-Agent the installed Claude Code sends**, `claude-cli/VERSION (external, cli)`, with
+  `VERSION` read once per run from `claude --version` (about 10 ms, writes nothing). The request
+  count is unchanged: one per profile. The backend offers resets only to the Claude Code surface:
+  any other User-Agent gets `ineligible_reason` `surface`, and a made-up version gets
+  `cli_version`.
+- **The voucher band heading names both redeem commands:** "a one-shot limit reset -- redeem with
+  /limit-reset (Claude Code) or /usage (Codex)". Voucher titles now print JSON-quoted, so a quote
+  inside a vendor label is escaped and cannot close the quoted span early.
+
 ## [db-guardrails 1.1.0] — 2026-10-02
 
 ### Added

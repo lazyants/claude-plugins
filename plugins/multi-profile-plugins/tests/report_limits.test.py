@@ -99,6 +99,20 @@ if payload is not None:          # the SUCCESS path; absent, this stub denies as
 sys.exit(int(os.environ.get("STUB_SECURITY_RC", "1")))
 '''
 
+STUB_CLAUDE = '''#!/usr/bin/env python3
+"""Stand-in for `claude --version`: the report script reads the installed version from it, and
+a suite that reached the operator's real `claude` would measure the machine, not the fixture."""
+import os, sys
+
+marker = os.environ.get("STUB_CLAUDE_MARKER")
+if marker:
+    with open(marker, "a", encoding="utf-8") as handle:
+        print(" ".join(sys.argv[1:]), file=handle)
+sys.stdout.write(os.environ.get("STUB_CLAUDE_VERSION_OUT", "2.1.295 (Claude Code)") + "\\n")
+sys.stdout.flush()
+sys.exit(int(os.environ.get("STUB_CLAUDE_VERSION_RC", "0")))
+'''
+
 STUB_CODEX = '''#!/usr/bin/env python3
 """Stand-in for `codex app-server`: records what it was sent, replies as the mode dictates."""
 import json, os, sys
@@ -188,11 +202,15 @@ class _StubHTTPSConnection:
         bearer_present = any(
             str(name).lower() == "authorization" and str(value).startswith("Bearer ")
             for name, value in (headers or {}).items())
+        # The User-Agent carries no secret, and the backend's eligibility answer depends on it.
+        user_agent = next((str(value) for name, value in (headers or {}).items()
+                           if str(name).lower() == "user-agent"), None)
         log_path = os.environ.get("STUB_HTTPS_LOG")
         if log_path:
             with open(log_path, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps({"host": self._host, "method": method, "path": path,
-                                         "bearer_present": bearer_present}) + "\\n")
+                                         "bearer_present": bearer_present,
+                                         "user_agent": user_agent}) + "\\n")
 
     def getresponse(self):
         status = os.environ.get("STUB_HTTPS_STATUS")
@@ -390,7 +408,8 @@ def make_codex_home(root: Path, name: str) -> Path:
 def install_stub(root: Path) -> Path:
     bindir = root / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
-    for name, body in (("codex", STUB_CODEX), ("security", STUB_SECURITY)):
+    for name, body in (("codex", STUB_CODEX), ("security", STUB_SECURITY),
+                       ("claude", STUB_CLAUDE)):
         # A stub with a syntax error exits non-zero, which is exactly what the failure it stands
         # in for looks like. Compile it here so a broken fixture cannot pass as a real result.
         compile(body, f"<stub {name}>", "exec")
@@ -457,6 +476,9 @@ def run(args, root: Any = None, stub_mode="ok", stub_result=None, timeout=90,
     env["STUB_MODE"] = stub_mode
     env["STUB_RESULT"] = json.dumps(DEFAULT_RESULT if stub_result is None else stub_result)
     env["STUB_SECURITY_MARKER"] = str(root / "security-called.txt")
+    claude_marker = root / "claude-called.txt"
+    claude_marker.unlink(missing_ok=True)  # a shared root must show only THIS invocation
+    env["STUB_CLAUDE_MARKER"] = str(claude_marker)
     # ALSO always, and for the same reason as the PATH stub above: the script now reads Claude
     # live FIRST in default mode, so any fixture planting a valid token would otherwise reach
     # api.anthropic.com for real. Leaving STUB_HTTPS_STATUS unset (the default here) makes the
@@ -476,6 +498,8 @@ def run(args, root: Any = None, stub_mode="ok", stub_result=None, timeout=90,
     done.https_requests = ([json.loads(line) for line in
                             https_log.read_text(encoding="utf-8").splitlines() if line.strip()]
                            if https_log.exists() else [])
+    done.claude_calls = (claude_marker.read_text(encoding="utf-8").splitlines()
+                         if claude_marker.exists() else [])
     require_stub_loaded(done.https_marker, [sys.executable, str(SCRIPT)] + args)
     RENDERED_TOKENS.update(re.findall(r"\[([a-z-]+)\]", done.stdout))
     return done, record, transcript
@@ -1402,6 +1426,16 @@ import contextlib  # noqa: E402
 import io  # noqa: E402
 import report_limits as R  # noqa: E402
 
+# The in-process cases below call `_claude_live` in THIS interpreter's own environment, which
+# now spawns `claude --version`. Put the same fixture stub first on PATH once, so none of them can
+# reach the operator's real `claude`; the cache is cleared around each substituted connection so
+# the version is read afresh and one case's agent cannot leak into the next.
+INPROC_BIN = Path(tempfile.mkdtemp(prefix="report-limits-claude-"))
+(INPROC_BIN / "claude").write_text(STUB_CLAUDE, encoding="utf-8")
+(INPROC_BIN / "claude").chmod(0o755)
+os.environ["PATH"] = f"{INPROC_BIN}{os.pathsep}{os.environ['PATH']}"
+R._claude_user_agent.cache_clear()
+
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     profile = make_claude(root, ".claudeT", cached(entries=[entry()]))
@@ -1436,6 +1470,7 @@ with tempfile.TemporaryDirectory() as tmp:
     original = R.HTTPSConnection
     try:
         R.HTTPSConnection = Redirecting
+        R._claude_user_agent.cache_clear()
         try:
             R._claude_live(profile)
             outcome = "no-error"
@@ -1469,6 +1504,7 @@ with tempfile.TemporaryDirectory() as tmp:
             "claudeAiOauth": {"accessToken": SENTINEL_TOKEN + "\n", "expiresAt": now_ms(24)}
         }), encoding="utf-8")
         R.HTTPSConnection = Raising
+        R._claude_user_agent.cache_clear()
         raise_out, raise_err = io.StringIO(), io.StringIO()
         try:
             with contextlib.redirect_stdout(raise_out), \
@@ -1485,6 +1521,7 @@ with tempfile.TemporaryDirectory() as tmp:
                          code)
     finally:
         R.HTTPSConnection = original
+        R._claude_user_agent.cache_clear()
 
     # 25b -- the credential oracle around an execution that ACTUALLY READS the sentinel.
     #
@@ -1520,6 +1557,7 @@ with tempfile.TemporaryDirectory() as tmp:
     out_buf, err_buf = io.StringIO(), io.StringIO()
     try:
         R.HTTPSConnection = Recording
+        R._claude_user_agent.cache_clear()
         with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
             produced = R._claude_live(reader)
             # Drive the REAL renderer, not a per-record helper: the oracle below asks whether a
@@ -1529,6 +1567,7 @@ with tempfile.TemporaryDirectory() as tmp:
                       codex_examined=False)
     finally:
         R.HTTPSConnection = original
+        R._claude_user_agent.cache_clear()
 
     check("25b the token really WAS read (else the oracle proves nothing)",
           any(SENTINEL_TOKEN in header.get("Authorization", "")
@@ -1609,10 +1648,12 @@ with tempfile.TemporaryDirectory() as tmp:
         os.environ["STUB_SECURITY_MARKER"] = str(key_marker)
         os.environ["STUB_SECURITY_PAYLOAD"] = stored
         R.HTTPSConnection = KeyRecording
+        R._claude_user_agent.cache_clear()
         with contextlib.redirect_stdout(key_out), contextlib.redirect_stderr(key_err):
             key_records = R._claude_live(keyprofile)
     finally:
         R.HTTPSConnection = original
+        R._claude_user_agent.cache_clear()
         for name, value in saved_env.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -1742,9 +1783,11 @@ with tempfile.TemporaryDirectory() as tmp:
         os.environ["STUB_SECURITY_PAYLOAD"] = stored_d
         token_d = R._claude_token(profile_d)
         R.HTTPSConnection = KVRecording
+        R._claude_user_agent.cache_clear()
         R._claude_live(profile_d)
     finally:
         R.HTTPSConnection = original_d
+        R._claude_user_agent.cache_clear()
         for name, value in saved_env_d.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -1935,10 +1978,6 @@ with tempfile.TemporaryDirectory() as tmp:
     # 24 -- every diagnostic token the script can render is a member of the closed enum.
     check("24 the enum is a frozenset of unique tokens",
           len(R.DIAGNOSTICS) == len(R.DIAGNOSTIC_SET))
-    check("24 every diagnostic this suite actually RENDERED is a member of the enum",
-          RENDERED_TOKENS <= R.DIAGNOSTIC_SET, str(sorted(RENDERED_TOKENS - R.DIAGNOSTIC_SET)))
-    check("24 the suite rendered a substantial share of the enum, not one token",
-          len(RENDERED_TOKENS) >= 8, str(sorted(RENDERED_TOKENS)))
     check("24 the enum has a total fallback so nothing must invent a message",
           "internal-error" in R.DIAGNOSTIC_SET)
     # The stdout searches for this token elsewhere cannot fail on their own: an unmapped code
@@ -3216,7 +3255,9 @@ with tempfile.TemporaryDirectory() as tmp:
           len(done_t1.https_requests) == 1, str(done_t1.https_requests))
     check("T1 it was a GET to the pinned host and path, carrying a bearer",
           done_t1.https_requests == [{"host": "api.anthropic.com", "method": "GET",
-                                      "path": "/api/oauth/usage", "bearer_present": True}],
+                                      "path": "/api/oauth/usage?cedar_ember=1&skip_spend=1",
+                                      "bearer_present": True,
+                                      "user_agent": "claude-cli/2.1.295 (external, cli)"}],
           str(done_t1.https_requests))
     assert_no_secret("T1 live-wins run", done_t1.stdout, done_t1.stderr)
     # Mutation check (run once locally, not committed): restoring the retired stale-only gating
@@ -3243,7 +3284,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check("T2 the run stays clean", done_t2.returncode == 0, done_t2.stdout)
     check("T2 the stub log shows the request WAS attempted, just answered nothing",
           len(done_t2.https_requests) == 1
-          and done_t2.https_requests[0]["path"] == "/api/oauth/usage", str(done_t2.https_requests))
+          and done_t2.https_requests[0]["path"]
+          == "/api/oauth/usage?cedar_ember=1&skip_spend=1", str(done_t2.https_requests))
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
@@ -3289,6 +3331,195 @@ with tempfile.TemporaryDirectory() as tmp:
     check("T5 the cached figure never appears -- --live has no fallback",
           "17%" not in done_t5.stdout, done_t5.stdout)
 
+# --- 72 - 79: #974, the RESET VOUCHERS band carries Claude Code's own vouchers -----------------
+
+CEDAR_PATH = "/api/oauth/usage?cedar_ember=1&skip_spend=1"
+CEDAR_AGENT = "claude-cli/2.1.295 (external, cli)"
+
+
+def cedar_body(ember: Any = UNSET, percent: int = 21) -> str:
+    """A live usage reply with one healthy window, plus a `cedar_ember` block when one is given."""
+    blob: dict = {"limits": [
+        {"kind": "weekly_all", "percent": percent, "is_active": True, "resets_at": iso(48)}]}
+    if ember is not UNSET:
+        blob["cedar_ember"] = ember
+    return json.dumps(blob)
+
+
+def grant(grant_id: str = "g1", left: Any = 1, label: Any = "Reset gift",
+          ends: Any = UNSET) -> dict:
+    return {"id": grant_id, "label": label, "resets_left": left,
+            "ends_at": iso(48) if ends is UNSET else ends}
+
+
+def band_row(stdout: str, where: str) -> str:
+    rows = [row for row in voucher_rows(stdout) if row.startswith(where)]
+    return rows[0] if len(rows) == 1 else f"<{len(rows)} rows for {where}: {rows}>"
+
+
+def voucher_run(name: str, ember: Any, extra_env: Any = None, args: Any = None):
+    """One Claude profile + one Codex home through the script; returns (stdout row, done)."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir)
+        profile = make_claude(root, name, cached(entries=[entry()]))
+        codex_home = make_codex_home(root, ".codexV")
+        done, _, _ = run((args or []) + ["--claude-profile", str(profile),
+                                         "--codex-home", str(codex_home)],
+                         root=root, https_status=200, https_body=cedar_body(ember),
+                         extra_env=extra_env)
+    return band_row(done.stdout, name), done
+
+
+# 72 -- an eligible account: count, quoted label and expiry in the band; usage row intact.
+row72, done72 = voucher_run(".claude72", {"eligible": True, "next_grant_id": "g1",
+                                          "grants": [grant()]})
+check("72 the band row for the Claude profile reads the count", row72.split()[1:2] == ["1"], row72)
+check("72 the label is quoted", '"Reset gift"' in row72, row72)
+check("72 the expiry and its relative time print", "expires" in row72 and "in 1d" in row72, row72)
+check("72 the pool table still shows the profile's usage row",
+      any(where == ".claude72" and "21%" in line for where, _pool, line in
+          pool_rows(done72.stdout)), done72.stdout)
+check("72 the run is clean", done72.returncode == 0, done72.stdout)
+
+# 73 -- the request itself: one GET per profile, the query path, the Claude Code agent, one spawn.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    p73a = make_claude(root, ".claude73a", cached(entries=[entry()]))
+    p73b = make_claude(root, ".claude73b", cached(entries=[entry()]))
+    c73 = make_codex_home(root, ".codex73")
+    done73, _, _ = run(["--claude-profile", str(p73a), "--claude-profile", str(p73b),
+                        "--codex-home", str(c73)], root=root, https_status=200,
+                       https_body=cedar_body({"eligible": True, "grants": [grant()]}))
+    check("73 exactly one HTTPS request per Claude profile", len(done73.https_requests) == 2,
+          str(done73.https_requests))
+    check("73 each is a GET of the pinned host, the query path, as Claude Code, with a bearer",
+          all(req == {"host": "api.anthropic.com", "method": "GET", "path": CEDAR_PATH,
+                      "bearer_present": True, "user_agent": CEDAR_AGENT}
+              for req in done73.https_requests), str(done73.https_requests))
+    check("73 `claude --version` ran exactly once for two profiles",
+          done73.claude_calls == ["--version"], str(done73.claude_calls))
+
+# 74 -- the backend does not offer a reset to this surface/account.
+row74, done74 = voucher_run(".claude74", {"eligible": False, "ineligible_reason": "surface"})
+check("74 the row reads `not offered (surface)`", "not offered (surface)" in row74, row74)
+check("74 the run is clean", done74.returncode == 0, done74.stdout)
+
+# 75 -- no block at all is a known absence, not a gap.
+row75, done75 = voucher_run(".claude75", UNSET)
+check("75 an absent block reads `not reported`", "not reported" in row75, row75)
+check("75 the run is clean", done75.returncode == 0, done75.stdout)
+
+# 76 -- an unreadable block gaps the voucher record only; the usage row survives; exit 1.
+BIG = "9" * 4300  # two of them sum to 4301 digits, which str() refuses under the default limit
+for label, ember in (
+    ("cedar_ember a string", "nope"),
+    ("eligible a string", {"eligible": "yes", "grants": []}),
+    ("grants an object", {"eligible": True, "grants": {"id": "g1"}}),
+    ("resets_left negative", {"eligible": True, "grants": [grant(left=-1)]}),
+    ("resets_left a bool", {"eligible": True, "grants": [grant(left=True)]}),
+    ("a grant with no id", {"eligible": True, "grants": [
+        {"label": "x", "resets_left": 1, "ends_at": iso(48)}]}),
+):
+    row, done = voucher_run(".claude76", ember)
+    check(f"76 {label}: a `reset vouchers` row carries a bracketed diagnostic",
+          any("reset vouchers" in line and re.search(r"\[[a-z-]+\]", line)
+              for line in done.stdout.splitlines()), done.stdout)
+    check(f"76 {label}: the usage row still renders its percentage",
+          any(where == ".claude76" and "21%" in line for where, _pool, line in
+              pool_rows(done.stdout)), done.stdout)
+    check(f"76 {label}: the warning names `reset vouchers`",
+          "reset vouchers [" in done.stdout.split("warnings")[-1], done.stdout)
+    check(f"76 {label}: exit 1", done.returncode == 1, f"rc={done.returncode}")
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    p76 = make_claude(root, ".claude76big", cached(entries=[entry()]))
+    c76 = make_codex_home(root, ".codex76")
+    big_body = cedar_body({"eligible": True, "grants": [
+        grant("g1", "BIG"), grant("g2", "BIG")]}).replace('"BIG"', BIG)
+    done76, _, _ = run(["--claude-profile", str(p76), "--codex-home", str(c76)], root=root,
+                       https_status=200, https_body=big_body)
+    check("76 an unprintable sum gaps the voucher record, not the report",
+          "reset vouchers [" in done76.stdout.split("warnings")[-1]
+          and any(where == ".claude76big" and "21%" in line
+                  for where, _pool, line in pool_rows(done76.stdout)), done76.stdout[-600:])
+    check("76 an unprintable sum exits 1", done76.returncode == 1, f"rc={done76.returncode}")
+
+# 77 -- detail never gaps.
+for label, bad_grant, absent in (
+    ("a 121-character label", grant(label="L" * 121), "L" * 121),
+    ("a label holding U+2028", grant(label="line" + chr(0x2028) + "break"), "line"),
+):
+    row, done = voucher_run(".claude77", {"eligible": True, "grants": [bad_grant]})
+    check(f"77 {label}: the count still prints and the label does not",
+          row.split()[1:2] == ["1"] and absent not in row, row)
+    check(f"77 {label}: exit 0", done.returncode == 0, done.stdout)
+row, done = voucher_run(".claude77", {"eligible": True, "grants": [grant(ends="not iso")]})
+check("77 a non-ISO ends_at drops the expiry and keeps the count",
+      row.split()[1:2] == ["1"] and "expires" not in row, row)
+check("77 a non-ISO ends_at exits 0", done.returncode == 0, done.stdout)
+row, done = voucher_run(".claude77", {"eligible": True, "next_grant_id": "g2", "grants": [
+    grant("g1", 1, "first-label"), grant("g2", 2, "second-label")]})
+check("77 two grants sum their resets_left", row.split()[1:2] == ["3"], row)
+check("77 the detail comes from the grant next_grant_id names",
+      "second-label" in row and "first-label" not in row, row)
+hostile = 'x" expires 31 Dec 2099 CEST  in 9999d "'
+row, done = voucher_run(".claude77", {"eligible": True, "grants": [grant(label=hostile)]})
+check("77 a quote inside the label is escaped, so the quoted span cannot close early",
+      len(re.findall(r'(?<!\\)"', row)) == 2 and '\\"' in row, row)
+check("77 only the report's own text follows the closing quote",
+      row.rpartition('"')[2].count("expires") == 1, row)
+
+# 78 -- no readable version: no User-Agent, the usage row still renders, the voucher says so.
+for label, env in (("claude --version exits 1", {"STUB_CLAUDE_VERSION_RC": "1"}),
+                   ("claude --version prints garbage", {"STUB_CLAUDE_VERSION_OUT": "garbage"})):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        p78 = make_claude(root, ".claude78", cached(entries=[entry()]))
+        c78 = make_codex_home(root, ".codex78")
+        done78, _, _ = run(["--claude-profile", str(p78), "--codex-home", str(c78)], root=root,
+                           https_status=200, extra_env=env,
+                           https_body=cedar_body({"eligible": True, "grants": [grant()]}))
+    check(f"78 {label}: the request carries no User-Agent",
+          [req["user_agent"] for req in done78.https_requests] == [None],
+          str(done78.https_requests))
+    check(f"78 {label}: the usage row renders",
+          any(where == ".claude78" and "21%" in line for where, _pool, line in
+              pool_rows(done78.stdout)), done78.stdout)
+    check(f"78 {label}: the voucher row reads `not read`",
+          "not read" in band_row(done78.stdout, ".claude78"), done78.stdout)
+    check(f"78 {label}: exit 0", done78.returncode == 0, done78.stdout)
+
+# 79 -- a cache fallback has no voucher to show; the Codex row is unaffected; and the module has
+# no way to redeem anything.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    p79 = make_claude(root, ".claude79", cached(entries=[entry()]))
+    c79 = make_codex_home(root, ".codex79")
+    done79, _, _ = run(["--claude-profile", str(p79), "--codex-home", str(c79)], root=root)
+    check("79 the live read failed and the cache answered",
+          ".claude79: the live read did not answer" in done79.stdout, done79.stdout)
+    check("79 no band row exists for the cached Claude profile",
+          not any(row.startswith(".claude79") for row in voucher_rows(done79.stdout)),
+          done79.stdout)
+    check("79 the Codex voucher row is unaffected",
+          any(row.startswith(".codex79") for row in voucher_rows(done79.stdout)), done79.stdout)
+script_source = SCRIPT.read_text(encoding="utf-8")
+check("79 the redeem endpoint's name appears nowhere in the module",
+      "reset_rate_limits" not in script_source)
+request_calls = [node for node in ast.walk(ast.parse(script_source))
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                 and node.func.attr == "request"]
+check("79 the module has one request call site, and it passes the literal GET",
+      len(request_calls) == 1 and isinstance(request_calls[0].args[0], ast.Constant)
+      and request_calls[0].args[0].value == "GET", str(len(request_calls)))
+
+# Moved to the end: a check over every token the suite RENDERED must run after the last case, or
+# the diagnostics a later case renders are never compared against the enum.
+check("24 every diagnostic this suite actually RENDERED is a member of the enum",
+      RENDERED_TOKENS <= R.DIAGNOSTIC_SET, str(sorted(RENDERED_TOKENS - R.DIAGNOSTIC_SET)))
+check("24 the suite rendered a substantial share of the enum, not one token",
+      len(RENDERED_TOKENS) >= 8, str(sorted(RENDERED_TOKENS)))
+
 print(f"ran {checks} checks")
 if failures:
     print(f"FAIL ({len(failures)}):")
@@ -3299,7 +3530,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 663
+MIN_CHECKS = 724
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)
