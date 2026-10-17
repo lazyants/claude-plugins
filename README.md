@@ -10,7 +10,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | [`db-guardrails`](#db-guardrails--v110) | 1.1.0 | Stop AI coding agents from accidentally emptying your database — an always-on hook across 15+ frameworks, with privilege separation for MySQL/MariaDB, PostgreSQL and SQL Server. |
 | [`obsidian-project-vault`](#obsidian-project-vault--v110) | 1.1.0 | Set up, migrate, audit, and operate an Obsidian vault as an LLM Wiki — a persistent, compounding knowledge base maintained by Claude Code. |
 | [`cc-usage-coach`](#cc-usage-coach--v110) | 1.1.0 | Personalized, behavior-aware analysis of where your Claude Code (Max/Pro) usage-limit tokens go, with ranked, low-effort ways to use fewer — computed entirely from your local session logs. Python measures; Claude concludes. |
-| [`enduser-handbook`](#enduser-handbook--v1183) | 1.18.3 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
+| [`enduser-handbook`](#enduser-handbook--v1190) | 1.19.0 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
 | [`literary-translator`](#literary-translator--v12221) | 1.222.1 | High-fidelity literary book translation over a Gutenberg-style EPUB source (expert-mode `custom` extractor also supported) — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability, plus optional book assembly into an Obsidian glossary-wiki behind a deterministic render/diff gate. |
 | [`multi-profile-plugins`](#multi-profile-plugins--v151) | 1.5.1 | Understand and diagnose config-profile isolation across multiple Claude Code `CLAUDE_CONFIG_DIR` profiles or Codex `CODEX_HOME` profiles — why profiles that share a plugins store hit recurring "corrupted installLocation" errors and cross-profile plugin deletion, and why a Codex profile seeded by copying `config.toml` keeps reading the home it came from. A read-only health-check script for each, plus a usage-limit report across every profile and home. |
 | [`software-localizer`](#software-localizer--v010) | 0.1.0 | Translate a software project into another language, or audit the translation it already has — a canon and glossary decided once, codex translation through script checks and a Claude review, a ledger that never overwrites a person's edit, and a per-project adapter accepted by round-trip and coverage checks. |
@@ -136,7 +136,7 @@ The **scripts** are local-first: they read local logs only and make no network c
 - `CC_COACH_CONFIG_DIRS` — comma-separated extra config dirs to scan (default scans only the standard `.claude`).
 - `CC_COACH_OUT` — output location. Precedence: `$CC_COACH_OUT` if set, else next to the scripts if writable, else `${XDG_CACHE_HOME:-~/.cache}/cc-usage-coach/`.
 
-## `enduser-handbook` — v1.18.3
+## `enduser-handbook` — v1.19.0
 
 Author, capture, and publish a Diátaxis-structured end-user handbook (tutorials, how-tos, reference, explanation) for any project. The methodology — pre-read mandate, anti-fabrication rules, capture safety, page identity, manifest discipline, glossary and tone consistency, completeness gate, "running UI is the primary source" — ships as a reusable skill. Project-specific bindings (language, register, stack globs, capture engine, publish target, glossary) live in `.claude/handbook/profile.yml` so the same skill produces a German shopkeeper-register handbook for one project and an English developer-register handbook for the next without forking the workflow.
 
@@ -151,6 +151,7 @@ Trigger phrases: "write the end-user handbook", "update the user manual", "add a
 - **Diátaxis structure** — tutorials, how-tos, reference, and explanation each have their own discipline; chapters are gated on completeness before publish.
 - **Publish-target adapters** — currently `obsidian-vault` and `static-md` (universal plain-Markdown) — paths, INDEX wiring, link syntax, frontmatter shape governed by the adapter, not improvised.
 - **Month-over-month consistency** — mandatory pre-read of style guide + every reference file every session, so tone and terminology stay stable as the handbook grows.
+- **Field-tested traps** — two reference pages collect pitfalls found in real use: one for capture specs (masks, request guards, waits, selectors, screenshot geometry, fixtures, the runner) and one for chapter authoring (behavioural claims, coverage, permission wording, parallel chapters, glossary and navigation wiring, static-site publishing).
 
 ### What it is **not**
 

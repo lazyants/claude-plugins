@@ -129,6 +129,8 @@ You write captured assets to `capture.output_dir`, under a per-chapter subdirect
 
 Where a chapter's manifest entry declares `states` beyond the default populated capture, you capture each declared variant (empty / error / denied) as a **real** app state — never a synthesized response — anchored by the fail-closed `state` marker on `assertIdentity`, per [references/state-variants.md](references/state-variants.md). Per-engine recipes for the `capture.engine` values — the idiomatic `capture.page_identity_signal` and a representative `capture.command` for playwright, cypress, puppeteer, and manual — live in [references/capture-engines.md](references/capture-engines.md).
 
+Before writing or debugging a capture spec, read [references/capture-field-traps.md](references/capture-field-traps.md): traps found in real capture runs — masks that miss, request guards with blind spots, waits on the wrong element, selector and text-pin pitfalls, screenshot geometry, fixtures and the runner itself.
+
 ### W3 — Author the chapter
 
 You write the chapter in `language.code` using `language.register`. You start from [assets/chapter-template.md](assets/chapter-template.md) and substitute section labels from `publish.section_labels` (e.g. `publish.section_labels.prerequisites`, `publish.section_labels.related`) so the headings render in the chapter's language.
@@ -136,6 +138,8 @@ You write the chapter in `language.code` using `language.register`. You start fr
 You write Diátaxis content per [references/diataxis.md](references/diataxis.md), restricted to the quadrants in `diataxis.quadrants_in_use`. You embed each saved screenshot by relative path with alt text in `language.code`. You quote exact UI strings verbatim per R1.
 
 Tone steady over months requires the per-session exemplar re-read per [references/tone-consistency.md](references/tone-consistency.md).
+
+Before declaring a chapter done, read [references/authoring-field-traps.md](references/authoring-field-traps.md): traps found in real chapter work — behavioural claims that do not match the code, coverage gaps, permission wording that discloses too much, parallel chapters colliding on shared files, glossary and navigation wiring, and static-site publishing.
 
 ### W4 — Glossary
 

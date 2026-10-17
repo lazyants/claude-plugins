@@ -92,11 +92,11 @@ met, you halt and tell the user to fix the command before running captures.
 4. **No host browser, no host Node, no host Python.** Whatever runtime the
    capture engine needs comes from inside the sandbox. The developer never
    has to install the engine on the host for captures to work.
-5. **Deterministic across machines.** Two developers on different OSes,
-   running the same `capture.command` against the same commit, produce
-   byte-for-byte equivalent screenshots (modulo timestamps in the data
-   itself). If you see drift, the sandbox is leaky — fix the command before
-   shipping more captures.
+5. **Reproducible environment across machines.** Two developers on different OSes, running the same
+   `capture.command` against the same commit, get the same browser build, fonts, locale and viewport.
+   That is not a promise of byte-for-byte equal screenshots (modulo timestamps in the data itself): an
+   application can have a run-to-run drift baseline ([how to measure it](capture-field-traps.md#screenshot-geometry-and-image-checks)).
+   Drift beyond both means the sandbox is leaky — fix the command before shipping more captures.
 
 ## Common command patterns (engine-agnostic)
 

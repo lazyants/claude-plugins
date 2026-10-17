@@ -2,6 +2,29 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.19.0] — 2026-10-17
+
+### Added
+
+- **`references/capture-field-traps.md`** — traps found in real capture runs, grouped as masking
+  and PII, request guards and navigation, waits and readiness, selectors and text pins, screenshot
+  geometry and image checks, fixtures and teardown, and the runner. Entries already stated
+  elsewhere in the skill are not repeated; an entry that extends an existing reference links to it.
+- **`references/authoring-field-traps.md`** — traps found in real chapter work: verifying
+  behavioural claims against the code, coverage and scope, permission and security wording,
+  parallel chapters colliding on shared files, glossary and navigation wiring, and static-site
+  publishing.
+- `SKILL.md` points at each page from the step it serves (W2 for capture, W3 for authoring). Both
+  pages fall under the Step 0c pre-read automatically, since it covers every file in `references/`.
+
+### Changed
+
+- **`container-isolation.md` guarantee 5 is narrowed.** Isolation makes the capture environment
+  reproducible across machines; it does not make an application render byte-identically on every
+  run. Drift beyond the application's own run-to-run baseline still points at a leaky sandbox; the
+  baseline itself is described in the new capture page.
+- The plugin's description in `plugin.json` now matches its marketplace entry word for word.
+
 ## [multi-profile-plugins 1.5.1] — 2026-10-17
 
 ### Changed
