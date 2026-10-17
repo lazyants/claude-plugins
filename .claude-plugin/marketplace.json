@@ -84,7 +84,7 @@
       "name": "enduser-handbook",
       "source": "./plugins/enduser-handbook",
       "description": "Generate and maintain a Diátaxis-structured end-user handbook for any project from a per-project profile, with live screenshot capture and ongoing completeness audits; ships Obsidian-vault and static-Markdown publish adapters.",
-      "version": "1.18.3",
+      "version": "1.19.0",
       "author": {
         "name": "Lazy Ants"
       },
