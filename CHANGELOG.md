@@ -10,6 +10,9 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   eight workers across both vendors. Report order, per-profile diagnostics and cache fallback
   stay the same. Repeated paths and symlink aliases of one home are serialized to avoid racing
   Codex database migrations, and Claude Code's version is resolved once before workers start.
+- Ctrl+C cancels queued reads, shuts down active HTTP sockets and kills the report's own
+  app-server and Keychain helper processes. Interrupted reports exit 130 without waiting for
+  network timeouts or starting remaining profiles.
 
 ## [multi-profile-plugins 1.5.0] — 2026-10-09
 

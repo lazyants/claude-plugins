@@ -27,6 +27,8 @@ Independent profiles are read in parallel, with up to eight readers across both 
 report keeps its usual order regardless of which request finishes first. Repeated paths and
 symlinks to the same home are read one at a time so their Codex app-servers cannot race database
 migrations. Claude Code's version is read once before the parallel requests start.
+Ctrl+C cancels queued reads, shuts down active HTTP sockets, stops the report's own app-server
+and Keychain helper processes, and exits 130.
 
 It opens with the **reset vouchers** -- the one-shot rate-limit resets that Claude Code redeems
 with `/limit-reset` and the Codex TUI redeems with `/usage` -- because a voucher expires whether or
