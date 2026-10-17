@@ -84,6 +84,9 @@ jobs:
       - name: report_limits.test.py
         run: python3 plugins/multi-profile-plugins/tests/report_limits.test.py
 
+      - name: report_limits_parallel.test.py
+        run: python3 plugins/multi-profile-plugins/tests/report_limits_parallel.test.py
+
       # The `code-limit` install step's own suite. It installs the shim into fixture bin
       # directories, then runs the INSTALLED command from `/` -- so what it measures is a file on
       # PATH reaching the plugin's report, not a helper called in-process. Its spine is one

@@ -60,7 +60,7 @@ work, never the coverage: skipping a suite locally is right, skipping it remotel
 | `db-guardrails.yml` | Hook, credential assets, Symfony guard, SQL Server installer/integration and Rails task suites | bash, awk, python3, jq, php, ruby + rake, SQL Server service |
 | `enduser-handbook.yml` | `node --test tests/*.test.mjs`, then `tests/reference-assets.test.sh` | Node 22, ruby (preinstalled), esbuild (best-effort) |
 | `literary-translator.yml` | `python3 -m pytest -q`, run **from the plugin directory** | Python 3.14 + `requirements.txt`, Node 22 |
-| `multi-profile-plugins.yml` | `tests/inspect_codex_profiles.test.py`, `tests/report_limits.test.py` and `tests/install_code_limit.test.py`, then the report script and the Codex script, each against an empty `HOME` | Python 3.11 and 3.14 matrix (stdlib only) |
+| `multi-profile-plugins.yml` | `tests/inspect_codex_profiles.test.py`, `tests/report_limits.test.py`, `tests/report_limits_parallel.test.py` and `tests/install_code_limit.test.py`, then the report script and the Codex script, each against an empty `HOME` | Python 3.11 and 3.14 matrix (stdlib only) |
 | `software-localizer.yml` | `tests/run-all.sh` (pytest, collected count asserted first), run from the plugin directory | Python 3.11 and 3.14 matrix (stdlib only at runtime) |
 | `skill-frontmatter.yml` | `tests/skill-frontmatter-limits.test.rb` | ruby (preinstalled) |
 | `citation-audit.yml` | `tools/tests` (pytest), then `tools/citation_audit.py check` over the tree | Python 3.14 + `pytest` (the tool itself is stdlib-only) |

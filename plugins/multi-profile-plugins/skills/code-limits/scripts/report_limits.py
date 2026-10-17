@@ -43,13 +43,17 @@ import json
 import math
 import os
 import select
+import socket
 import stat
 import unicodedata
 import subprocess
 import sys
 import time
+from concurrent.futures import Future
 from pathlib import Path
-from typing import NamedTuple
+from queue import Empty, Queue
+from threading import Event, Lock, Thread, local
+from typing import Callable, NamedTuple
 
 # --- the complete diagnostic vocabulary -------------------------------------------------------
 # Closed on purpose, with `internal-error` as the total fallback: an unforeseen failure must never
@@ -160,6 +164,93 @@ class Malformed(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class _ReadCancelled(BaseException):
+    """Unwind a reader without turning an interrupt into a profile diagnostic."""
+
+
+class _ReadCancellation:
+    def __init__(self) -> None:
+        self.stopped = Event()
+        self.guard = Lock()
+        self.closers = {}
+
+    def check(self) -> None:
+        if self.stopped.is_set():
+            raise _ReadCancelled()
+
+    def register(self, resource, close) -> None:
+        with self.guard:
+            if not self.stopped.is_set():
+                self.closers[resource] = close
+                return
+        close()
+        raise _ReadCancelled()
+
+    def unregister(self, resource) -> None:
+        with self.guard:
+            self.closers.pop(resource, None)
+
+    def cancel(self) -> None:
+        with self.guard:
+            self.stopped.set()
+            closers = list(self.closers.values())
+        for close in closers:
+            try:
+                close()
+            except Exception:
+                pass
+
+
+_reader_context = local()
+
+
+def _start_process(*args, **kwargs):
+    cancellation = getattr(_reader_context, "cancellation", None)
+    if cancellation is None:
+        return subprocess.Popen(*args, **kwargs)
+    # Creation and registration are atomic with respect to cancellation. An interrupt must
+    # not miss a child that has started but whose Popen call has not returned to its reader.
+    with cancellation.guard:
+        cancellation.check()
+        child = subprocess.Popen(*args, **kwargs)
+        cancellation.closers[child] = child.kill
+        return child
+
+
+def _finish_process(child) -> None:
+    try:
+        try:
+            child.kill()
+        except OSError:
+            pass
+        try:
+            child.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            pass
+        for stream in (child.stdin, child.stdout, child.stderr):
+            try:
+                stream.close()
+            except Exception:
+                pass
+    finally:
+        cancellation = getattr(_reader_context, "cancellation", None)
+        if cancellation is not None:
+            cancellation.unregister(child)
+
+
+def _capture_process(args, *, timeout):
+    cancellation = getattr(_reader_context, "cancellation", None)
+    if cancellation is None:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    child = _start_process(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        stdout, stderr = child.communicate(timeout=timeout)
+        cancellation.check()
+        return subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
+    finally:
+        _finish_process(child)
 
 
 # --- scalar contracts -------------------------------------------------------------------------
@@ -821,9 +912,9 @@ def _keychain_blob(profile: Path) -> dict:
     Keychain-backed profile answered `http-error` because no such bearer exists.
     """
     try:
-        done = subprocess.run(
+        done = _capture_process(
             ["security", "find-generic-password", "-s", _keychain_service(profile), "-w"],
-            capture_output=True, text=True, timeout=30.0,
+            timeout=30.0,
         )
     except (OSError, subprocess.SubprocessError):
         raise Malformed("keychain-denied") from None
@@ -921,17 +1012,41 @@ def _claude_live(profile: Path) -> list[Record]:
     if agent:  # no agent means exactly the headers this module always sent
         headers["User-Agent"] = agent
     conn = HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT)
+    cancellation = getattr(_reader_context, "cancellation", None)
+    observed_socket = None
+
+    def abort():
+        # getresponse() may detach conn.sock for a Connection: close response while its body
+        # is still being read. Retain the socket from the request as well as the current one.
+        # shutdown wakes a blocked recv; close alone can leave HTTPResponse's file reference
+        # holding the socket open, and closing that buffered file from another thread can block.
+        for sock in (observed_socket, getattr(conn, "sock", None)):
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
     try:
+        if cancellation is not None:
+            cancellation.register(conn, abort)
         try:
             conn.request("GET", API_PATH, headers=headers)
+            observed_socket = getattr(conn, "sock", None)
+            if cancellation is not None:
+                cancellation.check()
             response = conn.getresponse()
             body = response.read()
+            if cancellation is not None:
+                cancellation.check()
             status = response.status
         except Exception:
             # Deliberately bare and deliberately silent: rendering any exception text here can
             # print the bearer, which http.client embeds in an invalid-header ValueError.
             raise Malformed("http-error") from None
     finally:
+        if cancellation is not None:
+            cancellation.unregister(conn)
         try:
             conn.close()
         except Exception:
@@ -1060,11 +1175,11 @@ def _appserver_result(home: Path) -> dict:
     ten seconds. That tail is disclosed rather than removed: making it part of one deadline needs
     extra machinery for a case never observed. The deadline is likewise not wrapped around the
     blocking spawn itself; the reachable failure is a child that starts and then stalls, holding
-    up every remaining candidate in the run.
+    up the report until its read deadline.
     """
     env = dict(os.environ, CODEX_HOME=str(home))
     try:
-        child = subprocess.Popen(
+        child = _start_process(
             ["codex", "app-server"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             env=env,
@@ -1073,13 +1188,10 @@ def _appserver_result(home: Path) -> dict:
         raise Malformed("appserver-failed") from None
 
     stdin, stdout = child.stdin, child.stdout
-    if stdin is None or stdout is None:  # unreachable with PIPE, but the type says otherwise
-        child.kill()
-        child.wait(timeout=10.0)
-        raise Malformed("appserver-failed")
-
     deadline = time.monotonic() + _appserver_timeout()
     try:
+        if stdin is None or stdout is None:  # unreachable with PIPE, but the type says otherwise
+            raise Malformed("appserver-failed")
         try:
             for frame in _FRAMES:
                 stdin.write(frame)
@@ -1120,16 +1232,7 @@ def _appserver_result(home: Path) -> dict:
                     raise Malformed("appserver-protocol-error")
                 return result
     finally:
-        for stream in (stdin, stdout):
-            try:
-                stream.close()
-            except Exception:
-                pass
-        child.kill()
-        try:
-            child.wait(timeout=10.0)
-        except subprocess.TimeoutExpired:
-            pass
+        _finish_process(child)
 
 
 def _label_duration(window) -> int | None:
@@ -1471,6 +1574,73 @@ def _examine(candidate: Candidate, producer) -> tuple[str, list[Record], str]:
     return NO_CURRENT, records, ""
 
 
+def _parallel_examine(
+    jobs: list[tuple[Candidate, Callable[[Path], list[Record]]]],
+) -> list[tuple[str, list[Record], str]]:
+    """Read independent profiles concurrently, returning outcomes in discovery order."""
+    # lru_cache protects its own state but permits simultaneous cache misses. Resolve the
+    # version once before workers start so they cannot each spawn `claude --version`.
+    if any(producer is _claude_live and not candidate.gap for candidate, producer in jobs):
+        _claude_user_agent()
+
+    locks = {}
+    queued = Queue()
+    pending = []
+    for candidate, producer in jobs:
+        # Explicit arguments and discovered symlinks can name the same home more than once.
+        # Serialize those reads: starting two app-servers against one database can race its
+        # migrations. Canonicalize ONLY the lock key; Claude's Keychain lookup needs the
+        # original spelling of the profile path.
+        key = os.path.realpath(candidate.path)
+        gate = locks.setdefault(key, Lock())
+        future = Future()
+        pending.append(future)
+        queued.put((candidate, producer, gate, future))
+
+    cancellation = _ReadCancellation()
+
+    def examine():
+        _reader_context.cancellation = cancellation
+        try:
+            while not cancellation.stopped.is_set():
+                try:
+                    candidate, producer, gate, future = queued.get_nowait()
+                except Empty:
+                    return
+                if not future.set_running_or_notify_cancel():
+                    continue
+                try:
+                    with gate:
+                        cancellation.check()
+                        outcome = _examine(candidate, producer)
+                except BaseException as exc:
+                    future.set_exception(exc)
+                else:
+                    future.set_result(outcome)
+        finally:
+            del _reader_context.cancellation
+
+    # Executor workers are joined at interpreter exit, even after shutdown(wait=False).
+    # Daemon readers let Ctrl+C exit promptly if DNS/connect has not exposed a socket yet.
+    # Published sockets and child processes are stopped explicitly before unwinding.
+    readers = [Thread(target=examine, daemon=True) for _ in range(min(8, len(jobs)))]
+    started = []
+    try:
+        for reader in readers:
+            reader.start()
+            started.append(reader)
+        return [future.result() for future in pending]
+    except BaseException:
+        cancellation.cancel()
+        for future in pending:
+            future.cancel()
+        raise
+    finally:
+        deadline = time.monotonic() + 0.5 if cancellation.stopped.is_set() else None
+        for reader in started:
+            reader.join(None if deadline is None else max(0.0, deadline - time.monotonic()))
+
+
 def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
                   paint: Paint) -> None:
     """The block above the table: a voucher count per home, then any credit balance.
@@ -1780,10 +1950,16 @@ def main(argv: list[str] | None = None) -> int:
     notes: list[str] = []
     groups: list[tuple[str, str, str, list[Record]]] = []
 
-    for group, candidates, producer, cache_fallback in (
+    batches = (
         (CLAUDE_GROUP, claude, _claude_live, not args.live),
         (CODEX_GROUP, codex, _codex_records, False),
-    ):
+    )
+    outcomes = iter(_parallel_examine([
+        (candidate, producer)
+        for _group, candidates, producer, _fallback in batches
+        for candidate in candidates
+    ]))
+    for group, candidates, producer, cache_fallback in batches:
         if not candidates:
             # The same sentence in both places on purpose: the report body says what was not
             # looked at, and the warning block is what sets the exit status on it.
@@ -1792,7 +1968,7 @@ def main(argv: list[str] | None = None) -> int:
             notes.append(missing)
             continue
         for candidate in candidates:
-            state, records, code = _examine(candidate, producer)
+            state, records, code = next(outcomes)
             where = _safe_name(candidate.path.name)
             if cache_fallback and not records and not candidate.gap:
                 # The live read is the DEFAULT read now, tried for every candidate before the
@@ -1865,4 +2041,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
