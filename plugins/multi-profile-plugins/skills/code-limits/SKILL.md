@@ -23,6 +23,11 @@ description: >-
 One report across every usage-limit pool this machine draws on: every discovered Claude Code
 profile under `~/.claude*` and every discovered Codex home under `~/.codex*`.
 
+Independent profiles are read in parallel, with up to eight readers across both vendors. The
+report keeps its usual order regardless of which request finishes first. Repeated paths and
+symlinks to the same home are read one at a time so their Codex app-servers cannot race database
+migrations. Claude Code's version is read once before the parallel requests start.
+
 It opens with the **reset vouchers** -- the one-shot rate-limit resets that Claude Code redeems
 with `/limit-reset` and the Codex TUI redeems with `/usage` -- because a voucher expires whether or
 not anyone looks, and the count alone never says when. Each Claude Code profile read live and each

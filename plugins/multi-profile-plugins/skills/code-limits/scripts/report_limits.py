@@ -48,8 +48,10 @@ import unicodedata
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import NamedTuple
+from threading import Lock
+from typing import Callable, NamedTuple
 
 # --- the complete diagnostic vocabulary -------------------------------------------------------
 # Closed on purpose, with `internal-error` as the total fallback: an unforeseen failure must never
@@ -1471,6 +1473,37 @@ def _examine(candidate: Candidate, producer) -> tuple[str, list[Record], str]:
     return NO_CURRENT, records, ""
 
 
+def _parallel_examine(
+    jobs: list[tuple[Candidate, Callable[[Path], list[Record]]]],
+) -> list[tuple[str, list[Record], str]]:
+    """Read independent profiles concurrently, returning outcomes in discovery order."""
+    # lru_cache protects its own state but permits simultaneous cache misses. Resolve the
+    # version once before workers start so they cannot each spawn `claude --version`.
+    if any(producer is _claude_live and not candidate.gap for candidate, producer in jobs):
+        _claude_user_agent()
+
+    locks = {}
+    queued = []
+    for candidate, producer in jobs:
+        # Explicit arguments and discovered symlinks can name the same home more than once.
+        # Serialize those reads: starting two app-servers against one database can race its
+        # migrations. Canonicalize ONLY the lock key; Claude's Keychain lookup needs the
+        # original spelling of the profile path.
+        key = os.path.realpath(candidate.path)
+        gate = locks.setdefault(key, Lock())
+        queued.append((candidate, producer, gate))
+
+    def examine(candidate, producer, gate):
+        with gate:
+            return _examine(candidate, producer)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        pending = [executor.submit(examine, *job) for job in queued]
+        # Submit EVERY job before waiting, including both vendors. Workers return values;
+        # report assembly and printing remain on the calling thread in the original order.
+        return [future.result() for future in pending]
+
+
 def _voucher_band(vouchers: list[Row], infos: list[Row], now: datetime.datetime,
                   paint: Paint) -> None:
     """The block above the table: a voucher count per home, then any credit balance.
@@ -1780,10 +1813,16 @@ def main(argv: list[str] | None = None) -> int:
     notes: list[str] = []
     groups: list[tuple[str, str, str, list[Record]]] = []
 
-    for group, candidates, producer, cache_fallback in (
+    batches = (
         (CLAUDE_GROUP, claude, _claude_live, not args.live),
         (CODEX_GROUP, codex, _codex_records, False),
-    ):
+    )
+    outcomes = iter(_parallel_examine([
+        (candidate, producer)
+        for _group, candidates, producer, _fallback in batches
+        for candidate in candidates
+    ]))
+    for group, candidates, producer, cache_fallback in batches:
         if not candidates:
             # The same sentence in both places on purpose: the report body says what was not
             # looked at, and the warning block is what sets the exit status on it.
@@ -1792,7 +1831,7 @@ def main(argv: list[str] | None = None) -> int:
             notes.append(missing)
             continue
         for candidate in candidates:
-            state, records, code = _examine(candidate, producer)
+            state, records, code = next(outcomes)
             where = _safe_name(candidate.path.name)
             if cache_fallback and not records and not candidate.gap:
                 # The live read is the DEFAULT read now, tried for every candidate before the

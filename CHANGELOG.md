@@ -2,6 +2,15 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.5.1] — 2026-10-17
+
+### Changed
+
+- `code-limit` reads independent Claude Code profiles and Codex homes in parallel, with up to
+  eight workers across both vendors. Report order, per-profile diagnostics and cache fallback
+  stay the same. Repeated paths and symlink aliases of one home are serialized to avoid racing
+  Codex database migrations, and Claude Code's version is resolved once before workers start.
+
 ## [multi-profile-plugins 1.5.0] — 2026-10-09
 
 ### Added
