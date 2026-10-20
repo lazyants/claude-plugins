@@ -179,13 +179,16 @@ config directory uses a name suffixed with the first 8 hex of the SHA-256 of its
 A profile reached by a different spelling of the same directory, or through a separate
 secure-storage override, hashes to a name that simply is not there, so it gaps as `token-absent`
 rather than reading another account's item. A live call that fails is reported as a gap for that
-profile, with its diagnostic code. Under `--live` that gap is the whole answer: it never falls
+profile, with its diagnostic code. An HTTP 429 is the endpoint's own throttle: it allows only a few
+reads per login every few minutes, and Claude Code sessions on that login use the same allowance. It
+gets its own code, `rate-limited`, with a hint to try again in a few minutes; any other non-200 is
+`http-error`, and neither is retried. Under `--live` that gap is the whole answer: it never falls
 back to the cache, because a live run that quietly degraded would print exactly what a successful
 one prints, so a failed `--live` read renders a `NOT checked` warning and the run exits 1. In
-default mode the same failure instead sends that profile on to the cache read described above,
-with the failure's diagnostic code folded into the fallback note rather than into a warning --
-unless that cache read also has nothing, in which case default mode gaps the profile too, with
-the same `NOT checked` warning and exit 1 `--live` would have given it.
+default mode the same failure instead sends that profile on to the cache read described above, with
+the failure's diagnostic code folded into the fallback note rather than into a warning -- unless
+that cache read also has nothing, in which case default mode gaps the profile too, with the same
+`NOT checked` warning and exit 1 `--live` would have given it.
 
 **The query and the User-Agent.** The query string is the one Claude Code itself sends when it
 reads reset status. It is the same single request per profile, and the reply is the same usage

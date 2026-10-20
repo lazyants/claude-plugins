@@ -2,6 +2,16 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.5.2] — 2026-10-20
+
+### Fixed
+
+- `code-limit` names Anthropic's usage-endpoint throttle instead of reporting it as `http-error`
+  (#978). An HTTP 429 now reads `rate-limited -- try again in a few minutes`, with the reason: the
+  endpoint allows only a few reads per login, and Claude Code sessions on that login use the same
+  allowance. The generic code looked like a broken login or a dead network. Every other non-200
+  answer is still `http-error`, and a refused read is still not retried.
+
 ## [enduser-handbook 1.19.0] — 2026-10-17
 
 ### Added
