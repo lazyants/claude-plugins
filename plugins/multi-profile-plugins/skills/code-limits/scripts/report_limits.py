@@ -63,6 +63,7 @@ DIAGNOSTICS = (
     "token-expired",
     "keychain-denied",
     "http-error",
+    "rate-limited",
     "response-malformed",
     "appserver-failed",
     "appserver-protocol-error",
@@ -81,6 +82,8 @@ DIAGNOSTIC_SET = frozenset(DIAGNOSTICS)
 HINTS = {
     "token-expired": "open Claude Code in that profile once -- only a running session refreshes"
                       " its login",
+    "rate-limited": "try again in a few minutes -- the endpoint allows only a few reads per login,"
+                     " and Claude Code sessions on that login use the same allowance",
 }
 # A key outside the closed vocabulary would look wired up and never fire -- DIAGNOSTIC_SET is
 # the only thing `_with_hint` ever looks a code up against.
@@ -1053,6 +1056,11 @@ def _claude_live(profile: Path) -> list[Record]:
             pass
 
     now = datetime.datetime.now(datetime.timezone.utc)  # observation time, not run-start time
+    # A 429 is the endpoint's own throttle on this login, which Claude Code sessions draw on too.
+    # Measured: it refused every request shape alike and cleared within minutes, so it gets a
+    # token of its own -- under `http-error` it read like a broken login or a dead network.
+    if status == 429:
+        raise Malformed("rate-limited")
     if status != 200:  # a 3xx is a non-200 like any other; nothing follows it
         raise Malformed("http-error")
     try:

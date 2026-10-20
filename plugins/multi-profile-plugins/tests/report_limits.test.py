@@ -3518,6 +3518,49 @@ check("79 the module has one request call site, and it passes the literal GET",
       len(request_calls) == 1 and isinstance(request_calls[0].args[0], ast.Constant)
       and request_calls[0].args[0].value == "GET", str(len(request_calls)))
 
+# --- 80: #978, a 429 is the endpoint's throttle on the login, not an http-error ----------------
+
+RATE_LIMITED_BODY = json.dumps({"type": "error", "error": {
+    "type": "rate_limit_error", "message": "Rate limited. Please try again later."}})
+RATE_LIMITED_HINT = "rate-limited -- try again in a few minutes"
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    p80 = make_claude(root, ".claude80", cached(entries=[entry(kind="weekly_all", percent=17,
+                                                               resets=iso(48))]))
+    c80 = make_codex_home(root, ".codex80")
+    done80, _, _ = run(["--live", "--claude-profile", str(p80), "--codex-home", str(c80)],
+                       root=root, https_status=429, https_body=RATE_LIMITED_BODY)
+    check("80 --live: a 429 gaps under its own token, with the try-again hint",
+          f"NOT checked -- {RATE_LIMITED_HINT}" in done80.stdout.split("warnings")[-1],
+          done80.stdout)
+    check("80 --live: the profile's note carries the token",
+          ".claude80 [rate-limited]" in done80.stdout, done80.stdout)
+    check("80 --live: `http-error` is nowhere on the page", "http-error" not in done80.stdout,
+          done80.stdout)
+    check("80 --live: the run exits 1", done80.returncode == 1, f"rc={done80.returncode}")
+    check("80 --live: exactly one request -- a refusal is never retried",
+          len(done80.https_requests) == 1, str(done80.https_requests))
+    assert_no_secret("80 --live rate-limited", done80.stdout, done80.stderr)
+
+    done80b, _, _ = run(["--claude-profile", str(p80), "--codex-home", str(c80)], root=root,
+                        https_status=429, https_body=RATE_LIMITED_BODY)
+    check("80 default mode: the fallback note names the token and the hint",
+          f".claude80: the live read did not answer -- {RATE_LIMITED_HINT}" in done80b.stdout,
+          done80b.stdout)
+    check("80 default mode: the cached figure renders",
+          any(where == ".claude80" and "17%" in line
+              for where, _pool, line in pool_rows(done80b.stdout)), done80b.stdout)
+    check("80 default mode: the run stays clean", done80b.returncode == 0, done80b.stdout)
+
+    # Only 429 moved: every other non-200 is still the generic token.
+    done80c, _, _ = run(["--live", "--claude-profile", str(p80), "--codex-home", str(c80)],
+                        root=root, https_status=500, https_body="")
+    check("80 a 500 is still an http-error",
+          "NOT checked -- http-error" in done80c.stdout.split("warnings")[-1], done80c.stdout)
+    check("80 a 500 is never called rate-limited", "rate-limited" not in done80c.stdout,
+          done80c.stdout)
+
 # Moved to the end: a check over every token the suite RENDERED must run after the last case, or
 # the diagnostics a later case renders are never compared against the enum.
 check("24 every diagnostic this suite actually RENDERED is a member of the enum",
@@ -3535,7 +3578,7 @@ if failures:
 # The count this revision actually runs, not a floor left behind by an older one. A stale floor
 # lets every check a revision ADDED disappear while the suite still prints PASS -- 53 of them, at
 # the point this was noticed. Raise it with the suite.
-MIN_CHECKS = 726
+MIN_CHECKS = 744
 if checks < MIN_CHECKS:
     print(f"FAIL: only {checks} checks ran, expected at least {MIN_CHECKS}")
     sys.exit(1)

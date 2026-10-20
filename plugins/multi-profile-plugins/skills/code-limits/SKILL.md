@@ -179,7 +179,10 @@ config directory uses a name suffixed with the first 8 hex of the SHA-256 of its
 A profile reached by a different spelling of the same directory, or through a separate
 secure-storage override, hashes to a name that simply is not there, so it gaps as `token-absent`
 rather than reading another account's item. A live call that fails is reported as a gap for that
-profile, with its diagnostic code. Under `--live` that gap is the whole answer: it never falls
+profile, with its diagnostic code. An HTTP 429 is the endpoint's own throttle -- only a few reads
+per login every few minutes, an allowance Claude Code sessions on that login draw on too -- so it
+gets its own code, `rate-limited`, with a hint to try again in a few minutes; any other non-200 is
+`http-error`, and neither is retried. Under `--live` that gap is the whole answer: it never falls
 back to the cache, because a live run that quietly degraded would print exactly what a successful
 one prints, so a failed `--live` read renders a `NOT checked` warning and the run exits 1. In
 default mode the same failure instead sends that profile on to the cache read described above,
