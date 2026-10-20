@@ -3522,7 +3522,7 @@ check("79 the module has one request call site, and it passes the literal GET",
 
 RATE_LIMITED_BODY = json.dumps({"type": "error", "error": {
     "type": "rate_limit_error", "message": "Rate limited. Please try again later."}})
-RATE_LIMITED_HINT = "rate-limited -- try again in a few minutes"
+RATE_LIMITED_DETAIL = "rate-limited -- try again in a few minutes"
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
@@ -3532,7 +3532,7 @@ with tempfile.TemporaryDirectory() as tmp:
     done80, _, _ = run(["--live", "--claude-profile", str(p80), "--codex-home", str(c80)],
                        root=root, https_status=429, https_body=RATE_LIMITED_BODY)
     check("80 --live: a 429 gaps under its own token, with the try-again hint",
-          f"NOT checked -- {RATE_LIMITED_HINT}" in done80.stdout.split("warnings")[-1],
+          f"NOT checked -- {RATE_LIMITED_DETAIL}" in done80.stdout.split("warnings")[-1],
           done80.stdout)
     check("80 --live: the profile's note carries the token",
           ".claude80 [rate-limited]" in done80.stdout, done80.stdout)
@@ -3546,7 +3546,7 @@ with tempfile.TemporaryDirectory() as tmp:
     done80b, _, _ = run(["--claude-profile", str(p80), "--codex-home", str(c80)], root=root,
                         https_status=429, https_body=RATE_LIMITED_BODY)
     check("80 default mode: the fallback note names the token and the hint",
-          f".claude80: the live read did not answer -- {RATE_LIMITED_HINT}" in done80b.stdout,
+          f".claude80: the live read did not answer -- {RATE_LIMITED_DETAIL}" in done80b.stdout,
           done80b.stdout)
     check("80 default mode: the cached figure renders",
           any(where == ".claude80" and "17%" in line
@@ -3556,9 +3556,9 @@ with tempfile.TemporaryDirectory() as tmp:
     # Only 429 moved: every other non-200 is still the generic token.
     done80c, _, _ = run(["--live", "--claude-profile", str(p80), "--codex-home", str(c80)],
                         root=root, https_status=500, https_body="")
-    check("80 a 500 is still an http-error",
+    check("80 --live: a 500 is still an http-error",
           "NOT checked -- http-error" in done80c.stdout.split("warnings")[-1], done80c.stdout)
-    check("80 a 500 is never called rate-limited", "rate-limited" not in done80c.stdout,
+    check("80 --live: a 500 is never called rate-limited", "rate-limited" not in done80c.stdout,
           done80c.stdout)
 
 # Moved to the end: a check over every token the suite RENDERED must run after the last case, or

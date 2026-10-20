@@ -1056,9 +1056,10 @@ def _claude_live(profile: Path) -> list[Record]:
             pass
 
     now = datetime.datetime.now(datetime.timezone.utc)  # observation time, not run-start time
-    # A 429 is the endpoint's own throttle on this login, which Claude Code sessions draw on too.
-    # Measured: it refused every request shape alike and cleared within minutes, so it gets a
-    # token of its own -- under `http-error` it read like a broken login or a dead network.
+    # A 429 is the endpoint's own throttle on this login, which Claude Code sessions use too
+    # (measured: it refused the voucher query and the plain path, with and without the User-Agent,
+    # and cleared within minutes). It gets a token of its own because under `http-error` it read
+    # like a broken login or a dead network.
     if status == 429:
         raise Malformed("rate-limited")
     if status != 200:  # a 3xx is a non-200 like any other; nothing follows it

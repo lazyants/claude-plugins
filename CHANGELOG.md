@@ -6,11 +6,11 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 
 ### Fixed
 
-- `code-limit` names Anthropic's usage-endpoint throttle instead of hiding it (#978). An HTTP 429
-  now reads `rate-limited -- try again in a few minutes`, with the reason: the endpoint allows only
-  a few reads per login, and Claude Code sessions on that login use the same allowance. It
-  used to read `http-error`, which looked like a broken login or a dead network. Every other
-  non-200 answer is still `http-error`, and a refused read is still not retried.
+- `code-limit` names Anthropic's usage-endpoint throttle instead of reporting it as `http-error`
+  (#978). An HTTP 429 now reads `rate-limited -- try again in a few minutes`, with the reason: the
+  endpoint allows only a few reads per login, and Claude Code sessions on that login use the same
+  allowance. The generic code looked like a broken login or a dead network. Every other non-200
+  answer is still `http-error`, and a refused read is still not retried.
 
 ## [enduser-handbook 1.19.0] — 2026-10-17
 
