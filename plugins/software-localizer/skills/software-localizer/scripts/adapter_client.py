@@ -215,7 +215,8 @@ def _require_valid_token(key: str, index: int, token) -> None:
 
 
 def parse(root: str, cfg: dict, project_dir: str, items: list[dict]) -> dict[str, dict]:
-    """Run `parse` over `items` (`[{"key", "text"}]`). Returns
+    """Run `parse` over `items` (`[{"key", "id", "text"}]`; `id` is the
+    message the text belongs to). Returns
     `{key: {"ok": True, "tokens": [...]} | {"ok": False, "error": "..."}}`,
     one entry per requested key."""
     with tempfile.TemporaryDirectory(dir=root) as tmp:

@@ -241,6 +241,34 @@ def test_run_accepts_a_relative_root_from_a_different_cwd(work_root):
 # --- run(): a lossy adapter must fail -----------------------------------------
 
 
+def test_parse_sanity_items_carry_the_id_of_their_own_message(monkeypatch):
+    """Every parse item names the message its text belongs to (#980), so a
+    multi-syntax adapter can route it. Texts are unique, so a missing,
+    constant or neighbouring id fails."""
+    recorded: list[dict] = []
+
+    def recording_parse(root, cfg, project_dir, items):
+        recorded.extend(items)
+        return {item["key"]: {"ok": True, "tokens": []} for item in items}
+
+    monkeypatch.setattr(adapter_check.adapter_client, "parse", recording_parse)
+    messages = {"messages": [
+        {"id": "cart.items", "source": {"forms": ["one cart item", "many cart items"]},
+         "targets": {"de": None}},
+        {"id": "home.title", "source": "home title text",
+         "targets": {"de": "Startseite Titel", "fr": None}},
+    ]}
+    adapter_check._check_parse_sanity("root", {}, Path("."), messages)
+
+    expected = {
+        "one cart item": "cart.items", "many cart items": "cart.items",
+        "home title text": "home.title", "Startseite Titel": "home.title",
+    }
+    assert len(recorded) == len(expected)
+    for item in recorded:
+        assert item["id"] == expected[item["text"]], item
+
+
 def test_run_fails_when_export_trims_values(work_root):
     """A lossy adapter that strips surrounding whitespace breaks the
     unchanged round trip on `notice.leadingSpace`, which has both."""

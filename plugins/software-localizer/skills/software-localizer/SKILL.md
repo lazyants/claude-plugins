@@ -72,7 +72,9 @@ Contract: `references/adapter-contract.md`. Three commands, each printing one JS
 `@intlify/message-compiler`, PHP for Laravel lang files, the project's ICU library. A
 re-implemented message syntax gets details wrong (significant spaces, escapes, reference syntax)
 that the project's compiler already gets right. Plural labels come from the project's own
-plural rules, never from a guess.
+plural rules, never from a guess. A project with several message formats (a vue-i18n frontend
+and a Laravel backend) stays one workspace with one canon: `parse` picks each text's syntax from
+the message `id` it is sent with.
 
 Once the adapter files exist, set `adapter.argv` in `R/localize.json` and validate the
 configuration. `config_validate.py` must exit 0 before running the adapter acceptance checks:

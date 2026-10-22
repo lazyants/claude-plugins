@@ -352,9 +352,9 @@ def _apply_context_rechecks(
         source_keys = [f"{locale}:{msg_id}:source:{i}" for i in range(len(source_forms))]
         value_keys = [f"{locale}:{msg_id}:value:{i}" for i in range(len(value_forms))]
         for key, form in zip(source_keys, source_forms):
-            parse_items.append({"key": key, "text": form})
+            parse_items.append({"key": key, "id": msg_id, "text": form})
         for key, form in zip(value_keys, value_forms):
-            parse_items.append({"key": key, "text": form})
+            parse_items.append({"key": key, "id": msg_id, "text": form})
 
         is_plural = message.get("plural") is not None
         plan.append((locale, msg_id, message, value, source_keys, value_keys, is_plural))
