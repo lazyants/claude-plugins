@@ -272,6 +272,36 @@ def test_run_fails_when_export_drops_a_key(work_root):
     assert reply["result"]["awkward_round_trip"]["ok"] is False
 
 
+@pytest.mark.parametrize("plural", [False, True], ids=["single", "plural"])
+def test_run_fails_when_export_omits_apostrophe_escaping(work_root, plural):
+    root, project_dir, cfg = _make_workspace(work_root)
+    before = {p: p.read_bytes() for p in project_dir.rglob("*") if p.is_file()}
+    adapter_path = root / "adapter" / "adapter.py"
+    source = adapter_path.read_text(encoding="utf-8")
+    source = source.replace("import argparse\n", "import argparse\nimport ast\n", 1)
+    # Model a catalog writer that escapes backslashes and control characters
+    # but forgets the apostrophe in a single-quoted literal. Parse its actual
+    # output so this exercises the missing escape, rather than dropping text.
+    writer = f'''        if isinstance(value, dict) is {plural!r}:
+            literal = "'" + text.encode("unicode_escape").decode("ascii") + "'"
+            try:
+                text = ast.literal_eval(literal)
+            except SyntaxError:
+                fail("single-quoted literal did not parse", EXIT_CANNOT)
+        obj[key] = text'''
+    assert source.count("        obj[key] = text") == 1
+    adapter_path.write_text(source.replace("        obj[key] = text", writer), encoding="utf-8")
+
+    code, reply = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+
+    assert code == 2, reply
+    assert reply["ok"] is False
+    assert "adapter 'export' exited 2" in reply["error"]
+    assert "single-quoted literal did not parse" in reply["error"]
+    assert {p: p.read_bytes() for p in project_dir.rglob("*") if p.is_file()} == before
+    assert not (root / "adapter.lock.json").exists()
+
+
 def test_run_fails_when_the_adapter_reads_an_unlisted_file(work_root):
     """`collect` against the live project can see a file the adapter never
     declares in `files`; staged with only the declared files, that file is

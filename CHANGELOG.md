@@ -2,6 +2,15 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.1.4] — 2026-10-22
+
+### Fixed
+
+- Adapter acceptance's awkward values include an apostrophe in ordinary text and next to a
+  backslash (#984), exposing writers that omit apostrophe escaping in single-quoted literals.
+  The probe covers non-plural values and every tested plural form; regression tests reproduce
+  the broken literal writer and verify that rejection leaves the live project unchanged.
+
 ## [software-localizer 0.1.3] — 2026-10-22
 
 ### Fixed

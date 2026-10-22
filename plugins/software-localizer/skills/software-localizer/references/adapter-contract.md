@@ -108,9 +108,9 @@ and for every candidate value before review.
 `adapter_check.py run` collects from the live project, stages only the listed files, and checks
 in that staged copy: collecting there gives the same messages as the live project (the adapter
 needs nothing it did not list); exporting the
-current values unchanged reproduces every file byte for byte; exporting awkward values (quotes,
-backslashes, newlines, tabs, surrounding spaces, non-Latin text) and collecting again returns
-them exactly, with everything else unchanged; every source parses. It also prepares the
+current values unchanged reproduces every file byte for byte; exporting awkward values (double
+quotes, apostrophes, backslashes, newlines, tabs, surrounding spaces, non-Latin text) and collecting
+again returns them exactly, with everything else unchanged; every source parses. It also prepares the
 **coverage turn**, where a model compares the collected ids with the raw files and with an
 independent inventory of the whole project, to catch a string or a whole catalog the adapter
 never collected; its answer must echo the `run_id` of the check run it answers.
