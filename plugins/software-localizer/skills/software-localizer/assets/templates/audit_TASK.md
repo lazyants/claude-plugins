@@ -27,6 +27,8 @@ Reply with ONE JSON object and nothing else:
   shape as the current value; keep every placeholder, reference, markup token and surrounding
   space exactly as in the source).
 - A person decides which proposals are applied; be concrete about why.
+- `new_canon_candidates`: product terms or UI labels you noticed that deserve one fixed
+  translation — `{"kind": "term|ui_label|dnt", "source": "…", "proposed": "…", "note": "…"}`.
 
 ## Packet
 

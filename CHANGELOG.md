@@ -2,6 +2,14 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.2.1] — 2026-10-22
+
+### Fixed
+
+- The audit prompt now specifies each `new_canon_candidates` entry's shape, using the same
+  instruction as the review prompt (#987). Audit models are shown the `kind`, `source`,
+  `proposed` and `note` fields expected by the existing validator.
+
 ## [software-localizer 0.2.0] — 2026-10-22
 
 ### Added
