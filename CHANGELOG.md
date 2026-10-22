@@ -2,6 +2,16 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.2.5] — 2026-10-22
+
+### Fixed
+
+- Coverage prompts reference the complete project inventory in `runs/_coverage/inventory.txt`
+  by path and line count instead of inlining every path (#982). The coverage subagent uses
+  file-read tools to examine the full inventory and project files; no extension or directory
+  filtering is added. A regression test checks that 30,000 paths remain available while the
+  prompt stays close to its empty-inventory size.
+
 ## [software-localizer 0.2.4] — 2026-10-22
 
 ### Fixed

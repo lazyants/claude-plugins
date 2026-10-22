@@ -8,6 +8,7 @@ turns a coverage turn's answer into `adapter.lock.json`.
 
 from __future__ import annotations
 
+import argparse
 import atexit
 import json
 import os
@@ -177,8 +178,11 @@ def test_run_passes_on_the_unmodified_fixture(work_root):
         "user.greeting", "notice.leadingSpace", "cart.itemCount", "mail.unreadCount",
         "footer.copyright", "error.notFound",
     }
-    assert "locales/en.json" in packet["inventory"]
-    assert "locales/de.json" in packet["inventory"]
+    inventory_path = root / "runs" / "_coverage" / "inventory.txt"
+    inventory = inventory_path.read_text(encoding="utf-8").splitlines()
+    assert packet["inventory"] == {"path": str(inventory_path), "line_count": len(inventory)}
+    assert "locales/en.json" in inventory
+    assert "locales/de.json" in inventory
 
     prompt = (root / "runs" / "_coverage" / "prompt.md").read_text(encoding="utf-8")
     assert "{{PACKET_JSON}}" not in prompt
@@ -542,6 +546,40 @@ def test_awkward_round_trip_catches_a_cross_locale_export(work_root, tmp_path):
 # --- run(): the independent project inventory ---------------------------------
 
 
+@pytest.mark.parametrize("path_count", [0, 30_000])
+def test_coverage_prompt_stays_small_and_preserves_the_complete_inventory(
+    work_root, monkeypatch, capsys, path_count
+):
+    root, project_dir, cfg = _make_workspace(work_root)
+    coverage_dir = root / "runs" / "_coverage"
+    monkeypatch.setattr(adapter_check, "_project_inventory", lambda project: [])
+    assert adapter_check.cmd_run(argparse.Namespace(root=str(root))) == 0
+    baseline_size = (coverage_dir / "prompt.md").stat().st_size
+
+    extensions = ["vue", "json", "md", "png", "woff", "sql"]
+    inventory = [
+        f"packages/feature_{i:05d}/UI assets/日本語_{i:05d}.{extensions[i % len(extensions)]}"
+        for i in range(path_count)
+    ]
+    monkeypatch.setattr(adapter_check, "_project_inventory", lambda project: inventory)
+    assert adapter_check.cmd_run(argparse.Namespace(root=str(root))) == 0
+    capsys.readouterr()
+
+    packet_path = coverage_dir / "packet.json"
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    inventory_path = Path(packet["inventory"]["path"])
+    assert inventory_path == coverage_dir / "inventory.txt"
+    assert packet["inventory"]["line_count"] == path_count
+    assert inventory_path.read_text(encoding="utf-8") == "".join(path + "\n" for path in inventory)
+    prompt = (coverage_dir / "prompt.md").read_text(encoding="utf-8")
+    assert str(inventory_path) in prompt
+    assert len(prompt.encode("utf-8")) < baseline_size + 100
+    assert packet_path.stat().st_size < 20_000
+    if inventory:
+        assert inventory[0] not in prompt
+        assert inventory[-1] not in prompt
+
+
 def test_inventory_includes_untracked_and_excludes_gitignored(work_root):
     root, project_dir, cfg = _make_workspace(work_root, project_git=True)
     (project_dir / ".gitignore").write_text("ignored_secret.txt\n", encoding="utf-8")
@@ -553,9 +591,10 @@ def test_inventory_includes_untracked_and_excludes_gitignored(work_root):
     assert code == 0
 
     packet = json.loads((root / "runs" / "_coverage" / "packet.json").read_text(encoding="utf-8"))
-    assert "extra_catalog.json" in packet["inventory"]
-    assert "ignored_secret.txt" not in packet["inventory"]
-    assert "locales/en.json" in packet["inventory"]
+    inventory = Path(packet["inventory"]["path"]).read_text(encoding="utf-8").splitlines()
+    assert "extra_catalog.json" in inventory
+    assert "ignored_secret.txt" not in inventory
+    assert "locales/en.json" in inventory
 
 
 def test_inventory_detects_an_enclosing_git_worktree_without_a_local_git(work_root, tmp_path):
@@ -586,9 +625,10 @@ def test_inventory_detects_an_enclosing_git_worktree_without_a_local_git(work_ro
     assert code == 0, reply
 
     packet = json.loads((root / "runs" / "_coverage" / "packet.json").read_text(encoding="utf-8"))
-    assert "extra_catalog.json" in packet["inventory"]
-    assert "ignored_secret.txt" not in packet["inventory"]
-    assert "locales/en.json" in packet["inventory"]
+    inventory = Path(packet["inventory"]["path"]).read_text(encoding="utf-8").splitlines()
+    assert "extra_catalog.json" in inventory
+    assert "ignored_secret.txt" not in inventory
+    assert "locales/en.json" in inventory
 
 
 # --- coverage prompt: no built-in fallback --------------------------------------

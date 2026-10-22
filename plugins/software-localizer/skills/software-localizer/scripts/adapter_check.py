@@ -280,18 +280,21 @@ def _project_inventory(project_dir: Path) -> list[str]:
     return sorted(paths)
 
 
-def _build_coverage_packet(project_dir: Path, messages: dict, run_id: str) -> dict:
+def _build_coverage_packet(project_dir: Path, messages: dict, run_id: str, coverage_dir: Path) -> dict:
     ids_by_file: dict[str, list[str]] = {}
     for message in messages["messages"]:
         f = message["context"]["file"]
         ids_by_file.setdefault(f, []).append(message["id"])
     files = [{"file": path, "ids": sorted(ids)} for path, ids in sorted(ids_by_file.items())]
+    inventory = _project_inventory(project_dir)
+    inventory_path = coverage_dir / "inventory.txt"
+    lz_common.atomic_write_text(inventory_path, "".join(path + "\n" for path in inventory))
     return {
         "schema": 1,
         "run_id": run_id,
         "project_root": str(project_dir),
         "files": files,
-        "inventory": _project_inventory(project_dir),
+        "inventory": {"path": str(inventory_path), "line_count": len(inventory)},
     }
 
 
@@ -358,7 +361,7 @@ def cmd_run(args) -> int:
         lz_common.atomic_write_json(root / lz_common.ADAPTER_CHECK_RESULT, check_result)
 
         coverage_dir = root / "runs" / COVERAGE_DIR_NAME
-        packet = _build_coverage_packet(project_dir, live_messages, run_id)
+        packet = _build_coverage_packet(project_dir, live_messages, run_id, coverage_dir)
         lz_common.atomic_write_json(coverage_dir / "packet.json", packet)
         plugin_root = Path(__file__).resolve().parent.parent
         _write_coverage_prompt(plugin_root, coverage_dir, packet)
