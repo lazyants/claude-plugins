@@ -2,6 +2,16 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.1.3] — 2026-10-22
+
+### Fixed
+
+- Export safety documentation now limits the comparison guarantee to the declared file list and
+  collected messages (#986). Formatting, comments, key order and changes to files declared only
+  as inputs require the team's review of the full project diff before committing or shipping.
+  Clarifies that `--dry-run` lists changed files and that the byte-exact unchanged round trip
+  checks adapter acceptance, not every export.
+
 ## [software-localizer 0.1.2] — 2026-10-22
 
 ### Fixed

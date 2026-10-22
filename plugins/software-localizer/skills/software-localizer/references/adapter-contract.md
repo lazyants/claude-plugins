@@ -75,9 +75,12 @@ refusal replies `{"ok": false, "error": "…"}` with exit code 1.
 
 `V` is `{"values": {id: "text" | {"forms": [...]}}}`. Change exactly those ids' values for
 locale `L` — insert a target the file does not have yet — and nothing else. The core always runs
-`export` inside a temporary copy, re-collects there, and refuses the result unless the only
-difference is exactly the values it asked for; only then does it replace the project's files.
-Preserve the file's formatting where the format allows it: the diff is what the team reviews.
+`export` inside a temporary copy, re-collects there, and refuses the result unless the declared
+file list and collected messages differ only in exactly the target values it asked for; only
+then does it replace the project's files. Bytes outside the collected representation are not
+verified by this comparison. Preserve the file's formatting where the format allows it, and
+have the team review the full project diff before committing or shipping (see
+[export safety](state.md#export-safety--export_valuespy)).
 
 ## `parse --options O --in F`
 
