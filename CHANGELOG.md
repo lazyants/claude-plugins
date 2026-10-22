@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.2.7] — 2026-10-22
+
+### Fixed
+
+- Run the project's own i18n checks on scratch copies before audit approval and again before
+  live export (#997), surfacing failures beside the affected ids and exact proposed values.
+  Documents an adapter overlay for unaccepted proposals, a normal export of final reviewed
+  candidates in a separate scratch workspace, unchanged-baseline checks, and rechecks after
+  counter-proposals. Scratch workspaces exclude old export journals with live absolute paths.
+  These are orchestrator instructions; the core exporter does not run project tests itself.
+
 ## [software-localizer 0.2.6] — 2026-10-22
 
 ### Fixed
