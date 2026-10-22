@@ -303,6 +303,58 @@ def test_make_batches_boundaries(ids, size, expected):
     assert packets.make_batches(ids, size) == expected
 
 
+@pytest.mark.parametrize("locale", ["de", "ru"])
+def test_build_keeps_each_kinds_evidence_and_legacy_runs(work_root, locale):
+    cfg = make_cfg(target_locales=("de", "ru"))
+    msgs = make_messages([make_message("app.a", "Hello", targets={locale: "Hallo"})])
+    setup_workspace(work_root, cfg, msgs, {
+        locale: {"app.a": make_entry("existing", candidate=make_candidate("Hallo"))},
+    })
+    legacy_dir = work_root / "runs" / locale / "app"
+    lz_common.atomic_write_json(legacy_dir / "packet.json", {"kind": "audit", "items": []})
+    lz_common.atomic_write_text(legacy_dir / "prompt.md", "Legacy audit evidence\n")
+    snapshots = {path: path.read_bytes() for path in legacy_dir.iterdir()}
+
+    for kind in ("audit", "review", "translate"):
+        if kind == "translate":
+            data = ledger_mod.load(work_root)
+            data["locales"][locale]["app.a"]["state"] = "pending"
+            ledger_mod.save(work_root, data)
+        result = packets.do_build(work_root, kind, locale, TEMPLATES_DIR)
+        batch = result["batches"][0]
+        batch_dir = Path(batch["dir"])
+        assert batch["batch"] == "app"
+        assert batch_dir == work_root / "runs" / locale / kind / "app"
+        assert not (batch_dir / "answer.json").exists()
+        packet = lz_common.read_json(batch_dir / "packet.json", "packet.json")
+        assert packet["kind"] == kind
+        assert packet["locale"] == locale
+        assert [item["id"] for item in packet["items"]] == ["app.a"]
+        lz_common.atomic_write_json(batch_dir / "answer.json", {"turn": kind})
+        lz_common.atomic_write_text(batch_dir / "model-transcript.txt", f"{kind} transcript\n")
+        lz_common.atomic_write_json(batch_dir / "new_canon_candidates.json", {"turn": kind})
+        snapshots.update({path: path.read_bytes() for path in batch_dir.iterdir()})
+        assert all(path.read_bytes() == content for path, content in snapshots.items())
+
+
+def test_build_translate_fix_round_reuses_its_directory(work_root):
+    cfg = make_cfg()
+    msgs = make_messages([make_message("app.a", "Hello")])
+    setup_workspace(work_root, cfg, msgs, {"de": {"app.a": make_entry("pending")}})
+    initial = packets.do_build(work_root, "translate", "de", TEMPLATES_DIR)["batches"][0]
+    data = ledger_mod.load(work_root)
+    problems = [{"check": "style", "detail": "too informal"}]
+    data["locales"]["de"]["app.a"]["candidate"] = make_candidate("Hi", checks="fail", problems=problems)
+    ledger_mod.save(work_root, data)
+
+    retry = packets.do_build(work_root, "translate", "de", TEMPLATES_DIR)["batches"][0]
+
+    assert retry["dir"] == initial["dir"]
+    item = _load_batch_items(retry)[0]
+    assert item["previous"] == "Hi"
+    assert item["problems"] == problems
+
+
 def test_build_batches_by_prefix_and_batch_size(work_root):
     cfg = make_cfg(batch_size=2)
     ids = ["app.a", "app.b", "app.c", "nav.a"]
@@ -433,6 +485,22 @@ def test_accept_translate_success_pass(work_root):
     assert entry["candidate"]["checks"] == "pass"
     assert entry["candidate"]["value"] == "Hallo"
     assert entry["rounds"] == 1
+
+
+def test_accept_translate_still_reads_legacy_run_directory(work_root):
+    cfg = make_cfg()
+    msgs = make_messages([make_message("app.a", "Hello")])
+    run_dir = build_one_batch(
+        work_root, cfg, msgs, {"de": {"app.a": make_entry("pending")}}, "translate", "de",
+    )
+    legacy_dir = work_root / "runs" / "de" / "app"
+    run_dir.rename(legacy_dir)
+    output_path = write_output(legacy_dir, {"translations": {"app.a": "Hallo"}})
+
+    result = packets.do_accept(work_root, legacy_dir, output_path)
+
+    assert result["accepted"] == ["app.a"]
+    assert ledger_mod.load(work_root)["locales"]["de"]["app.a"]["candidate"]["value"] == "Hallo"
 
 
 def test_accept_translate_missing_id_reported_failed(work_root):
@@ -1096,13 +1164,19 @@ def test_accept_review_escalates_and_keeps_proposal_uninstalled(work_root):
     assert e["review_proposal"]["value"] == "Hallo"
 
 
-def test_accept_review_new_canon_candidates_written_to_side_file(work_root):
+@pytest.mark.parametrize("kind", ["audit", "review"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_accept_new_canon_candidates_written_beside_packet(work_root, kind, legacy):
     cfg = make_cfg()
-    msgs = make_messages([make_message("a", "Hello")])
+    msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo"})])
     candidate = make_candidate("Hallo", checks="pass")
     run_dir = build_one_batch(
-        work_root, cfg, msgs, {"de": {"a": make_entry("pending", candidate=candidate)}}, "review", "de",
+        work_root, cfg, msgs, {"de": {"a": make_entry("existing", candidate=candidate)}}, kind, "de",
     )
+    if legacy:
+        legacy_dir = work_root / "runs" / "de" / "a"
+        run_dir.rename(legacy_dir)
+        run_dir = legacy_dir
     output_path = write_output(run_dir, {"verdicts": {"a": {
         "value_sha256": candidate["value_sha256"], "verdict": "pass", "issues": [], "proposed": None,
         "new_canon_candidates": [{"kind": "term", "source": "Cart", "proposed": "Warenkorb", "note": "seen twice"}],

@@ -150,8 +150,7 @@ def _collect_canon_candidates(root: Path, locale: str) -> list:
     candidates = []
     if not run_dir.is_dir():
         return candidates
-    for batch_dir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
-        f = batch_dir / "new_canon_candidates.json"
+    for f in sorted(run_dir.rglob("new_canon_candidates.json")):
         if f.is_file():
             data = lz_common.read_json(f, f"new canon candidates ({f})")
             candidates.extend(data.get("candidates", []))

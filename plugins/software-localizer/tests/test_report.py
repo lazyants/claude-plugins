@@ -255,11 +255,12 @@ def test_report_note_with_problems_rendered_one_per_line(work_root):
     assert "{'check'" not in existing_section
 
 
-def test_report_canon_candidates_from_review_side_files(work_root):
+@pytest.mark.parametrize("batch_path", ["batch1", "audit/batch1", "review/batch1"])
+def test_report_canon_candidates_from_review_side_files(work_root, batch_path):
     cfg = make_cfg()
     msgs = make_messages([make_message("a", "Hello")])
     setup_workspace(work_root, cfg, msgs, {"de": {"a": make_entry("existing")}})
-    side_file_dir = work_root / "runs" / "de" / "batch1"
+    side_file_dir = work_root / "runs" / "de" / batch_path
     lz_common.atomic_write_json(side_file_dir / "new_canon_candidates.json", {
         "candidates": [{"kind": "term", "source": "Cart", "note": "seen twice"}],
     })
