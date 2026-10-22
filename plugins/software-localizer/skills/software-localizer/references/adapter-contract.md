@@ -87,8 +87,8 @@ have the team review the full project diff before committing or shipping (see
 `F` is `{"items": [{"key": "k1", "id": "app:inbox.count", "text": "one form of a message"}]}`:
 
 - `key` — an opaque correlation key: reply under it, never interpret it.
-- `id` — the `id` of the message the text belongs to: one of its source forms, an existing
-  translation, or a candidate value. Several items can share one id. One workspace may hold
+- `id` — the `id` of the message the text belongs to; the text is one of its source forms, an
+  existing translation, or a candidate value. Several items can share one id. One workspace may hold
   catalogs in different message syntaxes — a vue-i18n frontend and a Laravel backend sharing one
   canon: give each catalog's ids a prefix in `collect` and choose the syntax by `id` in `parse`,
   never one parser for both syntaxes.

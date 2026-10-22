@@ -498,10 +498,7 @@ def test_accept_translate_parse_items_carry_the_id_of_their_own_message(work_roo
         "1 Artikel": "m.plural", "{count} Artikel": "m.plural", "{count} Dinge": "m.plural",
         "Hello plain": "m.plain", "Hallo schlicht": "m.plain",
     }
-    assert len(recorded) == len(expected)
-    assert {item["key"].split("::")[1] for item in recorded} == {"source", "value"}
-    for item in recorded:
-        assert item["id"] == expected[item["text"]], item
+    assert sorted((item["text"], item["id"]) for item in recorded) == sorted(expected.items())
 
 
 def test_accept_review_parse_items_carry_the_id_of_their_own_message(work_root, monkeypatch):
@@ -532,10 +529,7 @@ def test_accept_review_parse_items_carry_the_id_of_their_own_message(work_root, 
         "1 Artikel": "m.plural", "{count} Artikel": "m.plural", "{count} Sachen": "m.plural",
         "Hello plain": "m.plain", "Hallo freundlich": "m.plain",
     }
-    assert len(recorded) == len(expected)
-    assert {item["key"].split("::")[1] for item in recorded} == {"source", "proposed"}
-    for item in recorded:
-        assert item["id"] == expected[item["text"]], item
+    assert sorted((item["text"], item["id"]) for item in recorded) == sorted(expected.items())
 
 
 def test_accept_translate_malformed_value_becomes_shape_failure_never_reaches_adapter(work_root, monkeypatch):

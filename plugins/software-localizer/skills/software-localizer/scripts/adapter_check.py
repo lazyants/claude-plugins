@@ -200,8 +200,7 @@ def _parse_items_for_forms(
     letting one adapter reply silently overwrite the other's in the results
     dict). `key_meta` maps each new key back to `{"kind", "id", "locale"}`
     so results can be attributed without reconstructing a key. Each item also
-    carries `id`, the message it belongs to, so an adapter can route a text
-    to the right syntax."""
+    carries `id`, the message it belongs to."""
     forms = value["forms"] if isinstance(value, dict) else [value]
     for form in forms:
         key = str(next(counter))

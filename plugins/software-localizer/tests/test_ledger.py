@@ -661,9 +661,7 @@ def test_sync_context_recheck_parse_items_carry_the_id_of_their_own_message(work
         "1 apple": "m.plural", "{count} apples": "m.plural", "ein Apfel": "m.plural", "{count} Aepfel": "m.plural",
         "Hello plain": "m.plain", "Hallo schlicht": "m.plain",
     }
-    assert len(recorded) == len(expected)
-    for item in recorded:
-        assert item["id"] == expected[item["text"]], item
+    assert sorted((item["text"], item["id"]) for item in recorded) == sorted(expected.items())
 
 
 def test_sync_translated_general_index_change_recheck_fails(work_root):

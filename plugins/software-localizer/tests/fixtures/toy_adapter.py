@@ -17,7 +17,7 @@ project adapter is the project's own tooling, not part of the plugin core.
 Follows the same wire contract as every other adapter: one JSON line on
 stdout, exit 0 (ok), 1 (refused) or 2 (cannot run). A `parse` item is
 `{"key", "id", "text"}`; `id` is the message the text belongs to, and this
-adapter refuses an item without a string one.
+adapter exits 2 (cannot run) on an item without a string one.
 
 `--options` points at a JSON file with:
 
