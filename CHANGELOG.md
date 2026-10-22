@@ -2,6 +2,15 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.2.6] — 2026-10-22
+
+### Fixed
+
+- Exact plural target forms may omit an argument also omitted by the source form with the same
+  category label, so Laravel singulars without `:total` or `:shown` pass validation. Non-exact
+  forms still require the general source's arguments; unknown arguments and changed signatures
+  remain refused (#996).
+
 ## [software-localizer 0.2.5] — 2026-10-22
 
 ### Fixed
