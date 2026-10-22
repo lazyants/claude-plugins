@@ -1,9 +1,12 @@
 # Check that the adapter collects every user-visible string
 
 A per-project adapter collects the project's translatable strings. The packet lists the files
-the adapter reads with the ids it collected from each, and an independent inventory of every
-file in the project. Find user-visible, translatable text the adapter **missed**. You may read
-any file under the project root; you return data only: do not create, edit or delete any file.
+the adapter reads with the ids it collected from each. Its `inventory.path` points to an
+independent inventory of every file in the project: one project-relative path per line,
+`inventory.line_count` lines in total. Read that file with file-read tools; for a large inventory,
+read it in portions until you have examined the full list. Find user-visible, translatable text
+the adapter **missed**. You may read the inventory file and any file under `project_root`; you
+return data only: do not create, edit or delete any file.
 
 Check:
 

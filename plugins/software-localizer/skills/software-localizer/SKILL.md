@@ -86,9 +86,11 @@ python3 S/adapter_check.py run --root R
 #    R/runs/_coverage/prompt.md for the coverage turn
 ```
 
-Run the **coverage turn**: a Claude subagent given `R/runs/_coverage/prompt.md`, asked for the
-JSON only; save its answer as `R/runs/_coverage/output.json`. Every missing string it names must
-be collected (fix the adapter, rerun) or declared out of scope with the operator:
+Run the **coverage turn**: a Claude subagent with file-read tools, given
+`R/runs/_coverage/prompt.md`, asked for the JSON only. It reads the complete inventory from
+`R/runs/_coverage/inventory.txt` (the packet gives its path and line count) and may inspect any
+file under the project root. Save its answer as `R/runs/_coverage/output.json`. Every missing
+string it names must be collected (fix the adapter, rerun) or declared out of scope with the operator:
 
 ```bash
 python3 S/adapter_check.py accept --root R --coverage R/runs/_coverage/output.json \
