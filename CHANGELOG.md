@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.2.8] — 2026-10-22
+
+### Fixed
+
+- Audit, review and translate batches now use separate `runs/<locale>/_packets/<kind>/<batch>`
+  directories (#989). Building a review no longer overwrites the audit's packet and prompt or
+  leaves its answer beside a different turn's prompt. Canon candidates stay beside the packet
+  that produced them; reports read both the new layout and older run directories. Older runs
+  remain usable with `accept`, and translate fix rounds keep reusing their own directory.
+  The reserved `_packets` namespace also avoids colliding with legacy batches named after a kind.
+
 ## [software-localizer 0.2.7] — 2026-10-22
 
 ### Fixed

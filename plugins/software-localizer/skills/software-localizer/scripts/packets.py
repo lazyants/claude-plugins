@@ -489,7 +489,8 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
 
 
 def _write_batch(run_locale_dir: Path, name: str, kind: str, packet: dict, templates_dir: Path) -> dict:
-    batch_dir = run_locale_dir / name
+    # Legacy batch names strip leading underscores, so this namespace cannot be an old batch.
+    batch_dir = run_locale_dir / "_packets" / kind / name
     try:
         prompt = render_prompt(templates_dir, kind, packet)
     except LookupError as exc:
@@ -716,16 +717,18 @@ def _valid_verdict_shape(verdict: dict, is_plural: bool) -> bool:
     return _valid_proposed_shape(verdict.get("proposed"), is_plural)
 
 
-def accept_review(root: Path, cfg: dict, packet: dict, output: dict, ledger_data: dict, batch_name: str) -> dict:
-    return _accept_review_or_audit(root, cfg, packet, output, ledger_data, batch_name, kind="review")
+def accept_review(root: Path, cfg: dict, packet: dict, output: dict, ledger_data: dict,
+                  batch_name: str, run_dir: Path) -> dict:
+    return _accept_review_or_audit(root, cfg, packet, output, ledger_data, batch_name, run_dir, kind="review")
 
 
-def accept_audit(root: Path, cfg: dict, packet: dict, output: dict, ledger_data: dict, batch_name: str) -> dict:
-    return _accept_review_or_audit(root, cfg, packet, output, ledger_data, batch_name, kind="audit")
+def accept_audit(root: Path, cfg: dict, packet: dict, output: dict, ledger_data: dict,
+                 batch_name: str, run_dir: Path) -> dict:
+    return _accept_review_or_audit(root, cfg, packet, output, ledger_data, batch_name, run_dir, kind="audit")
 
 
 def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, ledger_data: dict,
-                             batch_name: str, kind: str) -> dict:
+                             batch_name: str, run_dir: Path, kind: str) -> dict:
     locale = packet["locale"]
     items = {it["id"]: it for it in packet["items"]}
     verdicts = output.get("verdicts")
@@ -904,7 +907,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
 
     if new_canon_candidates:
         lz_common.atomic_write_json(
-            Path(root) / "runs" / locale / batch_name / "new_canon_candidates.json",
+            run_dir / "new_canon_candidates.json",
             {"candidates": new_canon_candidates},
         )
 
@@ -934,9 +937,9 @@ def do_accept(root: Path, run_dir: Path, output_path: Path) -> dict:
     if kind == "translate":
         result = accept_translate(root, cfg, packet, output, ledger_data, batch_name)
     elif kind == "review":
-        result = accept_review(root, cfg, packet, output, ledger_data, batch_name)
+        result = accept_review(root, cfg, packet, output, ledger_data, batch_name, run_dir)
     else:
-        result = accept_audit(root, cfg, packet, output, ledger_data, batch_name)
+        result = accept_audit(root, cfg, packet, output, ledger_data, batch_name, run_dir)
     # Scoped to this packet's own locale: ledger.py stores one file per
     # locale precisely so a sibling locale's concurrently-running accept
     # never gets its in-memory copy clobbered by this save.
