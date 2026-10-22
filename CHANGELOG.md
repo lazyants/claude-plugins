@@ -2,6 +2,21 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.1.1] — 2026-10-22
+
+### Fixed
+
+- The canon proposals in audit mode now show every current rendering of a term, not only the
+  last canon batch's (#981). The canon turn runs in batches, so one product term arrives from
+  many of them; `canon.py import` replaced the locale's whole proposed translation on each merge
+  and dropped the renderings the earlier batches had found. It now keeps them all (first-seen
+  order, no duplicates) while the proposed value is still the latest batch's. A review turn's
+  candidate, which carries no renderings, no longer wipes them either. Replaying the 418 canon
+  batches of the first real audit through the old import hides 930 renderings; through the new
+  one, none.
+- A workspace imported with 0.1.0 keeps its incomplete lists: the import does not rewrite
+  entries it is not given. The full set is still in `runs/_canon/*/candidates.json`.
+
 ## [multi-profile-plugins 1.5.2] — 2026-10-20
 
 ### Fixed

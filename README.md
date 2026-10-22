@@ -13,7 +13,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code), maintained und
 | [`enduser-handbook`](#enduser-handbook--v1190) | 1.19.0 | Author, capture, and publish a Diátaxis-structured end-user handbook for any project — methodology shipped as a reusable skill, project-specific bindings supplied via `.claude/handbook/profile.yml`. |
 | [`literary-translator`](#literary-translator--v12221) | 1.222.1 | High-fidelity literary book translation over a Gutenberg-style EPUB source (expert-mode `custom` extractor also supported) — a codex-translate → deterministic false-green gate → codex-review → Claude-fix loop run to convergence, with a frozen name/realia canon, a configurable verse policy, and ledger-based resumability, plus optional book assembly into an Obsidian glossary-wiki behind a deterministic render/diff gate. |
 | [`multi-profile-plugins`](#multi-profile-plugins--v152) | 1.5.2 | Understand and diagnose config-profile isolation across multiple Claude Code `CLAUDE_CONFIG_DIR` profiles or Codex `CODEX_HOME` profiles — why profiles that share a plugins store hit recurring "corrupted installLocation" errors and cross-profile plugin deletion, and why a Codex profile seeded by copying `config.toml` keeps reading the home it came from. A read-only health-check script for each, plus a usage-limit report across every profile and home. |
-| [`software-localizer`](#software-localizer--v010) | 0.1.0 | Translate a software project into another language, or audit the translation it already has — a canon and glossary decided once, codex translation through script checks and a Claude review, a ledger that never overwrites a person's edit, and a per-project adapter accepted by round-trip and coverage checks. |
+| [`software-localizer`](#software-localizer--v011) | 0.1.1 | Translate a software project into another language, or audit the translation it already has — a canon and glossary decided once, codex translation through script checks and a Claude review, a ledger that never overwrites a person's edit, and a per-project adapter accepted by round-trip and coverage checks. |
 
 > **Changelogs.** Every plugin's release notes are in the root [`CHANGELOG.md`](CHANGELOG.md) — except `literary-translator`, which keeps its own at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md). The root file is frozen for that plugin at its `1.1.0` entry, so its later releases and its Known limitations are only in the per-plugin file. The per-plugin sections below describe what each plugin does and deliberately carry no per-release history — the changelog is the only place it lives.
 
@@ -213,7 +213,7 @@ Trigger phrases: "corrupted installLocation", "claude plugin across profiles", "
 
 Knowledge + read-only diagnostics, for both CLIs. Converting a shared store to independent per-profile stores touches live plugin data, and re-seeding a Codex home rewrites a config the desktop app also writes; both are intentionally left as deliberate, backed-up manual steps — not automated actions this plugin performs.
 
-## `software-localizer` — v0.1.0
+## `software-localizer` — v0.1.1
 
 Translate a software project's user-interface strings into another language, or **audit the translation it already has**, with the discipline of `literary-translator`: decide the vocabulary once, translate in small checked units, review every value, and hand a person a report instead of a file to read end to end.
 
