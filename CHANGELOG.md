@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.2.4] — 2026-10-22
+
+### Fixed
+
+- Candidate canon hashes sort relevant entries by id (#990). A batch's first-seen term order
+  no longer makes export refuse an unchanged canon or makes sync discard a reviewed candidate,
+  including one whose review failed. Actual changes to relevant entries still invalidate it.
+- Existing order-dependent hashes are not migrated, and already-cleared candidates are not
+  restored. Preserve the ledger and run outputs before syncing an old workspace; affected
+  candidates need to be accepted and reviewed again with the updated scripts.
+
 ## [software-localizer 0.2.3] — 2026-10-22
 
 ### Fixed

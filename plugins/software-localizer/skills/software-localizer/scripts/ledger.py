@@ -165,12 +165,14 @@ def relevant_canon(message: dict, canon_lock: dict) -> list:
 
 def canon_sha256(message: dict, canon_lock: dict) -> str:
     """A candidate's canon snapshot: the sha256 of exactly the canon lock
-    entries `relevant_canon` finds for this message. A candidate stores this
-    at accept time; `sync()` clears the candidate once it no longer matches
-    the canon lock's current relevant entries (a newly approved/changed
-    entry must force a fresh check, the same way a source/context/style
-    change does)."""
-    return lz_common.sha256_json(relevant_canon(message, canon_lock))
+    entries `relevant_canon` finds for this message, sorted by id so a
+    packet's first-seen batch order and the lock's order hash identically.
+    A candidate stores this at accept time; `sync()` clears it once it no
+    longer matches the canon lock's current relevant entries (a newly
+    approved/changed entry must force a fresh check, the same way a
+    source/context/style change does)."""
+    entries = sorted(relevant_canon(message, canon_lock), key=lambda entry: entry["id"])
+    return lz_common.sha256_json(entries)
 
 
 def _project_value_sha256(message: dict, locale: str) -> str | None:

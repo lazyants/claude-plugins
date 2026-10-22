@@ -22,6 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 TESTS_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = TESTS_DIR.parent / "skills" / "software-localizer" / "scripts"
 FIXTURES_DIR = TESTS_DIR / "fixtures"
@@ -254,6 +256,107 @@ def test_seam_happy_path(work_root):
     do_review(root)
     do_export(root, project_dir)
     do_audit_and_report(root)
+
+
+@pytest.mark.parametrize("kind", ["translate", "audit"])
+def test_seam_batch_canon_order_preserves_reviewed_candidates(work_root, kind):
+    """#990: a saved first-seen-order packet must agree with the lock."""
+    sources = {"hash.a": "Beta", "hash.b": "Alpha Beta", "hash.c": "Alpha Beta"}
+    values = {msg_id: source + " neu" for msg_id, source in sources.items()}
+
+    def add_messages(project_dir):
+        for locale in ("en", "de"):
+            path = project_dir / "locales" / f"{locale}.json"
+            data = read_json(path)
+            if locale == "en":
+                data.update(sources)
+            elif kind == "audit":
+                data.update({msg_id: source + " alt" for msg_id, source in sources.items()})
+            write_json(path, data)
+
+    root, project_dir = drive_to_ledger_sync(work_root, target_locales=("de",), after_copy=add_messages)
+    canon_path = root / "canon-input.json"
+    write_json(canon_path, {"candidates": [
+        {"kind": "term", "source": term, "translations": {"de": {"proposed": term}}}
+        for term in ("Alpha", "Beta")
+    ]})
+    imported = expect_ok("canon.py", ["import", "--root", str(root), "--file", str(canon_path)])
+    for entry_id in imported["added"]:
+        expect_ok("canon.py", ["approve", "--root", str(root), "--entry", entry_id,
+                                "--locale", "de", "--by", "tester"])
+    expect_ok("canon.py", ["freeze", "--root", str(root)])
+    lock_before = (root / "canon.lock.json").read_bytes()
+
+    build = expect_ok("packets.py", ["build", "--root", str(root), "--kind", kind, "--locale", "de"])
+    batch_dir = next(Path(batch["dir"]) for batch in build["batches"]
+                     if any(item["id"] == "hash.a"
+                            for item in read_json(Path(batch["dir"]) / "packet.json")["items"]))
+    packet = read_json(batch_dir / "packet.json")
+    assert [item["id"] for item in packet["items"] if item["id"] in sources] == list(sources)
+    # Since #983 new packets retain lock order. Reproduce a saved packet
+    # from the earlier builder: hash.a introduced Beta before hash.b added Alpha.
+    assert [entry["source"] for entry in packet["canon"]["entries"]] == ["Alpha", "Beta"]
+    packet["canon"]["entries"].reverse()
+    write_json(batch_dir / "packet.json", packet)
+    assert [entry["source"] for entry in packet["canon"]["entries"]] == ["Beta", "Alpha"]
+    assert [entry["source"] for entry in read_json(root / "canon.lock.json")["entries"]] == ["Alpha", "Beta"]
+    output_path = batch_dir / "output.json"
+    if kind == "translate":
+        output = {"translations": values}
+    else:
+        output = {"verdicts": {item["id"]: {
+            "value_sha256": item["value_sha256"], "verdict": "fail",
+            "issues": [{"kind": "style", "text": "use the new wording"}],
+            "proposed": values[item["id"]], "new_canon_candidates": [],
+        } for item in packet["items"] if item["id"] in sources}}
+    write_json(output_path, output)
+    accepted = expect_ok("packets.py", ["accept", "--root", str(root), "--run", str(batch_dir),
+                                        "--output", str(output_path)])
+    assert accepted["accepted" if kind == "translate" else "audit_proposals"] == list(sources)
+    if kind == "audit":
+        args = ["accept-audit", "--root", str(root), "--locale", "de", "--by", "tester"]
+        for msg_id in sources:
+            args.extend(["--id", msg_id])
+        assert expect_ok("packets.py", args)["accepted"] == list(sources)
+
+    review = expect_ok("packets.py", ["build", "--root", str(root), "--kind", "review", "--locale", "de"])
+    for batch in review["batches"]:
+        review_dir = Path(batch["dir"])
+        review_packet = read_json(review_dir / "packet.json")
+        write_json(review_dir / "output.json", {"verdicts": {item["id"]: {
+            "value_sha256": item["value_sha256"],
+            "verdict": "fail" if item["id"] == "hash.c" else "pass",
+            "issues": [], "proposed": None, "new_canon_candidates": [],
+        } for item in review_packet["items"]}})
+        expect_ok("packets.py", ["accept", "--root", str(root), "--run", str(review_dir),
+                                 "--output", str(review_dir / "output.json")])
+
+    reviewed = read_json(root / "ledger" / "de.json")["entries"]
+    assert reviewed["hash.b"]["candidate"]["verdict"]["verdict"] == "pass"
+    assert reviewed["hash.c"]["candidate"]["verdict"]["verdict"] == "fail"
+    # Export must accept the passing candidates before any sync can clear them.
+    dry = expect_ok("export_values.py", ["--root", str(root), "--locale", "de", "--dry-run"])
+    assert dry["exported"] == 2
+    synced = expect_ok("ledger.py", ["sync", "--root", str(root)])
+    assert synced["counts"]["de"]["candidates_cleared"] == 0
+    entries = read_json(root / "ledger" / "de.json")["entries"]
+    for msg_id in sources:
+        assert entries[msg_id]["candidate"] == reviewed[msg_id]["candidate"]
+    assert (root / "canon.lock.json").read_bytes() == lock_before
+
+    exported = expect_ok("export_values.py", ["--root", str(root), "--locale", "de"])
+    assert exported["exported"] == 2
+    targets = read_json(project_dir / "locales" / "de.json")
+    assert targets["hash.b"] == values["hash.b"]
+    assert targets.get("hash.c") == ("Alpha Beta alt" if kind == "audit" else None)
+
+    # A real relevant edit must still invalidate the rejected candidate.
+    expect_ok("canon.py", ["change", "--root", str(root), "--entry", imported["added"][0],
+                            "--locale", "de", "--expect", "Alpha", "--value", "Alpha korrigiert",
+                            "--reason", "correct the approved term", "--by", "tester"])
+    expect_ok("collect.py", ["--root", str(root)])
+    expect_ok("ledger.py", ["sync", "--root", str(root)])
+    assert read_json(root / "ledger" / "de.json")["entries"]["hash.c"]["candidate"] is None
 
 
 # --- plural end-to-end: bot review round 1, finding 1 -----------------------
