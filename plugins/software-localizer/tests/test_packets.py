@@ -687,6 +687,33 @@ def test_accept_translate_stores_canon_sha256_matching_ledger_relevant_canon(wor
     assert candidate["canon_sha256"] == ledger_mod.canon_sha256(msg, canon_lock)
 
 
+def test_packed_translate_preserves_canon_order_and_candidate_hashes(work_root):
+    msgs = [make_message("a.label", "Workspace"), make_message("b.label", "Cart Workspace")]
+    canon_lock = {"schema": 1, "entries": [
+        {"id": "d-cart", "kind": "dnt", "source": "Cart", "note": "", "occurrences": []},
+        {"id": "d-other", "kind": "dnt", "source": "Other", "note": "", "occurrences": []},
+        {"id": "d-workspace", "kind": "dnt", "source": "Workspace", "note": "", "occurrences": []},
+    ]}
+    run_dir = build_one_batch(
+        work_root, make_cfg(batch_size=2), make_messages(msgs),
+        {"de": {msg["id"]: make_entry("pending") for msg in msgs}}, "translate", "de",
+        canon_lock=canon_lock,
+    )
+    packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
+    assert [i["id"] for i in packet["items"]] == ["a.label", "b.label"]
+    assert [e["id"] for e in packet["canon"]["entries"]] == ["d-cart", "d-workspace"]
+    output_path = write_output(run_dir, {"translations": {
+        "a.label": "Mein Workspace", "b.label": "Mein Cart Workspace",
+    }})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+
+    assert result["accepted"] == ["a.label", "b.label"]
+    entries = ledger_mod.load(work_root)["locales"]["de"]
+    for msg in msgs:
+        assert entries[msg["id"]]["candidate"]["canon_sha256"] == ledger_mod.canon_sha256(msg, canon_lock)
+
+
 def test_accept_review_rebuilt_candidate_under_changed_canon_treated_as_missing(work_root):
     """Item 2 of the review fix: a review verdict must also bind to the
     canon snapshot the packet was built from, the same way it binds to

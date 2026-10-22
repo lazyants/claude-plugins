@@ -189,17 +189,13 @@ def filter_canon_lock(canon_lock: dict, messages: list) -> dict:
     """The canon snapshot a batch packet embeds: the union of
     `ledger.relevant_canon` for every message in the batch (a single
     relevance rule, owned by `ledger.py` so `ledger.canon_sha256` pins
-    exactly what a candidate saw against the same rule)."""
+    exactly what a candidate saw against the same rule). Preserve lock
+    order so each message's canon hash also matches sync and export."""
     seen_ids: set = set()
-    kept = []
     for message in messages:
         for entry in ledger_mod.relevant_canon(message, canon_lock):
-            entry_id = entry.get("id")
-            if entry_id in seen_ids:
-                continue
-            seen_ids.add(entry_id)
-            kept.append(entry)
-    return {"entries": kept}
+            seen_ids.add(entry.get("id"))
+    return {"entries": [entry for entry in canon_lock.get("entries", []) if entry.get("id") in seen_ids]}
 
 
 # ---------------------------------------------------------------------------
