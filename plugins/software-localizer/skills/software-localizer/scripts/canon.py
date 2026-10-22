@@ -149,8 +149,7 @@ def import_candidates(canon: dict, candidates: list) -> dict:
     `current` (a list of strings) is added to the `current` the replaced
     `proposed` translation already had, display-only (see the module
     docstring); a malformed one is silently dropped rather than refusing the
-    whole candidate. Returns
-    `{"added": [...ids...], "merged": [...ids...]}`.
+    whole candidate. Returns `{"added": [...ids...], "merged": [...ids...]}`.
 
     Raises `ValueError` for a candidate missing `kind`/`source` or naming an
     unknown `kind`; by the time a canon-turn or review-turn output reaches
