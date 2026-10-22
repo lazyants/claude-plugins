@@ -114,7 +114,7 @@ def check_candidate(
     problems.extend(_check_parse(value_forms, value_parses, is_plural, target_labels))
     problems.extend(_check_arguments(
         is_plural, value_forms, value_parses, source_parses, target_labels,
-        general_index, count_arguments,
+        general_index, count_arguments, plural_spec["source_labels"] if is_plural else [],
     ))
     problems.extend(_check_structure(
         is_plural, value_forms, value_parses, source_parses, target_labels, general_index,
@@ -175,7 +175,7 @@ def _count_group_signature_matches(
 
 def _check_arguments(
     is_plural, value_forms, value_parses, source_parses, target_labels,
-    general_index, count_arguments,
+    general_index, count_arguments, source_labels,
 ) -> list[dict]:
     problems = []
 
@@ -197,6 +197,11 @@ def _check_arguments(
     for sp in source_parses:
         for t in _tokens(sp, "argument"):
             source_arg_signatures.setdefault(t["name"], set()).add(t["signature"])
+
+    source_names_by_label = {
+        label["label"]: {t["name"] for t in _tokens(sp, "argument")}
+        for label, sp in zip(source_labels, source_parses) if sp.get("ok")
+    }
 
     general_tokens = _tokens(source_parses[general_index], "argument")
     required_names = set()
@@ -242,7 +247,13 @@ def _check_arguments(
             })
 
         v_names = {t["name"] for t in v_tokens}
-        missing_names = sorted(n for n in required_names if n not in v_names)
+        # Exact forms may mirror omissions in the same source category.
+        # Keep general-form requirements without a matching parsed source,
+        # and for non-exact categories (e.g. Russian "one" includes 21, 31).
+        form_required_names = required_names
+        if is_exact and label in source_names_by_label:
+            form_required_names = required_names & source_names_by_label[label]
+        missing_names = sorted(form_required_names - v_names)
         if missing_names:
             problems.append({
                 "check": "arguments",

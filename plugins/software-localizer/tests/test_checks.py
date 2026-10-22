@@ -6,6 +6,8 @@ fixtures directly instead of running a real adapter.
 
 from __future__ import annotations
 
+import pytest
+
 from checks import check_candidate, forms_of
 
 DEFAULT_CFG = {"allow_identical": []}
@@ -16,12 +18,14 @@ def make_message(msg_id, source, max_length=None):
     return {"id": msg_id, "source": source, "context": {"max_length": max_length}}
 
 
-def make_plural_message(msg_id, source_forms, target_labels, general_index, count_arguments=(), max_length=None, locale="xx"):
+def make_plural_message(msg_id, source_forms, target_labels, general_index, count_arguments=(), max_length=None, locale="xx", source_labels=None):
     return {
         "id": msg_id,
         "source": {"forms": list(source_forms)},
         "plural": {
-            "source_labels": [{"label": str(i), "exact": False} for i in range(len(source_forms))],
+            "source_labels": source_labels if source_labels is not None else [
+                {"label": str(i), "exact": False} for i in range(len(source_forms))
+            ],
             "target_labels": {locale: target_labels},
             "count_arguments": list(count_arguments),
             "general_index": general_index,
@@ -296,6 +300,88 @@ def test_arguments_plural_missing_named_argument_is_refused():
     problems = by_check(problems, "arguments")
     assert len(problems) == 1
     assert "other" in problems[0]["detail"] and "price" in problems[0]["detail"]
+
+
+@pytest.mark.parametrize("locale", ["de", "en"])
+@pytest.mark.parametrize("name", ["total", "shown"])
+def test_arguments_exact_form_may_mirror_source_category_omission(locale, name):
+    # Source order deliberately differs from target order: match categories,
+    # not positions. Laravel replacement names need not be count-group names.
+    message = make_plural_message(
+        "coverage", [f"Export all :{name} pairs", "Export the pair"],
+        [{"label": "one", "exact": True}, {"label": "other", "exact": False}],
+        general_index=0, count_arguments=["count"], locale=locale,
+        source_labels=[{"label": "other", "exact": False}, {"label": "one", "exact": True}],
+    )
+    value = {"forms": (
+        ["Das Paar exportieren", f"Alle :{name} Paare exportieren"] if locale == "de"
+        else ["Export this pair", f"Export every one of the :{name} pairs"]
+    )}
+    problems = check_candidate(
+        message, locale, value,
+        [ok([arg(name, f":{name}")]), ok()], [ok(), ok([arg(name, f":{name}")])],
+        EMPTY_CANON, DEFAULT_CFG,
+    )
+    assert problems == []
+
+
+def test_arguments_nonexact_one_still_requires_named_count():
+    message = make_plural_message(
+        "coverage", ["Export the pair", "Export all :total pairs"],
+        [{"label": "one", "exact": False}, {"label": "few", "exact": False}, {"label": "many", "exact": False}],
+        general_index=1, count_arguments=["count"], locale="ru",
+        source_labels=[{"label": "one", "exact": True}, {"label": "other", "exact": False}],
+    )
+    problems = check_candidate(
+        message, "ru", {"forms": ["Export pair", "Export :total pairs", "Export :total pairs"]},
+        [ok(), ok([arg("total", ":total")])],
+        [ok(), ok([arg("total", ":total")]), ok([arg("total", ":total")])],
+        EMPTY_CANON, DEFAULT_CFG,
+    )
+    assert by_check(problems, "arguments") == [
+        {"check": "arguments", "detail": "form 'one' is missing argument(s) ['total']"},
+    ]
+
+
+@pytest.mark.parametrize("source_label,source_tokens", [
+    ("one", [arg("total"), arg("price")]),
+    ("one", [arg("price")]),
+    ("zero", []),
+])
+def test_arguments_exact_form_keeps_source_requirements_or_general_fallback(source_label, source_tokens):
+    message = make_plural_message(
+        "coverage", ["Source special form", "Source general form"],
+        [{"label": "one", "exact": True}, {"label": "other", "exact": False}],
+        general_index=1, count_arguments=["count"],
+        source_labels=[{"label": source_label, "exact": True}, {"label": "other", "exact": False}],
+    )
+    problems = check_candidate(
+        message, "xx", {"forms": ["Target special form", "Target general form"]},
+        [ok(source_tokens), ok([arg("total"), arg("price")])],
+        [ok(), ok([arg("total"), arg("price")])], EMPTY_CANON, DEFAULT_CFG,
+    )
+    missing = ["price"] if source_label == "one" and len(source_tokens) == 1 else ["price", "total"]
+    assert by_check(problems, "arguments") == [
+        {"check": "arguments", "detail": f"form 'one' is missing argument(s) {missing}"},
+    ]
+
+
+@pytest.mark.parametrize("candidate_token", [arg("total", "{total, number}"), arg("unknown")])
+def test_arguments_exact_omission_does_not_license_unexpected_signatures(candidate_token):
+    message = make_plural_message(
+        "coverage", ["Export the pair", "Export {total} pairs"],
+        [{"label": "one", "exact": True}, {"label": "other", "exact": False}],
+        general_index=1, count_arguments=["count"],
+        source_labels=[{"label": "one", "exact": True}, {"label": "other", "exact": False}],
+    )
+    problems = check_candidate(
+        message, "xx", {"forms": ["Export pair", "Export pairs"]},
+        [ok(), ok([arg("total")])], [ok([candidate_token]), ok([arg("total")])],
+        EMPTY_CANON, DEFAULT_CFG,
+    )
+    assert by_check(problems, "arguments") == [
+        {"check": "arguments", "detail": f"form 'one' has unexpected argument(s) ['{candidate_token['signature']}']"},
+    ]
 
 
 # --- structure ---------------------------------------------------------------

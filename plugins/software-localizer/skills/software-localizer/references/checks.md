@@ -8,7 +8,7 @@ They work on the adapter's `parse` tokens, so they know nothing about any one me
 | --- | --- |
 | `parse` | any form does not parse in the project's syntax |
 | `forms` | a plural value has a different number of forms than the target locale's labels, or a non-plural value is not a string |
-| `arguments` | non-plural: the multiset of argument signatures differs from the source's. Plural: a form uses an argument the source never uses (or with a signature the source never uses), or lacks an argument of the source's general form — the count arguments count as one, and only a form whose label is `exact` may omit the count |
+| `arguments` | non-plural: the multiset of argument signatures differs from the source's. Plural: a form uses an argument the source never uses (or with a signature the source never uses), or lacks an argument of the source's general form — an `exact` target form may mirror omissions in the parsed source form with the same label; without a match, general-form requirements remain. The count arguments count as one, and only a form whose label is `exact` may omit the count |
 | `structure` | non-plural: the ordered structure tokens differ from the source's. Plural: a form's structure tokens differ from the source's general form |
 | `whitespace` | a form's leading or trailing whitespace differs from the source's (suffix-style messages depend on it) |
 | `empty` | a form is empty or only whitespace |
