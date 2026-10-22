@@ -30,8 +30,9 @@ any of them changes, sync clears the candidate.
 2. The live project is collected again. Export is refused when a target changed since the last
    sync, or when the source, context or style differs from what the candidate was reviewed
    against.
-3. The adapter writes into a temporary copy; the copy is collected again and must differ from
-   the live project in exactly the exported values — nothing else.
+3. The adapter writes into a temporary copy; the copy is collected again. The declared file list
+   and collected messages must match the live project except for exactly the exported target
+   values. This compares what `collect` represents, not every byte of the declared files.
 4. A journal and backups (the changed project files and that locale's ledger file) are written,
    recording for each file the bytes it had and the bytes the export will write. Each project
    file is re-read and must still have the bytes it had when it was staged — an edit made
@@ -44,4 +45,10 @@ any of them changes, sync clears the candidate.
 6. A candidate also records the canon entries relevant to its message; if an approved canon entry
    changes after review, the candidate is not exported until it is checked and reviewed again.
 
-`--dry-run` stops after step 3 and shows what would change.
+`--dry-run` stops after step 3 and lists the changed files; it does not show their diff.
+
+The byte-exact unchanged round trip at [adapter acceptance](adapter-contract.md#acceptance)
+checks that the adapter preserves files when no values change. It does not verify every later
+export. For each real export, have the team review the full project diff before committing or
+shipping: this is the guard for bytes outside the collected representation, such as formatting,
+comments, key order and changes to files declared only because the adapter reads them.
