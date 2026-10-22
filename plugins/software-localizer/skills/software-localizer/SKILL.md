@@ -27,6 +27,7 @@ Every script prints one JSON line and exits `0` (ok), `1` (refused — read the 
 what it names), or `2` (cannot run). The workspace `R` is a directory **outside** the project.
 References: `references/adapter-contract.md` (what an adapter must do),
 `references/checks.md` (what scripts check and what the review judges),
+`references/project-checks.md` (project tests before approval and export),
 `references/state.md` (ledger states, export safety, recovery).
 
 ## Hard rules
@@ -35,7 +36,7 @@ References: `references/adapter-contract.md` (what an adapter must do),
    must exit 0 first.
 2. **The model never writes a project file.** Codex runs read-only and returns JSON; a script
    checks it and the adapter writes it.
-3. **No value reaches the project without passing the script checks and a review verdict bound
+3. **No value reaches the live project without passing the script checks and a review verdict bound
    to that exact value.** A value changed after review is a new value.
 4. **A person's translation is never overwritten.** Existing translations start `existing`;
    an edit the plugin did not make turns a message `human_locked`. Only `ledger.py adopt` or an
@@ -44,6 +45,9 @@ References: `references/adapter-contract.md` (what an adapter must do),
    untranslated, listed in the report.
 6. **The canon is decided once.** Changing an approved entry is `canon.py change`, which
    records who and why and triggers an audit of that entry.
+7. **Project checks precede approval and export.** Test proposed values in a scratch project
+   before asking a person to accept audit fixes, and test the final reviewed values again before
+   live export. A model verdict or an export dry run does not run the project's tests.
 
 ## 1. Intake
 
@@ -55,6 +59,9 @@ python3 S/scaffold.py --root R
 ```
 
 Ask the operator which strings are in scope (UI only? emails? docs?) and where they live.
+Identify the project's own i18n checks and test commands from its instructions and CI; record
+their prerequisites and run an unchanged baseline in a scratch copy. Keep the commands and
+results in `R/project-checks/` ([procedure](references/project-checks.md)).
 
 ## 2. Build the adapter
 
@@ -158,7 +165,13 @@ python3 S/packets.py build --root R --kind audit --locale L
 
 For each batch run a Claude subagent on its `prompt.md` (JSON only), save the answer, and
 `packets.py accept --root R --run <batch dir> --output <answer.json>`. Findings with a proposed
-replacement are stored, not applied. Write the report and go through it with the operator:
+replacement are stored, not applied. **Before asking the operator to approve them**, overlay
+the current proposals in a scratch project and run its i18n checks
+([procedure](references/project-checks.md)). Attach failures to the ids they name, with the
+exact proposed values and test output, alongside the audit report; a rejected value is a
+problem to fix, not a proposal ready for acceptance. Unattributed failures block the checked
+set until resolved. Write the report, present it together with these results, then accept only
+the proposals that passed:
 
 ```bash
 python3 S/report.py --root R --locale L
@@ -166,6 +179,8 @@ python3 S/packets.py accept-audit --root R --locale L --id ID [--id ID …] --by
 ```
 
 An accepted proposal still gets its own review verdict (step 6's review loop) before export.
+Changed proposals, including review counter-proposals, need a fresh project check before any
+new operator acceptance; results for an earlier value do not cover its replacement.
 
 **Many target languages.** Every step from here on is per locale (`--locale L`), and locales
 never share state: the ledger, candidates, style, plural labels, canon translations, export and
@@ -203,6 +218,14 @@ the rest is `escalated`.
 
 ## 7. Export and report
 
+First make a fresh scratch project from the current project, and a separate scratch workspace
+holding the final candidates. Point only the scratch workspace at the scratch project, export
+there with `export_values.py` **without `--dry-run`**, and run the same project i18n checks.
+Follow [the scratch-workspace procedure](references/project-checks.md#before-live-export),
+including its journal and adapter-acceptance precautions. Stop on a new failure or a check that
+cannot run; fix and re-review affected values, then repeat. Only a passing check of this exact
+candidate set and project snapshot permits the live commands below:
+
 ```bash
 python3 S/export_values.py --root R --locale L --dry-run
 python3 S/export_values.py --root R --locale L
@@ -212,5 +235,6 @@ python3 S/status.py --root R
 
 Export re-collects the live project first and refuses when anything changed since the review;
 it writes through a journal with backups, so an interrupted export is rolled back on the next
-run (`references/state.md`). The project's own checks and tests run after export, in the
-project, as usual; commit there with the team's normal review.
+run (`references/state.md`). Run the project's normal checks after live export as well; review
+the full project diff and commit there with the team's normal review. Recheck in scratch if
+the project, candidates or test setup changed since the pre-export check.
