@@ -2,6 +2,16 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.2.2] — 2026-10-22
+
+### Fixed
+
+- The adapter contract gives framework-supported spellings of one argument a shared name and
+  signature (#988). Laravel's `:attribute`, `:Attribute` and `:ATTRIBUTE` may therefore switch
+  between source and translation, while unrelated case changes and incompatible formatters
+  remain distinct. This corrects adapter-writing guidance; existing adapters need to implement
+  the normalization and pass acceptance again.
+
 ## [software-localizer 0.2.1] — 2026-10-22
 
 ### Fixed
