@@ -2,6 +2,14 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.1.2] — 2026-10-22
+
+### Fixed
+
+- Validate `localize.json` in step 2 after the adapter files exist, before adapter acceptance
+  checks (#985). A missing relative adapter path now names the expected file and asks the
+  operator to write the adapter in step 2; validation still refuses the missing file.
+
 ## [software-localizer 0.1.1] — 2026-10-22
 
 ### Fixed

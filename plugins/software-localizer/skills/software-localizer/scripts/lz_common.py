@@ -422,8 +422,8 @@ def validate_config(cfg, root) -> list:
                                 problems.append({
                                     "field": f"adapter.argv[{i}]",
                                     "message": (
-                                        "relative adapter paths resolve against the workspace; "
-                                        "use an absolute path for a script elsewhere"
+                                        f"{resolved_item} does not exist yet "
+                                        "(write the adapter in step 2)"
                                     ),
                                 })
                             elif i == 0 and shutil.which(item) is None:
