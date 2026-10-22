@@ -161,6 +161,26 @@ def test_import_keeps_a_nonempty_current_list_for_display():
     assert canon_data["entries"][0]["translations"]["de"]["current"] == ["Im Warenkorb"]
 
 
+def test_import_keeps_earlier_current_when_a_later_proposal_carries_none():
+    """A review turn's `new_canon_candidates` reach `import` with
+    `"current": []`; replacing the still-proposed value must not wipe the
+    renderings an earlier canon batch found (#981). A rendering seen twice
+    is listed once."""
+    canon_data = {"schema": 1, "entries": []}
+    canon.import_candidates(canon_data, [
+        make_candidate_input(translations={"de": {"proposed": "Warenkorb", "current": ["Im Warenkorb", "Korb"]}}),
+    ])
+    canon.import_candidates(canon_data, [
+        make_candidate_input(translations={"de": {"proposed": "Einkaufswagen", "current": []}}),
+    ])
+    canon.import_candidates(canon_data, [
+        make_candidate_input(translations={"de": {"proposed": "Einkaufswagen", "current": ["Korb"]}}),
+    ])
+    translation = canon_data["entries"][0]["translations"]["de"]
+    assert translation["value"] == "Einkaufswagen"
+    assert translation["current"] == ["Im Warenkorb", "Korb"]
+
+
 def test_import_drops_a_malformed_current_rather_than_the_whole_candidate():
     canon_data = {"schema": 1, "entries": []}
     canon.import_candidates(canon_data, [
@@ -425,6 +445,33 @@ def test_change_updates_value_writes_audit_request_history_and_refreezes(work_ro
 
 
 # --- CLI (real subprocess) --------------------------------------------------
+
+
+def test_cli_import_unions_current_across_canon_batches(work_root):
+    """#981: the canon turn runs in batches and a product term arrives from
+    many of them. Every batch's current renderings must stay visible beside
+    the proposal; the proposal itself is the latest batch's."""
+    batches = {
+        "batch-001.json": ("web:a", "Treffer", ["Treffer"]),
+        "batch-007.json": ("web:b", "Übereinstimmung", ["Übereinstimmung", "Match"]),
+    }
+    results = []
+    for name, (occurrence, proposal, current) in batches.items():
+        path = work_root / name
+        path.write_text(json.dumps({"candidates": [{
+            "kind": "term", "source": "match", "note": "",
+            "occurrences": [occurrence],
+            "translations": {"de": {"proposed": proposal, "current": current}},
+        }]}), encoding="utf-8")
+        code, result = run_cli(["import", "--root", str(work_root), "--file", str(path)])
+        assert code == 0 and result["ok"] is True
+        results.append(result)
+    assert results[0]["added"] == ["t-match"] and results[1]["merged"] == ["t-match"]
+
+    entry = canon.load(work_root)["entries"][0]
+    assert entry["occurrences"] == ["web:a", "web:b"]
+    assert entry["translations"]["de"]["value"] == "Übereinstimmung"
+    assert entry["translations"]["de"]["current"] == ["Treffer", "Übereinstimmung", "Match"]
 
 
 def test_cli_import_approve_freeze_change_roundtrip(work_root):

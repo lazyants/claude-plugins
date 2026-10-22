@@ -9,9 +9,10 @@
                               "current": ["Im Warenkorb"]}}}
 
 `current` (only ever set by `import`, on a still-`proposed` translation) is
-the locale's live renderings the canon turn saw when it proposed `value` —
-kept for an operator to see side by side with the proposal; `freeze` never
-carries it into `canon.lock.json`.
+the locale's live renderings every canon turn that proposed this entry saw,
+unioned across batches — kept for an operator to see side by side with the
+proposal; `approve` drops it and `freeze` never carries it into
+`canon.lock.json`.
 
 `import` merges in candidates from a canon-turn's output:
 
@@ -145,9 +146,10 @@ def import_candidates(canon: dict, candidates: list) -> dict:
     incoming locale's `proposed` value either creates a fresh `proposed`
     translation or replaces an existing *proposed* one -- an already
     `approved` translation is never overwritten by an import. A well-shaped
-    `current` (a list of strings) rides along on that fresh `proposed`
-    translation, display-only (see the module docstring); a malformed one is
-    silently dropped rather than refusing the whole candidate. Returns
+    `current` (a list of strings) is added to the `current` the replaced
+    `proposed` translation already had, display-only (see the module
+    docstring); a malformed one is silently dropped rather than refusing the
+    whole candidate. Returns
     `{"added": [...ids...], "merged": [...ids...]}`.
 
     Raises `ValueError` for a candidate missing `kind`/`source` or naming an
@@ -208,18 +210,24 @@ def import_candidates(canon: dict, candidates: list) -> dict:
                 "value": proposed, "status": "proposed",
                 "approved_by": None, "approved_at": None,
             }
-            # `current` (the locale's renderings the turn saw at proposal
+            # `current` (the locale's renderings the turns saw at proposal
             # time) is display-only: kept on the entry so an operator can
             # see it beside the proposal, but never fed into `freeze` -- it
             # is not part of what a candidate or a review verdict is checked
-            # against. An empty list carries nothing to display, so it is
-            # treated the same as an absent `current` (this also matches a
-            # canon turn's own audit-mode framing: "current" is the
-            # *existing* renderings it found, and there is nothing to
-            # attach when it found none).
+            # against. A term occurs all over a product, so several canon
+            # batches propose it, each seeing only its own messages: the
+            # merge keeps every batch's renderings (first-seen order, no
+            # duplicates) while `value` is the latest proposal. Dropping the
+            # earlier ones would hide exactly the inconsistency audit mode
+            # exists to show. An empty list adds nothing, the same as an
+            # absent `current` (a canon turn's "current" is the *existing*
+            # renderings it found; a review turn's candidate carries none).
+            merged_current = list((existing_translation or {}).get("current") or [])
             incoming_current = t.get("current") if isinstance(t, dict) else None
-            if isinstance(incoming_current, list) and incoming_current and all(isinstance(c, str) for c in incoming_current):
-                new_translation["current"] = list(incoming_current)
+            if isinstance(incoming_current, list) and all(isinstance(c, str) for c in incoming_current):
+                merged_current += incoming_current
+            if merged_current:
+                new_translation["current"] = list(dict.fromkeys(merged_current))
             entry["translations"][locale] = new_translation
 
     return {"added": added, "merged": merged, "skipped": skipped}
