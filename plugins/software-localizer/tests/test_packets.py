@@ -324,7 +324,7 @@ def test_build_keeps_each_kinds_evidence_and_legacy_runs(work_root, locale):
         batch = result["batches"][0]
         batch_dir = Path(batch["dir"])
         assert batch["batch"] == "app"
-        assert batch_dir == work_root / "runs" / locale / kind / "app"
+        assert batch_dir == work_root / "runs" / locale / "_packets" / kind / "app"
         assert not (batch_dir / "answer.json").exists()
         packet = lz_common.read_json(batch_dir / "packet.json", "packet.json")
         assert packet["kind"] == kind
@@ -335,6 +335,29 @@ def test_build_keeps_each_kinds_evidence_and_legacy_runs(work_root, locale):
         lz_common.atomic_write_json(batch_dir / "new_canon_candidates.json", {"turn": kind})
         snapshots.update({path: path.read_bytes() for path in batch_dir.iterdir()})
         assert all(path.read_bytes() == content for path, content in snapshots.items())
+
+
+@pytest.mark.parametrize("kind", packets.KINDS)
+def test_build_avoids_files_in_legacy_kind_named_batches(work_root, kind):
+    cfg = make_cfg(batch_size=1)
+    ids = [f"{kind}.title", "packet.json.title"]
+    msgs = make_messages([make_message(i, "Hello", targets={"de": "Hallo"}) for i in ids])
+    entries = {
+        i: make_entry("existing" if kind == "audit" else "pending", candidate=make_candidate())
+        for i in ids
+    }
+    setup_workspace(work_root, cfg, msgs, {"de": entries})
+    locale_dir = "_canon" if kind == "canon" else "de"
+    legacy_dir = work_root / "runs" / locale_dir / kind
+    lz_common.atomic_write_json(legacy_dir / "packet.json", {"kind": kind, "items": []})
+    lz_common.atomic_write_text(legacy_dir / "prompt.md", "Legacy prompt\n")
+    snapshots = {path: path.read_bytes() for path in legacy_dir.iterdir()}
+
+    result = packets.do_build(work_root, kind, None if kind == "canon" else "de", TEMPLATES_DIR)
+
+    assert {b["batch"] for b in result["batches"]} == {kind, "packet.json"}
+    assert {i["id"] for b in result["batches"] for i in _load_batch_items(b)} == set(ids)
+    assert all(path.read_bytes() == content for path, content in snapshots.items())
 
 
 def test_build_translate_fix_round_reuses_its_directory(work_root):

@@ -489,7 +489,8 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
 
 
 def _write_batch(run_locale_dir: Path, name: str, kind: str, packet: dict, templates_dir: Path) -> dict:
-    batch_dir = run_locale_dir / kind / name
+    # Legacy batch names strip leading underscores, so this namespace cannot be an old batch.
+    batch_dir = run_locale_dir / "_packets" / kind / name
     try:
         prompt = render_prompt(templates_dir, kind, packet)
     except LookupError as exc:

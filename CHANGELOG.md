@@ -6,11 +6,12 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 
 ### Fixed
 
-- Audit, review and translate batches now use separate `runs/<locale>/<kind>/<batch>`
+- Audit, review and translate batches now use separate `runs/<locale>/_packets/<kind>/<batch>`
   directories (#989). Building a review no longer overwrites the audit's packet and prompt or
   leaves its answer beside a different turn's prompt. Canon candidates stay beside the packet
   that produced them; reports read both the new layout and older run directories. Older runs
   remain usable with `accept`, and translate fix rounds keep reusing their own directory.
+  The reserved `_packets` namespace also avoids colliding with legacy batches named after a kind.
 
 ## [software-localizer 0.2.7] — 2026-10-22
 

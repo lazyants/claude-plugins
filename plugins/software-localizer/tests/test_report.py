@@ -255,7 +255,10 @@ def test_report_note_with_problems_rendered_one_per_line(work_root):
     assert "{'check'" not in existing_section
 
 
-@pytest.mark.parametrize("batch_path", ["batch1", "audit/batch1", "review/batch1"])
+@pytest.mark.parametrize("batch_path", [
+    "batch1", "audit/batch1", "review/batch1",
+    "_packets/audit/batch1", "_packets/review/batch1",
+])
 def test_report_canon_candidates_from_review_side_files(work_root, batch_path):
     cfg = make_cfg()
     msgs = make_messages([make_message("a", "Hello")])

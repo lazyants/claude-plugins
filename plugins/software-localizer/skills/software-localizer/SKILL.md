@@ -31,10 +31,11 @@ References: `references/adapter-contract.md` (what an adapter must do),
 `references/state.md` (ledger states, export safety, recovery).
 
 `packets.py build` returns each batch's `dir`: use that path for the model turn, its answer and
-`packets.py accept --run`. Batches live in `R/runs/<locale>/<kind>/<batch>` (canon uses
+`packets.py accept --run`. Batches live in `R/runs/<locale>/_packets/<kind>/<batch>` (canon uses
 `_canon` as its locale), so building a review preserves the audit's packet, prompt and outputs.
 Repeated builds of the same kind may reuse their directory for fix rounds. Older run
 directories stay in place and can still be passed to `accept` with their own answers.
+The reserved `_packets` directory keeps new runs separate from legacy batch names.
 
 ## Hard rules
 
