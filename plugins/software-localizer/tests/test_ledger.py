@@ -625,6 +625,45 @@ def test_sync_translated_context_change_recheck_fail_becomes_stale(work_root):
     assert entry2["notes"][-1]["note"] == "context changed and the re-check failed"
 
 
+def test_sync_context_recheck_parse_items_carry_the_id_of_their_own_message(work_root):
+    """#980: every source and value item of a context re-check names the
+    message its text belongs to. Texts are unique, so a missing, constant
+    or neighbouring id fails."""
+    cfg = make_cfg()
+    plural = make_plural_message(
+        "m.plural", ["1 apple", "{count} apples"],
+        {"de": [{"label": "one", "exact": True}, {"label": "other", "exact": False}]},
+        general_index=1, targets={"de": {"forms": ["ein Apfel", "{count} Aepfel"]}},
+    )
+    plain = make_message("m.plain", "Hello plain", targets={"de": "Hallo schlicht"})
+    sync_once(work_root, cfg, make_messages([plural, plain]))
+
+    ledger_data = ledger.load(work_root)
+    for msg_id in ("m.plural", "m.plain"):
+        entry = ledger_data["locales"]["de"][msg_id]
+        entry["state"] = "translated"
+        entry["last_exported_sha256"] = entry["project_value_sha256"]
+    ledger.save(work_root, ledger_data)
+
+    plural["context"]["max_length"] = 100  # context change only
+    plain["context"]["max_length"] = 100
+    recorded: list = []
+    pass_parse = make_pass_parse_fn()
+
+    def recording_parse(items):
+        recorded.extend(items)
+        return pass_parse(items)
+
+    report = sync_once(work_root, cfg, make_messages([plural, plain]), parse_fn=recording_parse)
+
+    assert report["counts"]["de"]["context_rechecked"] == 2
+    expected = {
+        "1 apple": "m.plural", "{count} apples": "m.plural", "ein Apfel": "m.plural", "{count} Aepfel": "m.plural",
+        "Hello plain": "m.plain", "Hallo schlicht": "m.plain",
+    }
+    assert sorted((item["text"], item["id"]) for item in recorded) == sorted(expected.items())
+
+
 def test_sync_translated_general_index_change_recheck_fails(work_root):
     """`general_index` alone moving must be seen as a context change (item 1
     of the review fix): the source form the general_index now points at

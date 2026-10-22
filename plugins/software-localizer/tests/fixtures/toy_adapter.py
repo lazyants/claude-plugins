@@ -15,7 +15,9 @@ or normalizes.
 Self-contained: does not import the plugin's `lz_common`, since a real
 project adapter is the project's own tooling, not part of the plugin core.
 Follows the same wire contract as every other adapter: one JSON line on
-stdout, exit 0 (ok), 1 (refused) or 2 (cannot run).
+stdout, exit 0 (ok), 1 (refused) or 2 (cannot run). A `parse` item is
+`{"key", "id", "text"}`; `id` is the message the text belongs to, and this
+adapter exits 2 (cannot run) on an item without a string one.
 
 `--options` points at a JSON file with:
 
@@ -321,6 +323,8 @@ def cmd_parse(args) -> int:
         text = item.get("text")
         if not isinstance(key, str) or not isinstance(text, str):
             fail("a parse item is missing its 'key' or 'text'", EXIT_CANNOT)
+        if not isinstance(item.get("id"), str):
+            fail("a parse item is missing its 'id'", EXIT_CANNOT)
         tokens, error = parse_text(text)
         results[key] = {"ok": True, "tokens": tokens} if tokens is not None else {"ok": False, "error": error}
 

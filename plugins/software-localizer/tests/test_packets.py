@@ -44,6 +44,7 @@ EMPTY_CANON_LOCK = {"schema": 1, "entries": []}
 def fake_parse(root, cfg, project_dir, items):
     results = {}
     for item in items:
+        assert isinstance(item.get("id"), str), f"a parse item reached the adapter without its message id: {item!r}"
         tokens, error = toy_adapter.parse_text(item["text"])
         results[item["key"]] = {"ok": True, "tokens": tokens} if tokens is not None else {"ok": False, "error": error}
     return results
@@ -456,6 +457,79 @@ def test_accept_translate_batches_the_whole_batch_into_one_parse_call(work_root,
 
     assert result["accepted"] == ["m.a", "m.b", "m.c"]
     assert call_count == 1
+
+
+def _record_parse_items(monkeypatch):
+    """Wrap the autouse `fake_parse`, keeping every item that reaches the
+    adapter's parse."""
+    recorded: list = []
+
+    def recording_parse(root, cfg, project_dir, items):
+        recorded.extend(items)
+        return fake_parse(root, cfg, project_dir, items)
+
+    monkeypatch.setattr(adapter_client, "parse", recording_parse)
+    return recorded
+
+
+def _plural_and_plain_messages():
+    plural = make_plural_message(
+        "m.plural", ["1 Artikel", "{count} Artikel"], {"de": [{"label": "other", "exact": False}]}, general_index=1,
+    )
+    return plural, make_message("m.plain", "Hello plain")
+
+
+def test_accept_translate_parse_items_carry_the_id_of_their_own_message(work_root, monkeypatch):
+    """#980: every source and value item names the message its text belongs
+    to. Texts are unique, so a missing, constant or neighbouring id fails."""
+    recorded = _record_parse_items(monkeypatch)
+    cfg = make_cfg()
+    plural, plain = _plural_and_plain_messages()
+    run_dir = build_one_batch(
+        work_root, cfg, make_messages([plural, plain]),
+        {"de": {"m.plural": make_entry("pending"), "m.plain": make_entry("pending")}}, "translate", "de",
+    )
+    output_path = write_output(run_dir, {"translations": {"m.plural": {"forms": ["{count} Dinge"]}, "m.plain": "Hallo schlicht"}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+
+    assert sorted(result["accepted"]) == ["m.plain", "m.plural"]
+    expected = {
+        "1 Artikel": "m.plural", "{count} Artikel": "m.plural", "{count} Dinge": "m.plural",
+        "Hello plain": "m.plain", "Hallo schlicht": "m.plain",
+    }
+    assert sorted((item["text"], item["id"]) for item in recorded) == sorted(expected.items())
+
+
+def test_accept_review_parse_items_carry_the_id_of_their_own_message(work_root, monkeypatch):
+    """#980: a failing verdict's `proposed` items name their message too."""
+    recorded = _record_parse_items(monkeypatch)
+    cfg = make_cfg()
+    plural, plain = _plural_and_plain_messages()
+    cand_plural = make_candidate({"forms": ["{count} Dinge"]}, checks="pass")
+    cand_plain = make_candidate("Hallo schlicht", checks="pass")
+    run_dir = build_one_batch(
+        work_root, cfg, make_messages([plural, plain]),
+        {"de": {"m.plural": make_entry("pending", candidate=cand_plural),
+                "m.plain": make_entry("pending", candidate=cand_plain)}},
+        "review", "de",
+    )
+    issues = [{"kind": "style", "text": "too informal"}]
+    output_path = write_output(run_dir, {"verdicts": {
+        "m.plural": {"value_sha256": cand_plural["value_sha256"], "verdict": "fail", "issues": issues,
+                     "proposed": {"forms": ["{count} Sachen"]}, "new_canon_candidates": []},
+        "m.plain": {"value_sha256": cand_plain["value_sha256"], "verdict": "fail", "issues": issues,
+                    "proposed": "Hallo freundlich", "new_canon_candidates": []},
+    }})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+
+    assert result["missing"] == []
+    expected = {
+        "1 Artikel": "m.plural", "{count} Artikel": "m.plural", "{count} Sachen": "m.plural",
+        "Hello plain": "m.plain", "Hallo freundlich": "m.plain",
+    }
+    assert sorted((item["text"], item["id"]) for item in recorded) == sorted(expected.items())
 
 
 def test_accept_translate_malformed_value_becomes_shape_failure_never_reaches_adapter(work_root, monkeypatch):

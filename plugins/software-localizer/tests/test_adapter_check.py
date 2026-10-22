@@ -365,6 +365,32 @@ def test_run_reports_a_source_failure_a_colliding_key_used_to_hide(work_root):
     assert "cart.itemCount" not in result["source_failures"]
 
 
+def test_parse_sanity_items_carry_the_id_of_their_own_message(monkeypatch):
+    """Every parse item names the message its text belongs to (#980), so a
+    multi-syntax adapter can route it. Texts are unique, so a missing,
+    constant or neighbouring id fails."""
+    recorded: list[dict] = []
+
+    def recording_parse(root, cfg, project_dir, items):
+        recorded.extend(items)
+        return {item["key"]: {"ok": True, "tokens": []} for item in items}
+
+    monkeypatch.setattr(adapter_check.adapter_client, "parse", recording_parse)
+    messages = {"messages": [
+        {"id": "cart.items", "source": {"forms": ["one cart item", "many cart items"]},
+         "targets": {"de": None}},
+        {"id": "home.title", "source": "home title text",
+         "targets": {"de": "Startseite Titel", "fr": None}},
+    ]}
+    adapter_check._check_parse_sanity("root", {}, Path("."), messages)
+
+    expected = {
+        "one cart item": "cart.items", "many cart items": "cart.items",
+        "home title text": "home.title", "Startseite Titel": "home.title",
+    }
+    assert sorted((item["text"], item["id"]) for item in recorded) == sorted(expected.items())
+
+
 _MIRROR_ADAPTER_SRC = '''\
 """Test-only adapter, self-contained (no lz_common import, like the toy
 fixture): like a well-behaved adapter, but its export() has a deliberate

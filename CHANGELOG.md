@@ -2,6 +2,19 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.2.0] — 2026-10-22
+
+### Added
+
+- Every `parse` request item now carries the `id` of the message its text belongs to
+  (`{"key", "id", "text"}`), so one adapter can route each text to its message syntax (#980). A
+  product with a vue-i18n frontend and a Laravel backend no longer needs either two workspaces —
+  the canon decided twice — or one hand-written parser for both syntaxes, which can refuse a
+  correct Laravel value containing an e-mail address. The adapter contract shows how: prefix each
+  catalog's ids in `collect` and choose the syntax by id in `parse`. `key` stays opaque. An
+  adapter that ignores unknown item fields keeps working unchanged; one that refuses them must
+  accept `id`.
+
 ## [software-localizer 0.1.4] — 2026-10-22
 
 ### Fixed

@@ -199,11 +199,12 @@ def _parse_items_for_forms(
     first form of a plural id `"foo"` can build the same composite key,
     letting one adapter reply silently overwrite the other's in the results
     dict). `key_meta` maps each new key back to `{"kind", "id", "locale"}`
-    so results can be attributed without reconstructing a key."""
+    so results can be attributed without reconstructing a key. Each item also
+    carries `id`, the message it belongs to."""
     forms = value["forms"] if isinstance(value, dict) else [value]
     for form in forms:
         key = str(next(counter))
-        items.append({"key": key, "text": form})
+        items.append({"key": key, "id": msg_id, "text": form})
         key_meta[key] = {"kind": kind, "id": msg_id, "locale": locale}
 
 

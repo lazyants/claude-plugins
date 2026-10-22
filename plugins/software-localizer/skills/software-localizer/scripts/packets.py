@@ -499,16 +499,15 @@ def _write_batch(run_locale_dir: Path, name: str, kind: str, packet: dict, templ
 # ---------------------------------------------------------------------------
 
 
-def _parse_batch(root: Path, cfg: dict, items: list, extra_texts: dict) -> dict:
+def _parse_batch(root: Path, cfg: dict, items: list, extra_parse_items: list) -> dict:
     """One batched `adapter_client.parse` call: every source form of every
-    item, plus whatever extra (key -> text) forms the caller needs parsed
-    (a candidate value's forms, or a proposed replacement's forms)."""
+    item, plus whatever pre-built parse items (`{"key", "id", "text"}`) the
+    caller needs parsed (a candidate value's forms, or a proposed replacement's
+    forms)."""
     to_parse = []
     for item in items:
-        for idx, form in enumerate(checks_mod.forms_of(item["source"])):
-            to_parse.append({"key": f"{item['id']}::source::{idx}", "text": form})
-    for key, text in extra_texts.items():
-        to_parse.append({"key": key, "text": text})
+        to_parse.extend(_parse_items(item["id"], "source", checks_mod.forms_of(item["source"])))
+    to_parse.extend(extra_parse_items)
     if not to_parse:
         return {}
     project_dir = str(Path(cfg["project_root"]))
@@ -517,6 +516,11 @@ def _parse_batch(root: Path, cfg: dict, items: list, extra_texts: dict) -> dict:
 
 def _parse_list(results: dict, item_id: str, prefix: str, forms: list) -> list:
     return [results[f"{item_id}::{prefix}::{idx}"] for idx in range(len(forms))]
+
+
+def _parse_items(item_id: str, prefix: str, forms: list) -> list:
+    """The parse items for one message's forms, keyed the way `_parse_list` reads them back."""
+    return [{"key": f"{item_id}::{prefix}::{idx}", "id": item_id, "text": form} for idx, form in enumerate(forms)]
 
 
 def _single_or_list(parses: list, is_plural: bool):
@@ -603,11 +607,11 @@ def accept_translate(root: Path, cfg: dict, packet: dict, output: dict, ledger_d
     # A malformed value (not a string, not `{"forms": [...]}` of strings --
     # an int, None, a list, or a forms dict with non-string forms) must
     # never reach the adapter's parse: only a shape-valid value's forms go
-    # into `extra_texts` below (security-review observation). One batched
+    # into `extra_parse_items` below (security-review observation). One batched
     # `_parse_batch` call covers the whole batch's source forms plus every
     # shape-valid value's forms, matching `_accept_review_or_audit`.
     value_forms_by_id: dict = {}
-    extra_texts: dict = {}
+    extra_parse_items: list = []
     for msg_id, item in items.items():
         if msg_id not in translations:
             continue
@@ -615,9 +619,8 @@ def accept_translate(root: Path, cfg: dict, packet: dict, output: dict, ledger_d
         if isinstance(value, str) or lz_common.is_forms_value(value):
             value_forms = checks_mod.forms_of(value)
             value_forms_by_id[msg_id] = value_forms
-            for idx, form in enumerate(value_forms):
-                extra_texts[f"{msg_id}::value::{idx}"] = form
-    parse_results = _parse_batch(root, cfg, list(items.values()), extra_texts)
+            extra_parse_items.extend(_parse_items(msg_id, "value", value_forms))
+    parse_results = _parse_batch(root, cfg, list(items.values()), extra_parse_items)
 
     accepted, failed, escalated = [], [], []
     for msg_id, item in items.items():
@@ -752,13 +755,12 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             continue
         valid_verdicts[msg_id] = verdict
 
-    extra_texts = {}
+    extra_parse_items = []
     for msg_id, verdict in valid_verdicts.items():
         proposed = verdict.get("proposed")
         if verdict.get("verdict") == "fail" and proposed is not None:
-            for idx, form in enumerate(checks_mod.forms_of(proposed)):
-                extra_texts[f"{msg_id}::proposed::{idx}"] = form
-    parse_results = _parse_batch(root, cfg, list(items.values()), extra_texts)
+            extra_parse_items.extend(_parse_items(msg_id, "proposed", checks_mod.forms_of(proposed)))
+    parse_results = _parse_batch(root, cfg, list(items.values()), extra_parse_items)
 
     passed, failed_ids, escalated, proposals_stored = [], [], [], []
     new_canon_candidates = []
