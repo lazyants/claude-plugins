@@ -48,11 +48,11 @@ import lz_common  # noqa: E402
 COVERAGE_DIR_NAME = "_coverage"
 PLACEHOLDER = "{{PACKET_JSON}}"
 
-# Awkward text: quote, backslash, newline, tab, a leading and a trailing
-# space, and non-Latin script, with a tag so a swapped or duplicated form is
-# still detectable.
+# Awkward text: double quote, apostrophe, backslash, newline, tab, leading
+# and trailing spaces, and non-Latin script, with a tag so a swapped or
+# duplicated form is still detectable.
 def _awkward_value(tag: str) -> str:
-    return f" {tag} \"quoted\" \\backslash\nline\ttab \u00fc \u65e5\u672c "
+    return f" {tag} \"quoted\" it's \\'backslash\nline\ttab \u00fc \u65e5\u672c "
 
 
 def _first_of(messages: list[dict], plural: bool) -> dict | None:
