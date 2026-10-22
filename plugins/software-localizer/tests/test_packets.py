@@ -258,6 +258,51 @@ def test_build_canon_no_locale_scans_all_messages(work_root):
 # --- build: batching, locale/template validation -------------------------
 
 
+@pytest.mark.parametrize("kind", packets.KINDS)
+def test_build_packs_small_nested_groups(work_root, kind):
+    cfg = make_cfg(batch_size=40)
+    ids = [f"app.screen{n:03d}.{key}" for n in range(100) for key in ("label", "title")]
+    msgs = make_messages([make_message(i, "Hello", targets={"de": "Hallo"}) for i in reversed(ids)])
+    entries = {
+        i: make_entry(
+            "existing" if kind == "audit" else "pending",
+            candidate=make_candidate() if kind == "review" else None,
+        ) for i in reversed(ids)
+    }
+    setup_workspace(work_root, cfg, msgs, {"de": entries})
+
+    result = packets.do_build(work_root, kind, None if kind == "canon" else "de", TEMPLATES_DIR)
+
+    assert [b["items"] for b in result["batches"]] == [40] * 5
+    assert [b["batch"] for b in result["batches"]] == [f"app.screen{n:03d}" for n in range(0, 100, 20)]
+    packed_ids = [[i["id"] for i in _load_batch_items(b)] for b in result["batches"]]
+    assert packed_ids == [ids[start:start + 40] for start in range(0, len(ids), 40)]
+
+
+def test_make_batches_keeps_fitting_groups_whole():
+    groups = [[f"{prefix}.{n}" for n in range(size)] for prefix, size in (("a", 3), ("b", 3), ("c", 2))]
+    ids = [i for group in groups for i in group]
+    assert packets.make_batches(list(reversed(ids)), 5) == [groups[0], groups[1] + groups[2]]
+
+
+def test_make_batches_splits_oversized_group_on_its_own():
+    before = [f"a.{n:02d}" for n in range(3)]
+    large = [f"b.{n:02d}" for n in range(90)]
+    after = ["c.label", "c.title", "d.label", "d.title"]
+    batches = packets.make_batches(list(reversed(before + large + after)), 40)
+    assert batches == [before, large[:40], large[40:80], large[80:], after]
+    assert [len(b) for b in packets.make_batches(large, 40)] == [40, 40, 10]
+
+
+@pytest.mark.parametrize("ids, size, expected", [
+    ([], 40, []),
+    (["c", "a", "b"], 2, [["a", "b"], ["c"]]),
+    (["a.x", "a.y", "b.x"], 2, [["a.x", "a.y"], ["b.x"]]),
+])
+def test_make_batches_boundaries(ids, size, expected):
+    assert packets.make_batches(ids, size) == expected
+
+
 def test_build_batches_by_prefix_and_batch_size(work_root):
     cfg = make_cfg(batch_size=2)
     ids = ["app.a", "app.b", "app.c", "nav.a"]
@@ -267,7 +312,7 @@ def test_build_batches_by_prefix_and_batch_size(work_root):
 
     result = packets.do_build(work_root, "translate", "de", TEMPLATES_DIR)
     # "app" has 3 ids with batch_size=2 -> two same-prefix batches (2 + 1);
-    # "nav" has 1 id -> one batch. A batch never mixes the two prefixes.
+    # "nav" has 1 id -> one batch. The oversized "app" group splits on its own.
     sizes = sorted(b["items"] for b in result["batches"])
     assert sizes == [1, 1, 2]
     names = {b["batch"] for b in result["batches"]}
@@ -279,7 +324,7 @@ def test_build_batch_names_deduplicate_case_insensitively(work_root):
     "auth") must not produce the same batch name -- on a case-insensitive
     filesystem (macOS) that would make the second batch's directory silently
     overwrite the first's."""
-    cfg = make_cfg()
+    cfg = make_cfg(batch_size=1)
     ids = ["Auth.x", "auth.y"]
     msgs = make_messages([make_message(i, "x") for i in ids])
     ledger_locales = {"de": {i: make_entry("pending") for i in ids}}

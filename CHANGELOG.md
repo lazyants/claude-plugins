@@ -2,6 +2,16 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.2.3] — 2026-10-22
+
+### Fixed
+
+- Pack adjacent small key-prefix groups into batches up to `batch_size` (#983), so nested
+  catalogs no longer send each tiny group through a separate model turn. Groups that fit stay
+  whole; oversized groups still split on their own. Batch names use the first group's prefix
+  with the existing collision handling. Regression tests cover all four turn kinds: 100 groups
+  of two messages produce five batches at size 40, and a group of 90 splits into 40, 40 and 10.
+
 ## [software-localizer 0.2.2] — 2026-10-22
 
 ### Fixed

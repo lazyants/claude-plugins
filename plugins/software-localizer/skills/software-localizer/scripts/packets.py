@@ -115,19 +115,28 @@ def _sanitize_batch_name(text: str) -> str:
 
 
 def make_batches(ids: list, batch_size: int) -> list:
-    """Ids grouped by prefix, each group chunked to at most `batch_size` --
-    a batch never mixes two different id prefixes, so the model always sees
-    a set of genuinely related messages (the point of grouping by prefix in
-    the first place); a prefix with more ids than `batch_size` becomes
-    several same-prefix batches instead of spilling into its neighbor."""
+    """Pack consecutive prefix groups up to `batch_size`, keeping each
+    fitting group whole. Oversized groups split into same-prefix batches
+    on their own, without mixing their remainder with neighboring groups.
+    Sorted prefixes keep related messages adjacent even in nested catalogs."""
     groups: dict = {}
     for i in sorted(ids):
         groups.setdefault(batch_prefix(i), []).append(i)
     batches = []
+    pending = []
+    limit = max(1, batch_size)
     for prefix in sorted(groups):
         group_ids = groups[prefix]
-        for start in range(0, len(group_ids), max(1, batch_size)):
-            batches.append(group_ids[start:start + max(1, batch_size)])
+        if pending and len(pending) + len(group_ids) > limit:
+            batches.append(pending)
+            pending = []
+        if len(group_ids) > limit:
+            for start in range(0, len(group_ids), limit):
+                batches.append(group_ids[start:start + limit])
+        else:
+            pending.extend(group_ids)
+    if pending:
+        batches.append(pending)
     return batches
 
 
