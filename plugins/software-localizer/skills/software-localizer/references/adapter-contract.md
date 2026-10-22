@@ -102,9 +102,18 @@ Reply:
  "k2": {"ok": false, "error": "unexpected '@' at 7"}}}
 ```
 
-- `argument` — a value filled in at runtime. `signature` is the argument **exactly as written**,
-  formatter, modifiers and escaping included (`{price, number, currency}`, `{{- user}}`,
-  `:Attribute`): two uses that render differently must have different signatures.
+- `argument` — a value filled in at runtime. `signature` preserves the argument's name,
+  formatter, modifiers and escaping where the project requires them (`{price, number, currency}`,
+  `{{- user}}`). Uses that a translation must not interchange have different signatures: for
+  example, `{price, number, currency}` and `{price, number, percent}`.
+  Spellings the framework fills from the same argument and allows a translation to switch between
+  share one `name` and `signature`, even when they change the rendered value's case. In
+  [Laravel's replacements](https://github.com/laravel/framework/blob/12.x/src/Illuminate/Translation/Translator.php),
+  `:attribute`, `:Attribute` and `:ATTRIBUTE` all use `name: "attribute"` and
+  `signature: ":attribute"`, so a German value may start with `:Attribute`. Normalize only the
+  variants the framework generates from the actual replacement key: for `actionText`, those are
+  `:actionText`, `:ActionText` and `:ACTIONTEXT`, with signature `:actionText`. Do not lowercase
+  arbitrary tokens: `:actiontext` keeps its own name and signature and must not match `:actionText`.
 - `structure` — anything that must survive translation verbatim: a reference to another
   message, a markup tag, a format directive.
 - `ok: false` — the text would fail to compile or render in the project.
