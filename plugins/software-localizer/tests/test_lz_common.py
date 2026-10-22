@@ -333,6 +333,24 @@ def test_validate_config_accepts_adapter_argv_relative_to_root(work_root, tmp_pa
     assert not any(p["field"].startswith("adapter.argv") for p in problems)
 
 
+@pytest.mark.parametrize("interpreter", [False, True])
+def test_validate_config_requires_adapter_file_before_setup_can_finish(work_root, tmp_path, interpreter):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(work_root, project)
+    script = work_root / "adapter" / "adapter.py"
+    cfg["adapter"]["argv"] = ([sys.executable] if interpreter else []) + ["adapter/adapter.py"]
+
+    problems = lz_common.validate_config(cfg, work_root)
+    assert problems == [{
+        "field": f"adapter.argv[{int(interpreter)}]",
+        "message": f"{script} does not exist yet (write the adapter in step 2)",
+    }]
+
+    script.write_text("# adapter\n", encoding="utf-8")
+    assert lz_common.validate_config(cfg, work_root) == []
+
+
 def test_validate_config_refuses_a_missing_adapter_code_dir(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
@@ -447,7 +465,8 @@ def test_validate_config_refuses_a_project_relative_adapter_script(work_root, tm
     problems = lz_common.validate_config(cfg, work_root)
     matching = [p for p in problems if p["field"] == "adapter.argv[1]"]
     assert len(matching) == 1
-    assert "workspace" in matching[0]["message"]
+    assert str(work_root / "scripts" / "adapter.js") in matching[0]["message"]
+    assert "does not exist yet" in matching[0]["message"]
 
 
 @pytest.mark.parametrize("field", ["batch_size", "max_rounds", "adapter_timeout_s"])

@@ -52,7 +52,6 @@ python3 S/scaffold.py --root R
 # fill R/localize.json with the operator: project_root, source_locale, target_locales,
 # style per target locale (formality: "Sie" / "вы" / "vous"… and short notes),
 # adapter.argv (set in step 2), allow_identical (ids that may stay untranslated)
-python3 S/config_validate.py --root R
 ```
 
 Ask the operator which strings are in scope (UI only? emails? docs?) and where they live.
@@ -75,9 +74,11 @@ re-implemented message syntax gets details wrong (significant spaces, escapes, r
 that the project's compiler already gets right. Plural labels come from the project's own
 plural rules, never from a guess.
 
-Then accept it:
+Once the adapter files exist, set `adapter.argv` in `R/localize.json` and validate the
+configuration. `config_validate.py` must exit 0 before running the adapter acceptance checks:
 
 ```bash
+python3 S/config_validate.py --root R
 python3 S/adapter_check.py run --root R
 # -> unchanged and awkward-value round trips in a temp copy, parse sanity, and
 #    R/runs/_coverage/prompt.md for the coverage turn
