@@ -73,7 +73,7 @@ Builds tutorials, how-to guides, reference, and explanations from the running UI
 
 ## `literary-translator` — v1.222.1
 
-Ask: “Translate this EPUB from French to Russian.”
+Ask: “Translate this EPUB from French to German.”
 
 Translates and reviews books in segments, with consistent names, configurable verse handling, resumability, and optional Obsidian output. Supports Gutenberg-style EPUBs and an expert-mode custom extractor. Experimental: every new source requires a smoke test, source adapters still need end-to-end pilot validation, and plain-text input is not implemented.
 
@@ -89,7 +89,7 @@ Diagnoses shared plugin stores and configuration paths that cross profile bounda
 
 ## `software-localizer` — v0.2.8
 
-Ask: “Translate this app into German,” or “Audit our Russian translation.”
+Ask: “Translate this app into German,” or “Audit our German translation.”
 
 Translates new or changed UI strings, or proposes fixes to existing translations for approval. Uses a shared terminology canon, review, project checks, and export safeguards that preserve human edits. Requires Codex for translation and a project-specific adapter; no message-format adapter ships with the plugin.
 
