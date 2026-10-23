@@ -57,7 +57,7 @@ Authoring `vendors/vercel.json` from only the first page omitted the env var. An
 
 ### README sweep when adding or renaming a vendor
 
-A vendor change touches more surfaces than `vendors/<name>.json`. After editing the vendor JSON, sweep the top-level `README.md` and the open `plugin:ai-cli-optout` tracking issues for the following — each one bit us in v1.1.0 when adding Vercel CLI silently replaced the existing Vercel Claude Code plugin warning:
+A vendor change touches more surfaces than `vendors/<name>.json`. After editing the vendor JSON, sweep the [vendor coverage and warnings](../../docs/plugin-guide.md#ai-cli-optout), the top-level `README.md` summary, and the open `plugin:ai-cli-optout` tracking issues for the following — each one bit us in v1.1.0 when adding Vercel CLI silently replaced the existing Vercel Claude Code plugin warning. The vendor table and count now live in the guide; keep the main README concise.
 
 1. **Adjacent-name collisions.** If the vendor you are adding shares a brand with something already referenced in the warnings block or an open `plugin:ai-cli-optout` planned-coverage issue, treat them as distinct entries — do not merge. Real example: "Vercel CLI" (the `vercel` binary) and "Vercel Claude Code plugin" (auto-instruments bash, posts to `telemetry.vercel.com`) are two different products with the same brand. The 1.1.0 README refresh swapped the plugin warning for a CLI bullet, deleting the only public pointer to `VERCEL_PLUGIN_TELEMETRY=off` until it was caught later.
 2. **Vendor count in the prose blurb.** The "One skill, N vendors" sentence under the plugin heading must match the table row count.
