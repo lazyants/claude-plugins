@@ -2,6 +2,16 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [ai-cli-optout 1.2.1] — 2026-10-23
+
+### Changed
+
+- Shorten the marketplace README to a plugin catalog, installation commands, example
+  requests, and essential limitations. Move detailed coverage and workflows into
+  `docs/plugin-guide.md`, with links to existing plugin READMEs.
+- Point the vendor contribution checklist at the relocated coverage table and warnings.
+  This documentation release changes no opt-out settings or runtime behavior.
+
 ## [software-localizer 0.2.8] — 2026-10-22
 
 ### Fixed
