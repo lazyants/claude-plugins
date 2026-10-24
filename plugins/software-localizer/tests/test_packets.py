@@ -475,7 +475,7 @@ def test_build_restricted_canon_audit_from_entry(work_root):
     }
     lz_common.atomic_write_json(work_root / "runs" / "de" / "canon-audit-t-cart.json", request)
 
-    result = packets.do_build(work_root, "audit", "de", TEMPLATES_DIR, entry_id="t-cart")
+    result = packets.do_build(work_root, "audit", "de", TEMPLATES_DIR, entry_ids=["t-cart"])
     assert result["ok"] is True
     packet = lz_common.read_json(Path(result["batches"][0]["dir"]) / "packet.json", "packet.json")
     assert [i["id"] for i in packet["items"]] == ["a"]
@@ -1594,7 +1594,8 @@ def test_build_research_default_selection_batches_at_most_eight(work_root):
 
     assert result["selected"] == len(eligible) == 11
     sizes = [b["items"] for b in result["batches"]]
-    assert len(sizes) == 2 and max(sizes) <= packets.RESEARCH_BATCH_SIZE == 8
+    assert packets.RESEARCH_BATCH_SIZE == 8
+    assert len(sizes) == 2 and max(sizes) <= packets.RESEARCH_BATCH_SIZE
     ids = [i["id"] for b in result["batches"] for i in packet_of(b)["items"]]
     assert sorted(ids) == sorted(e["id"] for e in eligible)
 

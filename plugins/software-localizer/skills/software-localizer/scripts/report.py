@@ -260,7 +260,7 @@ def build_report(root: Path, locale: str) -> str:
     lines.append("")
 
     records = canon_mod.load_research(root, locale)["entries"]
-    canon_entries = {e["id"]: e for e in canon_mod.load(root)["entries"]}
+    canon_translations = {e["id"]: e.get("translations") or {} for e in canon_mod.load(root)["entries"]}
     verified = sum(1 for r in records.values() if r.get("verification"))
     flagged = [(eid, r) for eid, r in sorted(records.items()) if canon_mod.research_flags(r)]
     lines.append("## Canon usage research")
@@ -269,7 +269,7 @@ def build_report(root: Path, locale: str) -> str:
     lines.append("")
     if flagged:
         for eid, record in flagged:
-            translation = ((canon_entries.get(eid) or {}).get("translations") or {}).get(locale)
+            translation = canon_translations.get(eid, {}).get(locale)
             lines.extend(_row_research(eid, record, translation, locale))
     else:
         lines.append("_none_")

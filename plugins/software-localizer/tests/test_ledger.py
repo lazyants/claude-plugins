@@ -344,19 +344,13 @@ def test_canon_sha256_ignores_an_irrelevant_entry():
     assert with_irrelevant == ledger.canon_sha256(msg, EMPTY_CANON_LOCK)
 
 
-def test_research_block_in_the_config_changes_neither_style_nor_canon_hash():
+def test_research_block_in_the_config_does_not_change_the_style_hash():
     plain = make_cfg(target_locales=("de", "ru"))
     with_research = {**plain, "research": {
         "field": "genealogy web app", "sites": {"de": ["wiki.genealogy.net"]},
     }}
-    msg = make_message("m1", "Add to Cart")
-    canon_lock = {"schema": 1, "entries": [
-        {"id": "t-cart", "kind": "term", "source": "Cart", "occurrences": []},
-    ]}
     for locale in ("de", "ru"):
         assert ledger.style_sha256(with_research, locale) == ledger.style_sha256(plain, locale)
-    assert ledger.canon_sha256(msg, canon_lock) == ledger.canon_sha256(msg, canon_lock)
-    assert ledger.canon_sha256(msg, canon_lock) != ledger.canon_sha256(msg, EMPTY_CANON_LOCK)
 
 
 # --- sync: bootstrap -----------------------------------------------------

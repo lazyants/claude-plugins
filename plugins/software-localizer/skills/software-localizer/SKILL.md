@@ -167,7 +167,9 @@ is not evidence. The evidence is kept in `R/canon.research/<L>.json`, next to th
 ([state](references/state.md#canon-research-evidence)); accept a locale's batches one at a
 time. Expect gaps: some sites block automated fetches (their quotes cannot be confirmed), the
 web-search budget can run out mid-batch, and a concept that exists only in this product has no
-outside evidence — it gets low confidence and says so.
+outside evidence — it gets low confidence and says so. Both turns read untrusted web pages, so
+give their subagents web search and page fetch only, no file or shell tools; the session saves
+each answer itself.
 
 Show the operator the proposals — **a short core list**: product terms, UI labels that other
 messages refer to, do-not-translate names. In audit mode the proposals also show every current

@@ -366,9 +366,11 @@ def build_canon_item(message: dict, target_locales: list) -> dict:
     return item
 
 
-def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None, entry_ids=None) -> dict:
+def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None) -> dict:
     if kind not in KINDS + RESEARCH_KINDS:
         lz_common.fail(f"unknown packet kind: {kind}", lz_common.EXIT_CANNOT)
+    if kind == "audit" and entry_ids and len(entry_ids) > 1:
+        lz_common.fail("--kind audit takes exactly one --entry", lz_common.EXIT_CANNOT)
     cfg = lz_common.load_config(root)
     lz_common.require_accepted_adapter(root, cfg)
 
@@ -376,9 +378,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None, 
         lz_common.fail(f"kind {kind!r} requires --locale", lz_common.EXIT_CANNOT)
     if locale and locale not in cfg["target_locales"]:
         lz_common.fail(f"locale is not a configured target: {locale}", lz_common.EXIT_CANNOT, locale=locale)
-    if entry_id is not None and kind != "audit":
-        lz_common.fail("--entry is only valid with --kind audit", lz_common.EXIT_CANNOT)
-    if entry_ids and kind not in RESEARCH_KINDS:
+    if entry_ids and kind != "audit" and kind not in RESEARCH_KINDS:
         lz_common.fail("--entry is only valid with --kind audit, research or research_verify", lz_common.EXIT_CANNOT)
 
     if kind in RESEARCH_KINDS:
@@ -390,8 +390,8 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None, 
     canon_lock = canon_mod.load_lock(root)
     batch_size = cfg["batch_size"]
 
-    if entry_id is not None:
-        return _build_restricted_canon_audit(root, cfg, locale, entry_id, by_id, canon_lock, templates_dir)
+    if entry_ids:
+        return _build_restricted_canon_audit(root, cfg, locale, entry_ids[0], by_id, canon_lock, templates_dir)
 
     skipped = []
 
@@ -489,14 +489,13 @@ def _research_examples(entry: dict, by_id: dict, locale: str) -> list:
     return examples
 
 
-def _select_research(canon: dict, research: dict, locale: str, entry_ids) -> list:
+def _select_research(by_entry: dict, research: dict, locale: str, entry_ids) -> list:
     """Canon entry ids for a `research` build. Default: every `term` or
     `ui_label` whose translation for the locale is not yet approved and
     that has no research record -- the entries a person is about to decide
     on. Explicit `--entry` ids are taken as given (re-research of an
     approved or already-researched entry included), but each must be a
     researchable canon entry."""
-    by_entry = {e["id"]: e for e in canon["entries"]}
     if entry_ids:
         for entry_id in entry_ids:
             entry = by_entry.get(entry_id)
@@ -505,7 +504,7 @@ def _select_research(canon: dict, research: dict, locale: str, entry_ids) -> lis
                                 lz_common.EXIT_CANNOT, entry=entry_id)
         return list(dict.fromkeys(entry_ids))
     selected = []
-    for entry in canon["entries"]:
+    for entry in by_entry.values():
         if entry["kind"] not in RESEARCH_TERM_KINDS:
             continue
         translation = entry["translations"].get(locale)
@@ -527,54 +526,56 @@ def _select_research_verify(research: dict, entry_ids) -> list:
     return [i for i, record in records.items() if record.get("verification") is None]
 
 
+def build_research_item(entry: dict, locale: str, by_id: dict) -> dict:
+    translation = entry["translations"].get(locale) or {}
+    return {
+        "id": entry["id"], "kind": entry["kind"], "source": entry["source"],
+        "note": entry.get("note") or "",
+        "proposed": translation.get("value"), "status": translation.get("status"),
+        "current": list(translation.get("current") or []),
+        "examples": _research_examples(entry, by_id, locale),
+    }
+
+
+def build_research_verify_item(entry_id: str, record: dict, entry: dict, locale: str, by_id: dict) -> dict:
+    """A record whose canon entry has since gone (`entry` is `{}`) keeps its
+    own kind/source; it just has no note or examples left to show."""
+    return {
+        "id": entry_id, "kind": record["kind"], "source": record["source"],
+        "note": entry.get("note") or "",
+        "examples": _research_examples(entry, by_id, locale),
+        "research": record["research"], "research_sha256": record["research_sha256"],
+    }
+
+
 def _build_research(root: Path, cfg: dict, kind: str, locale: str, entry_ids, templates_dir: Path) -> dict:
     """`build --kind research|research_verify`: packets over canon entries,
     not messages -- see the module docstring. The ledger and the lock are
     never read."""
     messages = lz_common.load_messages(root / "messages.json")
     by_id = message_by_id(messages)
-    canon = canon_mod.load(root)
-    by_entry = {e["id"]: e for e in canon["entries"]}
+    by_entry = {e["id"]: e for e in canon_mod.load(root)["entries"]}
     research = canon_mod.load_research(root, locale)
     settings = cfg.get("research") or {}
     field = settings.get("field")
+    sites = list((settings.get("sites") or {}).get(locale) or [])
     style = cfg["style"][locale]
 
     if kind == "research":
-        selected_ids = _select_research(canon, research, locale, entry_ids)
+        selected_ids = _select_research(by_entry, research, locale, entry_ids)
     else:
         selected_ids = _select_research_verify(research, entry_ids)
 
     batches_out = []
     for name, ids in name_batches(make_batches(selected_ids, RESEARCH_BATCH_SIZE)):
-        items = []
-        for entry_id in ids:
-            if kind == "research":
-                entry = by_entry[entry_id]
-                translation = entry["translations"].get(locale) or {}
-                items.append({
-                    "id": entry_id, "kind": entry["kind"], "source": entry["source"],
-                    "note": entry.get("note") or "",
-                    "proposed": translation.get("value"), "status": translation.get("status"),
-                    "current": list(translation.get("current") or []),
-                    "examples": _research_examples(entry, by_id, locale),
-                })
-            else:
-                record = research["entries"][entry_id]
-                # A record whose canon entry has since gone keeps its own
-                # kind/source; it just has no note or examples left to show.
-                entry = by_entry.get(entry_id) or {}
-                items.append({
-                    "id": entry_id, "kind": record["kind"], "source": record["source"],
-                    "note": entry.get("note") or "",
-                    "examples": _research_examples(entry, by_id, locale),
-                    "research": record["research"], "research_sha256": record["research_sha256"],
-                })
-        packet = {"kind": kind, "locale": locale, "batch": name, "field": field}
         if kind == "research":
-            packet["sites"] = list((settings.get("sites") or {}).get(locale) or [])
-        packet["style"] = style
-        packet["items"] = items
+            items = [build_research_item(by_entry[i], locale, by_id) for i in ids]
+        else:
+            items = [build_research_verify_item(i, research["entries"][i], by_entry.get(i) or {}, locale, by_id)
+                     for i in ids]
+        packet = {"kind": kind, "locale": locale, "batch": name, "field": field, "style": style, "items": items}
+        if kind == "research":
+            packet["sites"] = sites
         batches_out.append(_write_batch(root / "runs" / locale, name, kind, packet, templates_dir))
 
     return {"ok": True, "kind": kind, "locale": locale, "selected": len(selected_ids),
@@ -1236,10 +1237,12 @@ def accept_research(root: Path, packet: dict, run_dir: Path, output: dict) -> di
         lz_common.fail("research output is missing a 'terms' object", lz_common.EXIT_FAIL)
 
     locale = packet["locale"]
+    items = packet.get("items", [])
+    extra = sorted(set(terms) - {item["id"] for item in items})
     data = canon_mod.load_research(root, locale)
     at = lz_common.now_iso()
     stored, invalid, missing = [], [], []
-    for item in packet.get("items", []):
+    for item in items:
         entry_id = item["id"]
         if entry_id not in terms:
             missing.append(entry_id)
@@ -1262,9 +1265,8 @@ def accept_research(root: Path, packet: dict, run_dir: Path, output: dict) -> di
         stored.append(entry_id)
     if stored:
         canon_mod.save_research(root, locale, data)
-    packet_ids = {item["id"] for item in packet.get("items", [])}
     return {"ok": True, "kind": "research", "locale": locale, "run": run_dir.name, "stored": stored,
-            "invalid": invalid, "missing": missing, "extra": sorted(set(terms) - packet_ids)}
+            "invalid": invalid, "missing": missing, "extra": extra}
 
 
 def _verdict_problem(verdict: dict, finding_count: int):
@@ -1307,10 +1309,12 @@ def accept_research_verify(root: Path, packet: dict, run_dir: Path, output: dict
         lz_common.fail("research_verify output is missing a 'verdicts' object", lz_common.EXIT_FAIL)
 
     locale = packet["locale"]
+    items = packet.get("items", [])
+    extra = sorted(set(verdicts) - {item["id"] for item in items})
     data = canon_mod.load_research(root, locale)
     at = lz_common.now_iso()
     verified, invalid, missing = [], [], []
-    for item in packet.get("items", []):
+    for item in items:
         entry_id = item["id"]
         verdict = verdicts.get(entry_id)
         if verdict is None:
@@ -1340,9 +1344,8 @@ def accept_research_verify(root: Path, packet: dict, run_dir: Path, output: dict
         verified.append(entry_id)
     if verified:
         canon_mod.save_research(root, locale, data)
-    packet_ids = {item["id"] for item in packet.get("items", [])}
     return {"ok": True, "kind": "research_verify", "locale": locale, "run": run_dir.name, "verified": verified,
-            "invalid": invalid, "missing": missing, "extra": sorted(set(verdicts) - packet_ids)}
+            "invalid": invalid, "missing": missing, "extra": extra}
 
 
 # ---------------------------------------------------------------------------
@@ -1433,15 +1436,7 @@ def main() -> int:
     if args.command == "build":
         root = lz_common.resolve_root(args.root)
         templates_dir = Path(args.templates_dir) if args.templates_dir else default_templates_dir()
-        entries = args.entry or []
-        if args.kind == "audit" and len(entries) > 1:
-            lz_common.fail("--kind audit takes exactly one --entry", lz_common.EXIT_CANNOT)
-        if args.kind in RESEARCH_KINDS:
-            result = do_build(root, args.kind, args.locale, templates_dir, entry_ids=entries or None)
-        else:
-            # Any other kind with --entry reaches do_build's own refusal.
-            result = do_build(root, args.kind, args.locale, templates_dir,
-                              entry_id=entries[0] if entries else None)
+        result = do_build(root, args.kind, args.locale, templates_dir, entry_ids=args.entry)
         lz_common.emit(result)
         return lz_common.EXIT_OK
 
