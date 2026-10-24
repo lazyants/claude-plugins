@@ -1,4 +1,5 @@
-"""Build and accept model-turn packets: translate, review, audit, canon.
+"""Build and accept model-turn packets: translate, review, audit, canon,
+research, research_verify.
 Every packet is a frozen snapshot of what the model saw — a turn is
 validated against that snapshot, never against a possibly-changed
 `messages.json` or `canon.json` read again later.
@@ -27,6 +28,20 @@ Design decisions worth calling out:
   state alone (`pending`/`stale`) does not change until export, so without
   this exclusion `build` would offer an already-approved candidate for
   retranslation forever).
+- The two usage-research kinds (`research`, `research_verify`) serve the
+  canon step, not the ledger: `build` reads `canon.json` and the locale's
+  `R/canon.research/<locale>.json` (never the ledger or the lock), and
+  `accept` writes only that locale's research file -- it never loads or
+  saves the ledger, so a research accept cannot touch a candidate, and
+  nothing here feeds any hash a candidate is checked against. Their batches
+  hold `RESEARCH_BATCH_SIZE` terms, not the config's `batch_size`: web
+  research per term is far heavier than translating a message. `--entry` is
+  repeatable for these kinds (re-run or narrow the scope); for `audit` it
+  still names exactly one entry.
+- A `research_verify` verdict binds to the `research_sha256` of the
+  research it was cast on. `accept` re-reads the locale's file and treats a
+  verdict whose research was replaced since the build as missing, so a
+  verdict never attaches to research it did not check.
 - An audit `fail` with a `proposed` value is stored on the ledger entry as
   `audit_proposal` (an extra field beyond `ledger.py`'s documented entry
   schema; JSON round-trips it fine) — there is no setter for it in
@@ -48,6 +63,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -58,6 +74,10 @@ import ledger as ledger_mod  # noqa: E402
 import lz_common  # noqa: E402
 
 KINDS = ("translate", "review", "audit", "canon")
+RESEARCH_KINDS = ("research", "research_verify")
+RESEARCH_BATCH_SIZE = 8
+RESEARCH_EXAMPLES = 5
+RESEARCH_TERM_KINDS = ("term", "ui_label")
 TRANSLATE_STATES = ("pending", "stale")
 AUDIT_STATES = ("existing", "translated", "human_locked")
 CANON_PSEUDO_LOCALE = "_canon"
@@ -346,8 +366,8 @@ def build_canon_item(message: dict, target_locales: list) -> dict:
     return item
 
 
-def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None) -> dict:
-    if kind not in KINDS:
+def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None, entry_ids=None) -> dict:
+    if kind not in KINDS + RESEARCH_KINDS:
         lz_common.fail(f"unknown packet kind: {kind}", lz_common.EXIT_CANNOT)
     cfg = lz_common.load_config(root)
     lz_common.require_accepted_adapter(root, cfg)
@@ -358,6 +378,11 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None) 
         lz_common.fail(f"locale is not a configured target: {locale}", lz_common.EXIT_CANNOT, locale=locale)
     if entry_id is not None and kind != "audit":
         lz_common.fail("--entry is only valid with --kind audit", lz_common.EXIT_CANNOT)
+    if entry_ids and kind not in RESEARCH_KINDS:
+        lz_common.fail("--entry is only valid with --kind audit, research or research_verify", lz_common.EXIT_CANNOT)
+
+    if kind in RESEARCH_KINDS:
+        return _build_research(root, cfg, kind, locale, entry_ids, templates_dir)
 
     messages = lz_common.load_messages(root / "messages.json")
     by_id = message_by_id(messages)
@@ -435,6 +460,125 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_id=None) 
 
     return {"ok": True, "kind": kind, "locale": locale, "selected": len(selected_ids),
             "batches": batches_out, "skipped": skipped}
+
+
+# ---------------------------------------------------------------------------
+# Build: usage research
+# ---------------------------------------------------------------------------
+
+
+def _research_examples(entry: dict, by_id: dict, locale: str) -> list:
+    """The first `RESEARCH_EXAMPLES` occurrences of a canon entry that are
+    still in `messages.json`, in the entry's `occurrences` order, each with
+    the locale's current target when the message has one. Both research
+    turns get the same list, so the verifier judges the product's sense of
+    the term from the product's own messages, not from the researcher's
+    account of them."""
+    examples = []
+    for occurrence in entry.get("occurrences") or []:
+        message = by_id.get(occurrence)
+        if message is None:
+            continue
+        example = {"id": occurrence, "source": message["source"]}
+        value = message.get("targets", {}).get(locale)
+        if value is not None:
+            example["value"] = value
+        examples.append(example)
+        if len(examples) == RESEARCH_EXAMPLES:
+            break
+    return examples
+
+
+def _select_research(canon: dict, research: dict, locale: str, entry_ids) -> list:
+    """Canon entry ids for a `research` build. Default: every `term` or
+    `ui_label` whose translation for the locale is not yet approved and
+    that has no research record -- the entries a person is about to decide
+    on. Explicit `--entry` ids are taken as given (re-research of an
+    approved or already-researched entry included), but each must be a
+    researchable canon entry."""
+    by_entry = {e["id"]: e for e in canon["entries"]}
+    if entry_ids:
+        for entry_id in entry_ids:
+            entry = by_entry.get(entry_id)
+            if entry is None or entry["kind"] not in RESEARCH_TERM_KINDS:
+                lz_common.fail(f"not a term or ui_label canon entry: {entry_id}",
+                                lz_common.EXIT_CANNOT, entry=entry_id)
+        return list(dict.fromkeys(entry_ids))
+    selected = []
+    for entry in canon["entries"]:
+        if entry["kind"] not in RESEARCH_TERM_KINDS:
+            continue
+        translation = entry["translations"].get(locale)
+        if translation is not None and translation.get("status") == "approved":
+            continue
+        if entry["id"] in research["entries"]:
+            continue
+        selected.append(entry["id"])
+    return selected
+
+
+def _select_research_verify(research: dict, entry_ids) -> list:
+    records = research["entries"]
+    if entry_ids:
+        for entry_id in entry_ids:
+            if entry_id not in records:
+                lz_common.fail(f"no research record for entry: {entry_id}", lz_common.EXIT_CANNOT, entry=entry_id)
+        return list(dict.fromkeys(entry_ids))
+    return [i for i, record in records.items() if record.get("verification") is None]
+
+
+def _build_research(root: Path, cfg: dict, kind: str, locale: str, entry_ids, templates_dir: Path) -> dict:
+    """`build --kind research|research_verify`: packets over canon entries,
+    not messages -- see the module docstring. The ledger and the lock are
+    never read."""
+    messages = lz_common.load_messages(root / "messages.json")
+    by_id = message_by_id(messages)
+    canon = canon_mod.load(root)
+    by_entry = {e["id"]: e for e in canon["entries"]}
+    research = canon_mod.load_research(root, locale)
+    settings = cfg.get("research") or {}
+    field = settings.get("field")
+    style = cfg["style"][locale]
+
+    if kind == "research":
+        selected_ids = _select_research(canon, research, locale, entry_ids)
+    else:
+        selected_ids = _select_research_verify(research, entry_ids)
+
+    batches_out = []
+    for name, ids in name_batches(make_batches(selected_ids, RESEARCH_BATCH_SIZE)):
+        items = []
+        for entry_id in ids:
+            if kind == "research":
+                entry = by_entry[entry_id]
+                translation = entry["translations"].get(locale) or {}
+                items.append({
+                    "id": entry_id, "kind": entry["kind"], "source": entry["source"],
+                    "note": entry.get("note") or "",
+                    "proposed": translation.get("value"), "status": translation.get("status"),
+                    "current": list(translation.get("current") or []),
+                    "examples": _research_examples(entry, by_id, locale),
+                })
+            else:
+                record = research["entries"][entry_id]
+                # A record whose canon entry has since gone keeps its own
+                # kind/source; it just has no note or examples left to show.
+                entry = by_entry.get(entry_id) or {}
+                items.append({
+                    "id": entry_id, "kind": record["kind"], "source": record["source"],
+                    "note": entry.get("note") or "",
+                    "examples": _research_examples(entry, by_id, locale),
+                    "research": record["research"], "research_sha256": record["research_sha256"],
+                })
+        packet = {"kind": kind, "locale": locale, "batch": name, "field": field}
+        if kind == "research":
+            packet["sites"] = list((settings.get("sites") or {}).get(locale) or [])
+        packet["style"] = style
+        packet["items"] = items
+        batches_out.append(_write_batch(root / "runs" / locale, name, kind, packet, templates_dir))
+
+    return {"ok": True, "kind": kind, "locale": locale, "selected": len(selected_ids),
+            "batches": batches_out, "skipped": []}
 
 
 def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: str, by_id: dict,
@@ -930,6 +1074,16 @@ def do_accept(root: Path, run_dir: Path, output_path: Path) -> dict:
     if kind == "canon":
         return accept_canon(packet, run_dir, output)
 
+    if kind in RESEARCH_KINDS:
+        # The packet's locale names a file under the root: refuse one that
+        # is not a configured target before any path is built from it.
+        if packet.get("locale") not in cfg["target_locales"]:
+            lz_common.fail(f"packet.json names a locale that is not a configured target: {packet.get('locale')}",
+                            lz_common.EXIT_CANNOT)
+        if kind == "research":
+            return accept_research(root, packet, run_dir, output)
+        return accept_research_verify(root, packet, run_dir, output)
+
     if kind not in ("translate", "review", "audit"):
         lz_common.fail(f"packet.json has an unknown kind: {kind}", lz_common.EXIT_CANNOT)
 
@@ -1025,6 +1179,173 @@ def accept_canon(packet: dict, run_dir: Path, output: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# accept: usage research
+# ---------------------------------------------------------------------------
+
+
+def _non_empty_str(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _valid_http_url(url) -> bool:
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url)
+        return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+    except ValueError:
+        return False
+
+
+def _research_problem(term):
+    """`None` for a well-formed research reply for one term, else the reason
+    it is refused. A finding carries what a person can follow up: a source
+    name, an http(s) URL, the rendering and a verbatim quote. A reply with
+    no findings is honest only at `low` confidence."""
+    if not isinstance(term, dict):
+        return "not an object"
+    for field in ("recommendation", "note"):
+        if not _non_empty_str(term.get(field)):
+            return f"{field} must be a non-empty string"
+    if term.get("confidence") not in canon_mod.RESEARCH_CONFIDENCE:
+        return "confidence must be one of: " + ", ".join(canon_mod.RESEARCH_CONFIDENCE)
+    findings = term.get("findings")
+    if not isinstance(findings, list):
+        return "findings must be a list"
+    if not findings and term["confidence"] != "low":
+        return "empty findings need confidence low"
+    for n, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            return f"finding {n} is not an object"
+        for field in ("site", "rendering", "quote"):
+            if not _non_empty_str(finding.get(field)):
+                return f"finding {n}: {field} must be a non-empty string"
+        if not _valid_http_url(finding.get("url")):
+            return f"finding {n}: url must be an http(s) URL with a host"
+    return None
+
+
+def accept_research(root: Path, packet: dict, run_dir: Path, output: dict) -> dict:
+    """Store each valid research reply as a new record in the packet
+    locale's research file and report the rest. A new record replaces the
+    entry's old one and resets its verification: the old verdict was cast
+    on different research. Only the locale's own file is written, and only
+    once."""
+    terms = output.get("terms") if isinstance(output, dict) else None
+    if not isinstance(terms, dict):
+        lz_common.fail("research output is missing a 'terms' object", lz_common.EXIT_FAIL)
+
+    locale = packet["locale"]
+    data = canon_mod.load_research(root, locale)
+    at = lz_common.now_iso()
+    stored, invalid, missing = [], [], []
+    for item in packet.get("items", []):
+        entry_id = item["id"]
+        if entry_id not in terms:
+            missing.append(entry_id)
+            continue
+        term = terms[entry_id]
+        reason = _research_problem(term)
+        if reason is not None:
+            invalid.append({"id": entry_id, "reason": reason})
+            continue
+        research = {
+            "recommendation": term["recommendation"], "confidence": term["confidence"], "note": term["note"],
+            "findings": [{k: f[k] for k in ("site", "url", "rendering", "quote")} for f in term["findings"]],
+        }
+        data["entries"][entry_id] = {
+            "kind": item["kind"], "source": item["source"],
+            "research": research, "research_sha256": canon_mod.research_sha256(research),
+            "researched": {"run": run_dir.name, "at": at},
+            "verification": None,
+        }
+        stored.append(entry_id)
+    if stored:
+        canon_mod.save_research(root, locale, data)
+    packet_ids = {item["id"] for item in packet.get("items", [])}
+    return {"ok": True, "kind": "research", "locale": locale, "run": run_dir.name, "stored": stored,
+            "invalid": invalid, "missing": missing, "extra": sorted(set(terms) - packet_ids)}
+
+
+def _verdict_problem(verdict: dict, finding_count: int):
+    """`None` for a well-formed verdict, else the reason it is refused:
+    exactly one verdict object per stored finding index, an enum verdict and
+    string `problems`/`better`."""
+    findings = verdict.get("findings")
+    if not isinstance(findings, list):
+        return "findings must be a list"
+    indexes = []
+    for n, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            return f"findings[{n}] is not an object"
+        index = finding.get("index")
+        if not isinstance(index, int) or isinstance(index, bool):
+            return f"findings[{n}]: index must be an integer"
+        if not isinstance(finding.get("confirmed"), bool):
+            return f"findings[{n}]: confirmed must be true or false"
+        if not isinstance(finding.get("detail"), str):
+            return f"findings[{n}]: detail must be a string"
+        indexes.append(index)
+    if sorted(indexes) != list(range(finding_count)):
+        return f"findings must hold exactly one entry for each of the {finding_count} source indexes"
+    if verdict.get("verdict") not in canon_mod.RESEARCH_VERDICTS:
+        return "verdict must be one of: " + ", ".join(canon_mod.RESEARCH_VERDICTS)
+    for field in ("problems", "better"):
+        if not isinstance(verdict.get(field), str):
+            return f"{field} must be a string"
+    return None
+
+
+def accept_research_verify(root: Path, packet: dict, run_dir: Path, output: dict) -> dict:
+    """Attach each valid verdict to its entry's research record. A verdict
+    is only ever bound to the research it was cast on: it must echo the
+    item's `research_sha256`, and the locale's record must still carry that
+    hash -- an entry re-researched since the build is `missing`, never given
+    a verdict about different evidence."""
+    verdicts = output.get("verdicts") if isinstance(output, dict) else None
+    if not isinstance(verdicts, dict):
+        lz_common.fail("research_verify output is missing a 'verdicts' object", lz_common.EXIT_FAIL)
+
+    locale = packet["locale"]
+    data = canon_mod.load_research(root, locale)
+    at = lz_common.now_iso()
+    verified, invalid, missing = [], [], []
+    for item in packet.get("items", []):
+        entry_id = item["id"]
+        verdict = verdicts.get(entry_id)
+        if verdict is None:
+            missing.append(entry_id)
+            continue
+        if not isinstance(verdict, dict):
+            invalid.append({"id": entry_id, "reason": "not an object"})
+            continue
+        record = data["entries"].get(entry_id)
+        if (verdict.get("research_sha256") != item["research_sha256"]
+                or record is None or record.get("research_sha256") != item["research_sha256"]):
+            missing.append(entry_id)
+            continue
+        reason = _verdict_problem(verdict, len(item["research"]["findings"]))
+        if reason is not None:
+            invalid.append({"id": entry_id, "reason": reason})
+            continue
+        record["verification"] = {
+            "research_sha256": item["research_sha256"],
+            "findings": [
+                {"index": f["index"], "confirmed": f["confirmed"], "detail": f["detail"]}
+                for f in sorted(verdict["findings"], key=lambda f: f["index"])
+            ],
+            "verdict": verdict["verdict"], "problems": verdict["problems"], "better": verdict["better"],
+            "run": run_dir.name, "at": at,
+        }
+        verified.append(entry_id)
+    if verified:
+        canon_mod.save_research(root, locale, data)
+    packet_ids = {item["id"] for item in packet.get("items", [])}
+    return {"ok": True, "kind": "research_verify", "locale": locale, "run": run_dir.name, "verified": verified,
+            "invalid": invalid, "missing": missing, "extra": sorted(set(verdicts) - packet_ids)}
+
+
+# ---------------------------------------------------------------------------
 # accept-audit
 # ---------------------------------------------------------------------------
 
@@ -1083,10 +1404,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p_build = sub.add_parser("build", help="Build packets for one turn kind.")
     p_build.add_argument("--root", required=True)
-    p_build.add_argument("--kind", required=True, choices=KINDS)
+    p_build.add_argument("--kind", required=True, choices=KINDS + RESEARCH_KINDS)
     p_build.add_argument("--locale", default=None)
-    p_build.add_argument("--entry", default=None,
-                         help="with --kind audit: a restricted audit of one canon entry (after canon.py change)")
+    p_build.add_argument("--entry", action="append", default=None,
+                         help="with --kind audit: a restricted audit of one canon entry (after canon.py change); "
+                              "with --kind research or research_verify: limit to this canon entry (repeatable)")
     _add_templates_dir_arg(p_build)
 
     p_accept = sub.add_parser("accept", help="Validate and apply a turn's output.")
@@ -1111,7 +1433,15 @@ def main() -> int:
     if args.command == "build":
         root = lz_common.resolve_root(args.root)
         templates_dir = Path(args.templates_dir) if args.templates_dir else default_templates_dir()
-        result = do_build(root, args.kind, args.locale, templates_dir, entry_id=args.entry)
+        entries = args.entry or []
+        if args.kind == "audit" and len(entries) > 1:
+            lz_common.fail("--kind audit takes exactly one --entry", lz_common.EXIT_CANNOT)
+        if args.kind in RESEARCH_KINDS:
+            result = do_build(root, args.kind, args.locale, templates_dir, entry_ids=entries or None)
+        else:
+            # Any other kind with --entry reaches do_build's own refusal.
+            result = do_build(root, args.kind, args.locale, templates_dir,
+                              entry_id=entries[0] if entries else None)
         lz_common.emit(result)
         return lz_common.EXIT_OK
 

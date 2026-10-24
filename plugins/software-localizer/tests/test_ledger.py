@@ -344,6 +344,21 @@ def test_canon_sha256_ignores_an_irrelevant_entry():
     assert with_irrelevant == ledger.canon_sha256(msg, EMPTY_CANON_LOCK)
 
 
+def test_research_block_in_the_config_changes_neither_style_nor_canon_hash():
+    plain = make_cfg(target_locales=("de", "ru"))
+    with_research = {**plain, "research": {
+        "field": "genealogy web app", "sites": {"de": ["wiki.genealogy.net"]},
+    }}
+    msg = make_message("m1", "Add to Cart")
+    canon_lock = {"schema": 1, "entries": [
+        {"id": "t-cart", "kind": "term", "source": "Cart", "occurrences": []},
+    ]}
+    for locale in ("de", "ru"):
+        assert ledger.style_sha256(with_research, locale) == ledger.style_sha256(plain, locale)
+    assert ledger.canon_sha256(msg, canon_lock) == ledger.canon_sha256(msg, canon_lock)
+    assert ledger.canon_sha256(msg, canon_lock) != ledger.canon_sha256(msg, EMPTY_CANON_LOCK)
+
+
 # --- sync: bootstrap -----------------------------------------------------
 
 
@@ -777,6 +792,32 @@ def test_sync_clears_candidate_on_canon_snapshot_mismatch(work_root):
     assert entry["state"] == "pending"  # unaffected: this id has no project target
     assert entry["candidate"] is None
     assert report["counts"]["de"]["candidates_cleared"] == 1
+
+
+def test_sync_keeps_a_populated_candidate_when_the_config_gains_a_research_block(work_root):
+    """Research hints never feed a hash, so adding them must not make a
+    correctly hashed candidate stale."""
+    cfg = make_cfg()
+    msg = make_message("m1", "Add to Cart")
+    sync_once(work_root, cfg, make_messages([msg]))  # pending
+
+    ledger_data = ledger.load(work_root)
+    candidate = make_candidate(
+        source_sha256=ledger.source_sha256(msg),
+        context_sha256=ledger.context_sha256(msg, "de"),
+        style_sha256=ledger.style_sha256(cfg, "de"),
+        canon_sha256=ledger.canon_sha256(msg, EMPTY_CANON_LOCK),
+    )
+    ledger.set_candidate(ledger_data, "de", "m1", candidate)
+    ledger.save(work_root, ledger_data)
+    before = ledger.load(work_root)["locales"]["de"]["m1"]["candidate"]
+    assert before is not None
+
+    cfg_with_research = {**cfg, "research": {"field": "genealogy web app", "sites": {"de": ["wiki.genealogy.net"]}}}
+    report = sync_once(work_root, cfg_with_research, make_messages([msg]))
+
+    assert report["counts"]["de"]["candidates_cleared"] == 0
+    assert ledger.load(work_root)["locales"]["de"]["m1"]["candidate"] == before
 
 
 def test_sync_clears_candidate_on_comment_change(work_root):

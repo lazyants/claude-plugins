@@ -19,6 +19,7 @@ SCRIPTS_DIR = TESTS_DIR.parent / "skills" / "software-localizer" / "scripts"
 FIXTURES_DIR = TESTS_DIR / "fixtures"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import canon  # noqa: E402
 import ledger as ledger_mod  # noqa: E402
 import lz_common  # noqa: E402
 import report  # noqa: E402
@@ -303,3 +304,102 @@ def test_report_via_cli(work_root):
     code, payload = run_cli(["--root", str(work_root), "--locale", "de"])
     assert code == 0, payload
     assert Path(payload["report"]).is_file()
+
+
+# --- canon usage research -------------------------------------------------
+
+
+def make_research_record(source="account", confidence="low", verdict="weak", confirmed=(True, False, False),
+                         better="Benutzerkonto"):
+    research = {
+        "recommendation": "Konto", "confidence": confidence, "note": "conflicts with Benutzerkonto",
+        "findings": [
+            {"site": f"s{i}", "url": f"https://example.org/{i}", "rendering": "Konto", "quote": "q"}
+            for i in range(len(confirmed))
+        ],
+    }
+    verification = None
+    if verdict is not None:
+        verification = {
+            "research_sha256": canon.research_sha256(research),
+            "findings": [{"index": i, "confirmed": c, "detail": "d"} for i, c in enumerate(confirmed)],
+            "verdict": verdict, "problems": "", "better": better, "run": "r", "at": "2026-01-01T00:00:00Z",
+        }
+    return {
+        "kind": "term", "source": source, "research": research,
+        "research_sha256": canon.research_sha256(research),
+        "researched": {"run": "r", "at": "2026-01-01T00:00:00Z"}, "verification": verification,
+    }
+
+
+def research_section(root, locale="de"):
+    # Slice to the research section: other sections print `_none_` too.
+    return report.build_report(root, locale).split("## Canon usage research")[1]
+
+
+def setup_research_workspace(root, records):
+    setup_workspace(root, make_cfg(), make_messages([make_message("a", "Hello")]),
+                    {"de": {"a": make_entry("pending")}})
+    canon.save(root, {"schema": 1, "entries": [{
+        "id": "t-account", "kind": "term", "source": "account", "note": "", "occurrences": [],
+        "translations": {"de": {"value": "Konto", "status": "proposed", "approved_by": None, "approved_at": None}},
+    }, {
+        "id": "t-tree", "kind": "term", "source": "tree", "note": "", "occurrences": [],
+        "translations": {},
+    }]})
+    data = canon.load_research(root, "de")
+    data["entries"].update(records)
+    canon.save_research(root, "de", data)
+
+
+def test_report_research_section_lists_a_flagged_record_with_reasons_and_canon_value(work_root):
+    setup_research_workspace(work_root, {"t-account": make_research_record()})
+    section = research_section(work_root)
+    assert "- researched: 1, verified: 1, flagged for a native speaker: 1" in section
+    assert "- `t-account` — account" in section
+    assert "  - canon: Konto (proposed)" in section
+    assert "  - recommendation: Konto (confidence low)" in section
+    assert "  - verification: weak, 1 of 3 sources confirmed" in section
+    assert "  - better: Benutzerkonto" in section
+    assert "  - check: verdict weak; low confidence" in section
+    assert "  - note: conflicts with Benutzerkonto" in section
+    assert "_none_" not in section
+
+
+def test_report_research_section_omits_better_when_empty_and_shows_an_unverified_record(work_root):
+    setup_research_workspace(work_root, {"t-tree": make_research_record(source="tree", verdict=None)})
+    section = research_section(work_root)
+    assert "  - canon: (no de translation)" in section
+    assert "  - verification: not run" in section
+    assert "  - better:" not in section
+    assert "  - check: not verified; low confidence" in section
+
+
+def test_report_research_section_omits_an_unflagged_record_but_counts_it(work_root):
+    clean = make_research_record(confidence="high", verdict="holds", confirmed=(True,), better="")
+    setup_research_workspace(work_root, {
+        "t-account": clean,
+        "t-tree": make_research_record(source="tree", verdict="refuted", confirmed=(False,)),
+    })
+    section = research_section(work_root)
+    assert "- researched: 2, verified: 2, flagged for a native speaker: 1" in section
+    assert "- `t-tree` — tree" in section
+    assert "t-account" not in section
+
+
+def test_report_research_section_is_none_without_a_research_file(work_root):
+    setup_workspace(work_root, make_cfg(), make_messages([make_message("a", "Hello")]),
+                    {"de": {"a": make_entry("pending")}})
+    assert not canon.research_path(work_root, "de").exists()
+    section = research_section(work_root)
+    assert "- researched: 0, verified: 0, flagged for a native speaker: 0" in section
+    assert "_none_" in section
+
+
+def test_report_research_rows_are_sorted_by_entry_id(work_root):
+    setup_research_workspace(work_root, {
+        "t-tree": make_research_record(source="tree"),
+        "t-account": make_research_record(),
+    })
+    section = research_section(work_root)
+    assert section.index("`t-account`") < section.index("`t-tree`")

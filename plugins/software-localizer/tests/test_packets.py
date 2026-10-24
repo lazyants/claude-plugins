@@ -1,6 +1,9 @@
 """Tests for `packets.py`: build selection and batching,
 accept's per-kind rules (translate/review/audit/canon), and `accept-audit`.
 
+The usage-research kinds (`research`, `research_verify`) are built and
+accepted against a hand-written `canon.json`; they never touch the ledger.
+
 Most tests call `packets.do_build`/`packets.do_accept`/`packets.do_accept_audit`
 directly against a hand-built `messages.json`/`ledger.json` (packets.py never
 re-derives its own state; hand-writing these here matches how `test_ledger.py`
@@ -33,6 +36,7 @@ import canon as canon_mod  # noqa: E402
 import ledger as ledger_mod  # noqa: E402
 import lz_common  # noqa: E402
 import packets  # noqa: E402
+import report as report_mod  # noqa: E402
 import toy_adapter  # noqa: E402
 
 EMPTY_CANON_LOCK = {"schema": 1, "entries": []}
@@ -1515,3 +1519,472 @@ def test_build_and_accept_translate_via_cli(work_root):
     code, payload = run_cli(["accept", "--root", str(work_root), "--run", str(run_dir), "--output", str(output_path)])
     assert code == 0, payload
     assert payload["accepted"] == ["a"]
+
+
+# --- usage research ------------------------------------------------------------
+
+
+def make_canon_entry(entry_id, source, kind="term", locales=None, occurrences=(), note=""):
+    """`locales` maps a locale to `(value, status)` or `(value, status, current)`."""
+    translations = {}
+    for locale, spec in (locales or {}).items():
+        translation = {"value": spec[0], "status": spec[1], "approved_by": None, "approved_at": None}
+        if len(spec) > 2:
+            translation["current"] = list(spec[2])
+        translations[locale] = translation
+    return {"id": entry_id, "kind": kind, "source": source, "note": note,
+            "occurrences": list(occurrences), "translations": translations}
+
+
+def setup_research_workspace(root, entries, cfg=None, messages=None):
+    cfg = cfg or make_cfg()
+    setup_workspace(root, cfg, messages or make_messages([]))
+    canon_mod.save(root, {"schema": 1, "entries": list(entries)})
+    return cfg
+
+
+def research_term(recommendation="Konto", confidence="high", note="Matches the field.", findings=None):
+    if findings is None:
+        findings = [{"site": "Example", "url": "https://example.org/a", "rendering": "Konto",
+                     "quote": "Ihr Konto verwalten"}]
+    return {"recommendation": recommendation, "confidence": confidence, "note": note, "findings": findings}
+
+
+def verdict_for(item, verdict="holds", confirmed=True, **overrides):
+    out = {
+        "research_sha256": item["research_sha256"],
+        "findings": [{"index": n, "confirmed": confirmed, "detail": "found"}
+                     for n in range(len(item["research"]["findings"]))],
+        "verdict": verdict, "problems": "", "better": "",
+    }
+    out.update(overrides)
+    return out
+
+
+def packet_of(batch_info):
+    return lz_common.read_json(Path(batch_info["dir"]) / "packet.json", "packet.json")
+
+
+def research_accept(root, batch_info, output):
+    """Run `do_accept` over a built batch with `output`; returns the result."""
+    run_dir = Path(batch_info["dir"])
+    return packets.do_accept(root, run_dir, write_output(run_dir, output))
+
+
+def research_records(root, locale="de"):
+    return canon_mod.load_research(root, locale)["entries"]
+
+
+def test_build_research_default_selection_batches_at_most_eight(work_root):
+    eligible = [make_canon_entry(f"t-w{n:02d}", f"Word{n}", locales={"de": (f"Wort{n}", "proposed")})
+                for n in range(9)]
+    eligible.append(make_canon_entry("t-none", "Bare"))
+    eligible.append(make_canon_entry("u-label", "Save", kind="ui_label", locales={"de": ("Speichern", "proposed")}))
+    skipped = [
+        make_canon_entry("d-api", "API", kind="dnt"),
+        make_canon_entry("t-done", "Done", locales={"de": ("Fertig", "approved")}),
+        make_canon_entry("t-seen", "Seen", locales={"de": ("Gesehen", "proposed")}),
+    ]
+    setup_research_workspace(work_root, eligible + skipped)
+    canon_mod.save_research(work_root, "de", {"schema": 1, "locale": "de", "entries": {"t-seen": {
+        "kind": "term", "source": "Seen", "research": research_term(), "research_sha256": "x",
+        "researched": {"run": "r", "at": "t"}, "verification": None}}})
+
+    result = packets.do_build(work_root, "research", "de", TEMPLATES_DIR)
+
+    assert result["selected"] == len(eligible) == 11
+    sizes = [b["items"] for b in result["batches"]]
+    assert len(sizes) == 2 and max(sizes) <= packets.RESEARCH_BATCH_SIZE == 8
+    ids = [i["id"] for b in result["batches"] for i in packet_of(b)["items"]]
+    assert sorted(ids) == sorted(e["id"] for e in eligible)
+
+
+def test_build_research_entry_flag_reresearches_and_refuses_bad_ids(work_root):
+    entries = [
+        make_canon_entry("t-done", "Done", locales={"de": ("Fertig", "approved")}),
+        make_canon_entry("t-seen", "Seen", locales={"de": ("Gesehen", "proposed")}),
+        make_canon_entry("d-api", "API", kind="dnt"),
+    ]
+    setup_research_workspace(work_root, entries)
+    canon_mod.save_research(work_root, "de", {"schema": 1, "locale": "de", "entries": {"t-seen": {
+        "kind": "term", "source": "Seen", "research": research_term(), "research_sha256": "x",
+        "researched": {"run": "r", "at": "t"}, "verification": None}}})
+
+    result = packets.do_build(work_root, "research", "de", TEMPLATES_DIR, entry_ids=["t-done", "t-seen"])
+    assert sorted(i["id"] for b in result["batches"] for i in packet_of(b)["items"]) == ["t-done", "t-seen"]
+
+    for bad in ("t-nope", "d-api"):
+        with pytest.raises(SystemExit) as exc:
+            packets.do_build(work_root, "research", "de", TEMPLATES_DIR, entry_ids=["t-done", bad])
+        assert exc.value.code == lz_common.EXIT_CANNOT
+
+
+def test_build_research_item_examples_are_the_first_five_present_with_targets(work_root):
+    occurrences = ["m0", "gone", "m1", "m2", "m3", "m4", "m5", "m6"]
+    msgs = make_messages([
+        make_message("m0", "Open account", targets={"de": "Konto öffnen"}),
+        make_message("m1", "Your account"),
+        make_message("m2", "Account settings", targets={"de": "Kontoeinstellungen"}),
+        make_message("m3", "Account A"), make_message("m4", "Account B"),
+        make_message("m5", "Account C"), make_message("m6", "Account D"),
+    ])
+    entry = make_canon_entry("t-account", "account", note="a user login",
+                             locales={"de": ("Konto", "proposed", ["Zugang", "Profil"])}, occurrences=occurrences)
+    cfg = make_cfg(style={"de": {"formality": "Sie", "notes": "formal"}})
+    cfg["research"] = {"field": "genealogy web app", "sites": {"de": ["wiki.genealogy.net"]}}
+    setup_research_workspace(work_root, [entry], cfg=cfg, messages=msgs)
+
+    result = packets.do_build(work_root, "research", "de", TEMPLATES_DIR)
+
+    batch = result["batches"][0]
+    packet = packet_of(batch)
+    assert packet["kind"] == "research" and packet["locale"] == "de"
+    assert packet["field"] == "genealogy web app"
+    assert packet["sites"] == ["wiki.genealogy.net"]
+    assert packet["style"] == {"formality": "Sie", "notes": "formal"}
+    item = packet["items"][0]
+    assert item["examples"] == [
+        {"id": "m0", "source": "Open account", "value": "Konto öffnen"},
+        {"id": "m1", "source": "Your account"},
+        {"id": "m2", "source": "Account settings", "value": "Kontoeinstellungen"},
+        {"id": "m3", "source": "Account A"},
+        {"id": "m4", "source": "Account B"},
+    ]
+    assert (item["kind"], item["source"], item["note"]) == ("term", "account", "a user login")
+    assert (item["proposed"], item["status"], item["current"]) == ("Konto", "proposed", ["Zugang", "Profil"])
+    prompt = (Path(batch["dir"]) / "prompt.md").read_text(encoding="utf-8")
+    assert "{{PACKET_JSON}}" not in prompt and '"t-account"' in prompt
+
+
+def test_build_research_without_config_block_has_null_field_and_no_sites(work_root):
+    setup_research_workspace(work_root, [make_canon_entry("t-a", "A", locales={"de": ("Ä", "proposed")})])
+    packet = packet_of(packets.do_build(work_root, "research", "de", TEMPLATES_DIR)["batches"][0])
+    assert packet["field"] is None and packet["sites"] == []
+
+
+def build_research_batch(work_root, ids):
+    return packets.do_build(work_root, "research", "de", TEMPLATES_DIR, entry_ids=list(ids))["batches"][0]
+
+
+def test_accept_research_stores_valid_record_and_reports_the_rest(work_root):
+    names = ["ok", "badurl", "noquote", "badconf", "nonote", "emptyhigh", "absent"]
+    setup_research_workspace(work_root, [make_canon_entry(f"t-{n}", n.title(), locales={"de": (n, "proposed")})
+                                         for n in names])
+    batch = build_research_batch(work_root, [f"t-{n}" for n in names])
+    good_finding = research_term()["findings"][0]
+    terms = {
+        "t-ok": research_term(),
+        "t-badurl": research_term(findings=[dict(good_finding, url="ftp://example.org/a")]),
+        "t-noquote": research_term(findings=[dict(good_finding, quote="")]),
+        "t-badconf": research_term(confidence="certain"),
+        "t-nonote": research_term(note="  "),
+        "t-emptyhigh": research_term(findings=[], confidence="high"),
+        "t-ghost": research_term(),
+    }
+
+    result = research_accept(work_root, batch, {"terms": terms})
+
+    assert result["ok"] is True and result["kind"] == "research" and result["locale"] == "de"
+    assert result["stored"] == ["t-ok"]
+    assert sorted(i["id"] for i in result["invalid"]) == ["t-badconf", "t-badurl", "t-emptyhigh", "t-nonote", "t-noquote"]
+    assert all(i["reason"] for i in result["invalid"])
+    assert result["missing"] == ["t-absent"]
+    assert result["extra"] == ["t-ghost"]
+    records = research_records(work_root)
+    assert list(records) == ["t-ok"]
+    record = records["t-ok"]
+    assert record["research"] == research_term()
+    assert record["research_sha256"] == canon_mod.research_sha256(record["research"])
+    assert record["verification"] is None
+    assert (record["kind"], record["source"]) == ("term", "Ok")
+    assert record["researched"]["run"] == Path(batch["dir"]).name
+
+
+def test_accept_research_empty_findings_are_honest_only_at_low_confidence(work_root):
+    setup_research_workspace(work_root, [make_canon_entry("t-a", "A", locales={"de": ("Ä", "proposed")})])
+    batch = build_research_batch(work_root, ["t-a"])
+    result = research_accept(work_root, batch, {"terms": {"t-a": research_term(findings=[], confidence="low")}})
+    assert result["stored"] == ["t-a"]
+    assert research_records(work_root)["t-a"]["research"]["findings"] == []
+
+
+def test_accept_research_without_terms_object_is_refused(work_root):
+    setup_research_workspace(work_root, [make_canon_entry("t-a", "A", locales={"de": ("Ä", "proposed")})])
+    batch = build_research_batch(work_root, ["t-a"])
+    with pytest.raises(SystemExit) as exc:
+        research_accept(work_root, batch, {"terms": ["t-a"]})
+    assert exc.value.code == lz_common.EXIT_FAIL
+    assert not canon_mod.research_path(work_root, "de").exists()
+
+
+def test_build_research_verify_selects_unverified_with_note_and_examples(work_root):
+    msgs = make_messages([make_message("m0", "Your account", targets={"de": "Ihr Konto"})])
+    entries = [
+        make_canon_entry("t-a", "account", note="a login", locales={"de": ("Konto", "proposed")}, occurrences=["m0"]),
+        make_canon_entry("t-b", "board", locales={"de": ("Tafel", "proposed")}),
+    ]
+    setup_research_workspace(work_root, entries, messages=msgs)
+    research_accept(work_root, build_research_batch(work_root, ["t-a", "t-b"]),
+                    {"terms": {"t-a": research_term(), "t-b": research_term(recommendation="Tafel")}})
+    data = canon_mod.load_research(work_root, "de")
+    data["entries"]["t-b"]["verification"] = {"verdict": "holds"}
+    canon_mod.save_research(work_root, "de", data)
+
+    result = packets.do_build(work_root, "research_verify", "de", TEMPLATES_DIR)
+
+    packet = packet_of(result["batches"][0])
+    assert packet["kind"] == "research_verify" and packet["locale"] == "de"
+    assert set(packet) == {"kind", "locale", "batch", "field", "style", "items"}
+    assert [i["id"] for i in packet["items"]] == ["t-a"]
+    item = packet["items"][0]
+    record = research_records(work_root)["t-a"]
+    assert item["note"] == "a login"
+    assert item["examples"] == [{"id": "m0", "source": "Your account", "value": "Ihr Konto"}]
+    assert item["research"] == record["research"] and item["research_sha256"] == record["research_sha256"]
+    assert (item["kind"], item["source"]) == ("term", "account")
+
+
+def test_build_research_verify_entry_without_record_is_refused(work_root):
+    setup_research_workspace(work_root, [make_canon_entry("t-a", "A", locales={"de": ("Ä", "proposed")})])
+    with pytest.raises(SystemExit) as exc:
+        packets.do_build(work_root, "research_verify", "de", TEMPLATES_DIR, entry_ids=["t-a"])
+    assert exc.value.code == lz_common.EXIT_CANNOT
+
+
+def researched_workspace(work_root, ids=("t-a",), findings=None, locales=("de",)):
+    entries = [make_canon_entry(i, i, locales={loc: ("X", "proposed") for loc in locales}) for i in ids]
+    setup_research_workspace(work_root, entries, cfg=make_cfg(target_locales=locales))
+    batch = build_research_batch(work_root, ids)
+    research_accept(work_root, batch, {"terms": {i: research_term(findings=findings) for i in ids}})
+
+
+def build_verify_batch(work_root, ids=None):
+    return packets.do_build(work_root, "research_verify", "de", TEMPLATES_DIR,
+                            entry_ids=list(ids) if ids else None)["batches"][0]
+
+
+def test_accept_research_verify_stores_the_verification(work_root):
+    researched_workspace(work_root)
+    batch = build_verify_batch(work_root)
+    item = packet_of(batch)["items"][0]
+
+    result = research_accept(work_root, batch, {"verdicts": {"t-a": verdict_for(
+        item, verdict="weak", problems="thin", better="Benutzerkonto")}})
+
+    assert result["ok"] is True and result["kind"] == "research_verify"
+    assert result["verified"] == ["t-a"] and result["invalid"] == [] and result["missing"] == []
+    verification = research_records(work_root)["t-a"]["verification"]
+    assert verification["verdict"] == "weak" and verification["better"] == "Benutzerkonto"
+    assert verification["research_sha256"] == item["research_sha256"]
+    assert verification["findings"] == [{"index": 0, "confirmed": True, "detail": "found"}]
+    assert verification["run"] == Path(batch["dir"]).name and verification["at"]
+
+
+def test_accept_research_verify_reports_missing_and_extra(work_root):
+    researched_workspace(work_root, ids=("t-a", "t-b"))
+    batch = build_verify_batch(work_root)
+    item = packet_of(batch)["items"][0]
+    result = research_accept(work_root, batch, {"verdicts": {item["id"]: verdict_for(item), "t-ghost": {}}})
+    assert result["verified"] == [item["id"]]
+    assert result["missing"] == [i["id"] for i in packet_of(batch)["items"] if i["id"] != item["id"]]
+    assert result["extra"] == ["t-ghost"]
+
+
+def test_accept_research_verify_hash_mismatch_is_missing(work_root):
+    researched_workspace(work_root)
+    batch = build_verify_batch(work_root)
+    item = packet_of(batch)["items"][0]
+    result = research_accept(work_root, batch, {"verdicts": {"t-a": verdict_for(item, research_sha256="0" * 64)}})
+    assert result["missing"] == ["t-a"] and result["verified"] == []
+    assert research_records(work_root)["t-a"]["verification"] is None
+
+
+def test_accept_research_verify_after_a_quotation_only_rewrite_is_missing(work_root):
+    researched_workspace(work_root)
+    old_batch = build_verify_batch(work_root)
+    old_item = packet_of(old_batch)["items"][0]
+    # Re-research keeps the recommendation and changes one quotation: a
+    # check that compared only the recommendation would attach the old
+    # verdict to evidence nobody re-opened.
+    changed = research_term()
+    changed["findings"][0]["quote"] = "Das Konto verwalten"
+    rerun = build_research_batch(work_root, ["t-a"])
+    research_accept(work_root, rerun, {"terms": {"t-a": changed}})
+    assert research_records(work_root)["t-a"]["research_sha256"] != old_item["research_sha256"]
+
+    result = research_accept(work_root, old_batch, {"verdicts": {"t-a": verdict_for(old_item)}})
+
+    assert result["verified"] == [] and result["missing"] == ["t-a"]
+    assert research_records(work_root)["t-a"]["verification"] is None
+
+
+def test_accept_research_resets_verification(work_root):
+    researched_workspace(work_root)
+    batch = build_verify_batch(work_root)
+    research_accept(work_root, batch, {"verdicts": {"t-a": verdict_for(packet_of(batch)["items"][0])}})
+    assert research_records(work_root)["t-a"]["verification"] is not None
+
+    rerun = build_research_batch(work_root, ["t-a"])
+    research_accept(work_root, rerun, {"terms": {"t-a": research_term(recommendation="Benutzerkonto")}})
+
+    record = research_records(work_root)["t-a"]
+    assert record["research"]["recommendation"] == "Benutzerkonto"
+    assert record["verification"] is None
+
+
+TWO_FINDINGS = [
+    {"site": "A", "url": "https://a.example/x", "rendering": "Konto", "quote": "ein Konto"},
+    {"site": "B", "url": "https://b.example/x", "rendering": "Konto", "quote": "das Konto"},
+]
+
+
+@pytest.mark.parametrize("change", [
+    {"findings": [{"index": 0, "confirmed": True, "detail": ""}]},
+    {"findings": [{"index": 0, "confirmed": True, "detail": ""}, {"index": 0, "confirmed": False, "detail": ""}]},
+    {"findings": [{"index": 0, "confirmed": True, "detail": ""}, {"index": 1, "confirmed": "yes", "detail": ""}]},
+    {"findings": [{"index": 0, "confirmed": True, "detail": ""}, {"index": 2, "confirmed": True, "detail": ""}]},
+    {"verdict": "fine"},
+    {"problems": None},
+    {"better": 3},
+])
+def test_accept_research_verify_malformed_verdict_is_invalid(work_root, change):
+    researched_workspace(work_root, findings=TWO_FINDINGS)
+    batch = build_verify_batch(work_root)
+    item = packet_of(batch)["items"][0]
+    assert len(item["research"]["findings"]) == 2
+
+    result = research_accept(work_root, batch, {"verdicts": {"t-a": verdict_for(item, **change)}})
+
+    assert result["verified"] == [] and result["missing"] == []
+    assert [i["id"] for i in result["invalid"]] == ["t-a"] and result["invalid"][0]["reason"]
+    assert research_records(work_root)["t-a"]["verification"] is None
+
+
+def test_accept_research_verify_without_verdicts_object_is_refused(work_root):
+    researched_workspace(work_root)
+    batch = build_verify_batch(work_root)
+    with pytest.raises(SystemExit) as exc:
+        research_accept(work_root, batch, {"terms": {}})
+    assert exc.value.code == lz_common.EXIT_FAIL
+
+
+def _snapshot(root, skip):
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*"))
+            if p.is_file() and not any(part in skip for part in p.relative_to(root).parts)}
+
+
+def test_research_accepts_touch_neither_the_ledger_nor_another_locale(work_root):
+    cfg = make_cfg(target_locales=("de", "ru"))
+    msgs = make_messages([make_message("a", "Hello")])
+    ledger_locales = {"de": {"a": make_entry("pending")}, "ru": {"a": make_entry("pending")}}
+    setup_workspace(work_root, cfg, msgs, ledger_locales)
+    canon_mod.save(work_root, {"schema": 1, "entries": [
+        make_canon_entry("t-a", "A", locales={"de": ("Ä", "proposed"), "ru": ("Я", "proposed")})]})
+    other = {"schema": 1, "locale": "ru", "entries": {"t-a": {
+        "kind": "term", "source": "A", "research": research_term(), "research_sha256": "x",
+        "researched": {"run": "r", "at": "t"}, "verification": None}}}
+    canon_mod.save_research(work_root, "ru", other)
+    before = _snapshot(work_root, skip={"runs", "canon.research"})
+    ru_before = canon_mod.research_path(work_root, "ru").read_bytes()
+
+    batch = build_research_batch(work_root, ["t-a"])
+    research_accept(work_root, batch, {"terms": {"t-a": research_term()}})
+    verify = build_verify_batch(work_root)
+    research_accept(work_root, verify, {"verdicts": {"t-a": verdict_for(packet_of(verify)["items"][0])}})
+
+    assert research_records(work_root)["t-a"]["verification"] is not None
+    # The comparison is only meaningful if the ledger files are in the snapshot.
+    assert any(name.startswith("ledger") for name in before)
+    assert _snapshot(work_root, skip={"runs", "canon.research"}) == before
+    assert canon_mod.research_path(work_root, "ru").read_bytes() == ru_before
+
+
+def test_research_build_and_accept_via_cli(work_root):
+    entries = [make_canon_entry(i, i, locales={"de": ("X", "proposed")}) for i in ("t-a", "t-b", "t-c")]
+    setup_research_workspace(work_root, entries)
+
+    code, payload = run_cli(["build", "--root", str(work_root), "--kind", "research", "--locale", "de",
+                             "--entry", "t-a", "--entry", "t-b"])
+    assert code == 0, payload
+    run_dir = Path(payload["batches"][0]["dir"])
+    assert sorted(i["id"] for i in packet_of(payload["batches"][0])["items"]) == ["t-a", "t-b"]
+    out = write_output(run_dir, {"terms": {"t-a": research_term(), "t-b": research_term()}})
+    code, payload = run_cli(["accept", "--root", str(work_root), "--run", str(run_dir), "--output", str(out)])
+    assert code == 0, payload
+    assert payload["stored"] == ["t-a", "t-b"]
+
+    code, payload = run_cli(["build", "--root", str(work_root), "--kind", "research_verify", "--locale", "de"])
+    assert code == 0, payload
+    run_dir = Path(payload["batches"][0]["dir"])
+    items = packet_of(payload["batches"][0])["items"]
+    out = write_output(run_dir, {"verdicts": {i["id"]: verdict_for(i) for i in items}})
+    code, payload = run_cli(["accept", "--root", str(work_root), "--run", str(run_dir), "--output", str(out)])
+    assert code == 0, payload
+    assert payload["verified"] == ["t-a", "t-b"]
+
+
+def audit_workspace(work_root):
+    msgs = make_messages([make_message("a", "Cart", targets={"de": "Warenkorb"}),
+                          make_message("b", "Other", targets={"de": "Andere"})])
+    setup_workspace(work_root, make_cfg(), msgs, {"de": {"a": make_entry("translated"), "b": make_entry("translated")}})
+    request = {"entry": "t-cart", "kind": "term", "source": "Cart", "locale": "de", "before": "Warenkorb",
+               "after": "Einkaufswagen", "reason": "consistency", "by": "alice", "at": "2026-01-01T00:00:00Z",
+               "occurrences": ["a"]}
+    lz_common.atomic_write_json(work_root / "runs" / "de" / "canon-audit-t-cart.json", request)
+
+
+def test_audit_entry_flag_cardinality_via_cli(work_root):
+    audit_workspace(work_root)
+    base = ["build", "--root", str(work_root), "--kind", "audit", "--locale", "de"]
+
+    code, payload = run_cli(base)
+    assert code == 0, payload
+    assert [i["id"] for i in packet_of(payload["batches"][0])["items"]] == ["a", "b"]
+    assert packet_of(payload["batches"][0])["canon_entry"] is None
+
+    code, payload = run_cli(base + ["--entry", "t-cart"])
+    assert code == 0, payload
+    assert [i["id"] for i in packet_of(payload["batches"][0])["items"]] == ["a"]
+    assert packet_of(payload["batches"][0])["canon_entry"]["entry"] == "t-cart"
+
+    code, payload = run_cli(base + ["--entry", "t-cart", "--entry", "t-other"])
+    assert code == lz_common.EXIT_CANNOT and payload["ok"] is False
+
+
+def test_translate_still_refuses_entry_via_cli(work_root):
+    setup_workspace(work_root, make_cfg(), make_messages([make_message("a", "Hello")]),
+                    {"de": {"a": make_entry("pending")}})
+    code, payload = run_cli(["build", "--root", str(work_root), "--kind", "translate", "--locale", "de",
+                             "--entry", "t-a"])
+    assert code == lz_common.EXIT_CANNOT and payload["ok"] is False
+
+
+def test_research_flow_reaches_approval_summary_and_report(work_root):
+    entries = [make_canon_entry(i, i, locales={"de": (i.upper(), "proposed")}) for i in ("t-weak", "t-clean")]
+    setup_research_workspace(work_root, entries)
+    research_accept(work_root, build_research_batch(work_root, ["t-weak", "t-clean"]), {"terms": {
+        "t-weak": research_term(recommendation="Schwach", confidence="low", note="thin evidence"),
+        "t-clean": research_term(recommendation="Sauber"),
+    }})
+    verify = build_verify_batch(work_root)
+    items = {i["id"]: i for i in packet_of(verify)["items"]}
+    research_accept(work_root, verify, {"verdicts": {
+        "t-weak": verdict_for(items["t-weak"], verdict="weak", problems="thin", better="Anders"),
+        "t-clean": verdict_for(items["t-clean"]),
+    }})
+
+    canon = canon_mod.load(work_root)
+    result = canon_mod.approve(work_root, canon, "t-weak", "de", None, "tester")
+    canon_mod.save(work_root, canon)
+
+    assert result["research"] == {"recommendation": "Schwach", "confidence": "low", "findings": 1,
+                                  "confirmed": 1, "verdict": "weak", "better": "Anders"}
+    event = canon_mod.load_history(work_root)["events"][-1]
+    assert event["entry"] == "t-weak" and event["research"] == result["research"]
+
+    report = report_mod.build_report(work_root, "de")
+    section = report.split("## Canon usage research", 1)[1]
+    assert "researched: 2, verified: 2, flagged for a native speaker: 1" in section
+    assert "`t-weak`" in section and "verdict weak; low confidence" in section
+    assert "better: Anders" in section and "T-WEAK (approved)" in section
+    assert "`t-clean`" not in section

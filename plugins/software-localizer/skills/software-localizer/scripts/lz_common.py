@@ -463,6 +463,28 @@ def validate_config(cfg, root) -> list:
         if not isinstance(allow_identical, list) or not all(isinstance(a, str) for a in allow_identical):
             problems.append({"field": "allow_identical", "message": "allow_identical must be a list of strings"})
 
+    # research: optional operator hints for the usage-research turns (the
+    # field the product is in, reference sites per target locale). Never
+    # hashed, so it is checked for shape only.
+    research = cfg.get("research")
+    if research is not None and not _is_choose(research):
+        if not isinstance(research, dict):
+            problems.append({"field": "research", "message": "research must be an object"})
+        else:
+            field_text = research.get("field")
+            if field_text is not None and (not isinstance(field_text, str) or not field_text):
+                problems.append({"field": "research.field", "message": "research.field must be a non-empty string"})
+            sites = research.get("sites")
+            if sites is not None:
+                if not isinstance(sites, dict):
+                    problems.append({"field": "research.sites", "message": "research.sites must be an object keyed by target locale"})
+                else:
+                    for loc, urls in sites.items():
+                        if loc not in target_set:
+                            problems.append({"field": f"research.sites.{loc}", "message": "sites for a locale that is not a target"})
+                        if not isinstance(urls, list) or not all(isinstance(u, str) and u for u in urls):
+                            problems.append({"field": f"research.sites.{loc}", "message": "must be a list of non-empty strings"})
+
     return problems
 
 

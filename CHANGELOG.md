@@ -2,6 +2,28 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.3.0] — 2026-10-24
+
+### Added
+
+- Term usage research before canon approval (#1008). `packets.py build --kind research --locale L`
+  sends the locale's not-yet-approved terms and UI labels, 8 per batch, to a research turn that
+  finds how established products and communities in the project's field name each one in that
+  language: per source a site, URL, rendering and verbatim quote, per term a recommendation,
+  confidence and note. `--kind research_verify` sends that research to a different turn, which
+  re-opens every source, marks each confirmed or not, and tries to refute the recommendation.
+  An operator adding a language they cannot judge now approves with outside evidence instead of
+  choosing alone.
+- The evidence is kept per locale in `canon.research/<locale>.json`, next to the canon.
+  `canon.py approve` copies its summary into the approval's history event, and `report.py` lists
+  the terms a native speaker should still check: low confidence, unverified, a `weak` or
+  `refuted` verdict, or no confirmed source.
+- `localize.json` accepts an optional `research` block: the project's field and reference sites
+  per locale.
+
+Research never approves or changes a canon value, and nothing hashes it: adding or redoing
+research makes no translation stale.
+
 ## [ai-cli-optout 1.2.1] — 2026-10-23
 
 ### Changed

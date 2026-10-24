@@ -22,6 +22,19 @@ translated it meanwhile) becomes `existing`.
 Every candidate records the source, context and style it was made and reviewed against; when
 any of them changes, sync clears the candidate.
 
+## Canon research evidence
+
+`R/canon.research/<locale>.json`, one file per target locale, holds the usage research and its
+verification for that locale's canon entries, keyed by entry id. Only `packets.py accept` of a
+`research` or `research_verify` run writes it, and only the run's own locale file. A new
+research result for an entry replaces its record and clears the verification; a verification
+attaches only to the exact research it was built from (`research_sha256`).
+
+Nothing hashes it: it is not part of `canon.lock.json`, a candidate's snapshot or any check, so
+adding or redoing research never makes a translation stale. It is durable evidence that belongs
+with `canon.json` and `canon.history.json` — the record of why a term was chosen — and
+`canon.py approve` copies a summary of it into the history event of each approval.
+
 ## Export safety — `export_values.py`
 
 0. Exports hold an exclusive lock on `R/exports/.lock` from start to finish, so two exports

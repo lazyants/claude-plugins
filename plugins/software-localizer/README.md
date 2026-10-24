@@ -12,8 +12,13 @@ native speaker.
   only after round-trip, parse and coverage checks.
 - **Two modes.** *Translate* new and changed strings incrementally; *audit* the existing
   translation and propose fixes a person accepts.
+- **Term evidence.** Before a person approves a canon term in a language they cannot judge, a
+  research turn finds how established products in the project's field name it there, with a
+  verbatim quote per source, and an independent turn re-opens every source and tries to refute
+  the recommendation. The evidence is kept next to the canon; unclear terms go into the report
+  for a native speaker. A person still approves every term.
 - **Models.** Codex translates (read-only, returns JSON); Claude subagents review, audit, propose
-  the canon and check adapter coverage.
+  the canon, research and verify term usage on the web, and check adapter coverage.
 - **Safety.** A person's translation is never overwritten; nothing is exported without script
   checks and a review verdict bound to the exact value; export re-collects, compares, and writes
   under a journal that rolls back on failure.

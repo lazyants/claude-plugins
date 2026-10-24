@@ -3,12 +3,14 @@ exported and pending candidates with source and context,
 adopted entries (translated with no candidate — `ledger.adopt` took the
 project's own value) shown with that current value, audit findings with
 proposals, escalated ids with their problems, canon candidates raised by
-reviews, and notes on `existing`/`human_locked` messages.
+reviews, usage-research records a native speaker should check, and notes on
+`existing`/`human_locked` messages.
 
-Reads only durable state (the ledger, `messages.json`, and each review or
-audit run's `new_canon_candidates.json` side file that `packets.py accept`
-writes) — never a model turn's raw output, which is either already folded
-into the ledger or was refused before it got here.
+Reads only durable state (the ledger, `messages.json`, `canon.json`,
+`canon.research/<locale>.json`, and each review or audit run's
+`new_canon_candidates.json` side file that `packets.py accept` writes) —
+never a model turn's raw output, which is either already folded into the
+ledger or was refused before it got here.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import canon as canon_mod  # noqa: E402
 import lz_common  # noqa: E402
 import ledger as ledger_mod  # noqa: E402
 
@@ -157,6 +160,31 @@ def _collect_canon_candidates(root: Path, locale: str) -> list:
     return candidates
 
 
+def _row_research(entry_id, record, translation, locale):
+    """One flagged research record, with the canon's current value beside the
+    recommendation so a native speaker sees both without opening a file."""
+    summary = canon_mod.research_summary(record)
+    if translation:
+        canon_line = f"{translation.get('value')} ({translation.get('status')})"
+    else:
+        canon_line = f"(no {locale} translation)"
+    if summary["verdict"] is None:
+        verification = "not run"
+    else:
+        verification = f"{summary['verdict']}, {summary['confirmed']} of {summary['findings']} sources confirmed"
+    out = [
+        f"- `{entry_id}` — {record.get('source', '?')}",
+        f"  - canon: {canon_line}",
+        f"  - recommendation: {summary['recommendation']} (confidence {summary['confidence']})",
+        f"  - verification: {verification}",
+    ]
+    if summary["better"]:
+        out.append(f"  - better: {summary['better']}")
+    out.append(f"  - check: {'; '.join(canon_mod.research_flags(record))}")
+    out.append(f"  - note: {(record.get('research') or {}).get('note', '')}")
+    return out
+
+
 def build_report(root: Path, locale: str) -> str:
     cfg = lz_common.load_config(root)
     if locale not in cfg["target_locales"]:
@@ -227,6 +255,22 @@ def build_report(root: Path, locale: str) -> str:
     if canon_candidates:
         for cand in canon_candidates:
             lines.append(f"- **{cand.get('source', '?')}** ({cand.get('kind', '?')}): {cand.get('note', '')}")
+    else:
+        lines.append("_none_")
+    lines.append("")
+
+    records = canon_mod.load_research(root, locale)["entries"]
+    canon_entries = {e["id"]: e for e in canon_mod.load(root)["entries"]}
+    verified = sum(1 for r in records.values() if r.get("verification"))
+    flagged = [(eid, r) for eid, r in sorted(records.items()) if canon_mod.research_flags(r)]
+    lines.append("## Canon usage research")
+    lines.append("")
+    lines.append(f"- researched: {len(records)}, verified: {verified}, flagged for a native speaker: {len(flagged)}")
+    lines.append("")
+    if flagged:
+        for eid, record in flagged:
+            translation = ((canon_entries.get(eid) or {}).get("translations") or {}).get(locale)
+            lines.extend(_row_research(eid, record, translation, locale))
     else:
         lines.append("_none_")
     lines.append("")
