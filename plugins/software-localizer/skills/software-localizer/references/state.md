@@ -65,3 +65,29 @@ checks that the adapter preserves files when no values change. It does not verif
 export. For each real export, have the team review the full project diff before committing or
 shipping: this is the guard for bytes outside the collected representation, such as formatting,
 comments, key order and changes to files declared only because the adapter reads them.
+
+## Workspace files
+
+`R` may sit inside the project, so its files fall into three groups. `scaffold.py` writes an
+`R/.gitignore` that keeps only the first group in git (it never replaces an existing
+`.gitignore`); add a `!/<name>` line to it to commit something else.
+
+| group | files | in the project's repository |
+| --- | --- | --- |
+| decisions | `localize.json`, `adapter/`, `canon.json`, `canon.lock.json`, `canon.history.json` | committed and reviewed like any project change |
+| one checkout's state | `adapter.lock.json`, `runs/_adapter_check.json`, `ledger/` | not committed |
+| run state | `messages.json`, `runs/`, `exports/`, `reports/`, `project-checks/`, temporary directories, `.lz-tmp-*` files | not committed |
+
+- `adapter.lock.json` records adapter files by absolute path, so it matches only the checkout that
+  accepted it. A new checkout or worktree runs `adapter_check.py run` and `accept` again.
+- A ledger describes one state of the project's catalogs, so it stays with its checkout. Losing it
+  is safe: `ledger.py sync` starts every message the project already translates as `existing`, and
+  nothing overwrites an `existing` value without `ledger.py adopt` or an accepted audit proposal.
+  A new checkout starts without the old candidates and review progress.
+- Give `project_root` as a relative path (`..` for `<project>/localization`): an absolute path
+  works in one checkout only. Tool paths in `adapter.options` have the same problem; let the adapter
+  compute them from its own file's location instead. Its working directory is not a reliable base:
+  `collect` and `export` also run in a staged copy that holds only the declared files.
+- `R` holds copies of the project's catalogs: export backups and staged copies. `collect` is
+  refused when the adapter lists a file inside `R`, and the coverage inventory leaves `R` out.
+  Leave `R` out of scratch copies of the project as well ([project checks](project-checks.md)).

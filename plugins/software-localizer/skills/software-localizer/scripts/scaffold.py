@@ -3,6 +3,12 @@
 Writes `localize.json` with every answer a `CHOOSE_...` sentinel when it does
 not already exist; never overwrites an existing one, so an operator's
 in-progress answers are never lost by re-running this.
+
+Also writes a `.gitignore` when the root has none. The root may sit inside the
+project's own repository, so the file is an allowlist: it commits the decisions
+(config, adapter, canon) and ignores everything else, which keeps every
+run-state file the plugin writes, now or later, out of git by default. An
+existing `.gitignore` is never overwritten.
 """
 
 from __future__ import annotations
@@ -14,6 +20,19 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import lz_common  # noqa: E402
+
+GITIGNORE = """\
+# software-localizer workspace: commit the decisions, keep run state local.
+# Add a "!/<name>" line to commit another file or directory.
+/*
+!/.gitignore
+!/localize.json
+!/adapter/
+!/canon.json
+!/canon.lock.json
+!/canon.history.json
+__pycache__/
+"""
 
 
 def _default_config() -> dict:
@@ -51,7 +70,15 @@ def main() -> int:
         outcome = "fresh"
         created = True
 
-    lz_common.emit({"ok": True, "outcome": outcome, "created": created, "path": str(config_path)})
+    gitignore_path = root / ".gitignore"
+    gitignore_created = not os.path.lexists(gitignore_path)
+    if gitignore_created:
+        lz_common.atomic_write_text(gitignore_path, GITIGNORE)
+
+    lz_common.emit({
+        "ok": True, "outcome": outcome, "created": created, "path": str(config_path),
+        "gitignore_created": gitignore_created,
+    })
     return lz_common.EXIT_OK
 
 

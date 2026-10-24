@@ -10,7 +10,9 @@ JSON line, or a reply missing a field this contract requires — becomes an
 `collect`'s reply is validated as a shape-checked `messages.json` and, on a
 mismatch, exits straight through `lz_common.fail` (`EXIT_CANNOT`) rather
 than raising `AdapterError` -- a malformed collect is a broken adapter, not
-a recoverable invocation failure.
+a recoverable invocation failure. When the workspace sits inside the project,
+`collect` also refuses (`EXIT_FAIL`) a declared file under the workspace
+directory.
 
 `collect`/`export`/`parse` write their options (and, for `export`/`parse`,
 their other input) to a temp file under the workspace root and pass its path
@@ -25,6 +27,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -125,7 +128,10 @@ def collect(root: str, cfg: dict, project_dir: str, out_path: str) -> dict:
     atomically replace `out_path` with it. Returns the validated messages
     dict. Validation happens on the temp-dir copy, before `out_path` is
     touched at all: a malformed collect must never clobber the last good
-    `messages.json`."""
+    `messages.json`. A declared file under the workspace directory is also
+    refused (`EXIT_FAIL`) before `out_path` is touched.
+    `cfg` is `lz_common.load_config`'s result, so `project_root` is already
+    absolute."""
     with tempfile.TemporaryDirectory(dir=root) as tmp:
         options_path = _write_options(tmp, cfg)
         collected_path = os.path.join(tmp, "messages.json")
@@ -167,6 +173,23 @@ def collect(root: str, cfg: dict, project_dir: str, out_path: str) -> dict:
                 f"messages.json message {gap_id!r} does not cover every configured target locale",
                 lz_common.EXIT_FAIL,
             )
+
+        # A workspace inside the project holds byte copies of its catalogs
+        # (export backups, staged copies in temporary directories); an adapter
+        # that globs or walks the project would declare them. Compared as
+        # resolved locations, so a project directory that is a symlink into
+        # the workspace is caught too, and anchored on cfg["project_root"],
+        # not `project_dir`: a staged collect runs in a temporary copy but
+        # returns the same project-relative paths.
+        ws_real = Path(root).resolve()
+        for f in messages["files"]:
+            if (Path(cfg["project_root"]) / f).resolve().is_relative_to(ws_real):
+                lz_common.fail(
+                    f"adapter 'collect' declared {f!r}, a file that resolves inside the workspace {str(ws_real)!r}: "
+                    "the workspace holds the plugin's own copies of catalogs (export backups under exports/ and "
+                    "staged copies in temporary directories), so an adapter must never read or list a file there",
+                    lz_common.EXIT_FAIL,
+                )
 
         lz_common.atomic_write_json(out_path, messages)
 

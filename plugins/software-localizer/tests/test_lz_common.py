@@ -272,7 +272,11 @@ def test_validate_config_refuses_project_root_equal_to_workspace_root(work_root)
     cfg = _valid_config(work_root, work_root)
     cfg["project_root"] = str(work_root)
     problems = lz_common.validate_config(cfg, work_root)
-    assert any(p["field"] == "project_root" for p in problems)
+    assert any(
+        p["field"] == "project_root"
+        and p["message"] == "project_root must not equal or sit inside the workspace root"
+        for p in problems
+    )
 
 
 def test_validate_config_refuses_project_root_inside_workspace_root(work_root):
@@ -283,14 +287,40 @@ def test_validate_config_refuses_project_root_inside_workspace_root(work_root):
     assert any(p["field"] == "project_root" for p in problems)
 
 
-def test_validate_config_refuses_project_root_containing_workspace_root(work_root, tmp_path):
+def test_validate_config_accepts_a_workspace_inside_the_project(tmp_path):
+    # The workspace may sit inside the project (its durable files are then
+    # committed in the project's own repository).
     outer = tmp_path / "outer"
     outer.mkdir()
     nested_root = outer / "nested" / "root"
     nested_root.mkdir(parents=True)
     cfg = _valid_config(nested_root, outer)
     problems = lz_common.validate_config(cfg, nested_root)
-    assert any(p["field"] == "project_root" for p in problems)
+    assert not any(p["field"] == "project_root" for p in problems)
+
+
+def test_validate_config_accepts_a_relative_parent_project_root(tmp_path):
+    project = tmp_path / "project"
+    root = project / "localization"
+    root.mkdir(parents=True)
+    cfg = _valid_config(root, project)
+    cfg["project_root"] = ".."
+    assert lz_common.validate_config(cfg, root) == []
+    lz_common.atomic_write_json(root / "localize.json", cfg)
+    assert lz_common.load_config(root)["project_root"] == str(project.resolve())
+
+
+def test_workspace_relpath_inside_nested_outside_equal_and_project_inside(tmp_path):
+    project = tmp_path / "project"
+    (project / "a" / "b").mkdir(parents=True)
+    (project / "localization").mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    assert lz_common.workspace_relpath(project / "localization", project) == "localization"
+    assert lz_common.workspace_relpath(project / "a" / "b", project) == "a/b"
+    assert lz_common.workspace_relpath(other, project) is None
+    assert lz_common.workspace_relpath(project, project) is None
+    assert lz_common.workspace_relpath(project, project / "a") is None
 
 
 def test_validate_config_accepts_an_absent_or_valid_research_block(work_root, tmp_path):
@@ -632,8 +662,8 @@ def test_load_config_runs_an_adapter_command_when_tuning_fields_were_absent(work
 def test_load_config_resolves_relative_project_root_against_root(tmp_path, monkeypatch):
     # A relative project_root resolves against `root` (R), not the process's
     # current working directory -- a script run from anywhere else must
-    # still target the same, R-relative, directory. (project_root must sit
-    # outside R, so it is a sibling here, reached by "../project".)
+    # still target the same, R-relative, directory. (A sibling here, reached
+    # by "../project".)
     root = tmp_path / "R"
     root.mkdir()
     project = tmp_path / "project"

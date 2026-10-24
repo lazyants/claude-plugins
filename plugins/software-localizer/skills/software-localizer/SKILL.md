@@ -24,11 +24,16 @@ back, and parses message syntax, ideally by calling the project's own tooling.
 
 Scripts live in `${CLAUDE_PLUGIN_ROOT}/skills/software-localizer/scripts/` (call it `S` below).
 Every script prints one JSON line and exits `0` (ok), `1` (refused — read the message and fix
-what it names), or `2` (cannot run). The workspace `R` is a directory **outside** the project.
+what it names), or `2` (cannot run). The workspace `R` is a directory outside the project or
+inside it — for example `<project>/localization` with `"project_root": ".."` — but never the
+project root itself or a directory that contains the project. Inside the project, commit what
+`R/.gitignore` keeps (the config, the adapter and the canon) through the project's normal review;
+the rest of `R` is one checkout's run state ([workspace files](references/state.md#workspace-files)).
 References: `references/adapter-contract.md` (what an adapter must do),
 `references/checks.md` (what scripts check and what the review judges),
 `references/project-checks.md` (project tests before approval and export),
-`references/state.md` (ledger states, canon research evidence, export safety, recovery).
+`references/state.md` (ledger states, canon research evidence, export safety, recovery,
+workspace files).
 
 `packets.py build` returns each batch's `dir`: use that path for the model turn, its answer and
 `packets.py accept --run`. Batches live in `R/runs/<locale>/_packets/<kind>/<batch>` (canon uses
@@ -60,7 +65,8 @@ The reserved `_packets` directory keeps new runs separate from legacy batch name
 
 ```bash
 python3 S/scaffold.py --root R
-# fill R/localize.json with the operator: project_root, source_locale, target_locales,
+# fill R/localize.json with the operator: project_root (".." for R = <project>/localization),
+# source_locale, target_locales,
 # style per target locale (formality: "Sie" / "вы" / "vous"… and short notes),
 # adapter.argv (set in step 2), allow_identical (ids that may stay untranslated)
 ```
@@ -245,10 +251,14 @@ python3 S/packets.py build --root R --kind translate --locale L
 For each batch, codex translates, read-only:
 
 ```bash
-codex exec -s read-only --skip-git-repo-check -C <batch dir> -o <batch dir>/translate.out.json - \
-  < <batch dir>/prompt.md
+codex exec -s read-only --skip-git-repo-check -c project_doc_max_bytes=0 -C <batch dir> \
+  -o <batch dir>/translate.out.json - < <batch dir>/prompt.md
 python3 S/packets.py accept --root R --run <batch dir> --output <batch dir>/translate.out.json
 ```
+
+`project_doc_max_bytes=0` keeps the project's own agent instructions (`AGENTS.md`) out of the
+translation turn. Codex reads them from every directory between the repository root and the `-C`
+directory, and that path runs through the project when `R` sits inside it.
 
 Then review what passed the checks:
 

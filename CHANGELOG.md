@@ -2,6 +2,26 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.3.1] — 2026-10-24
+
+### Added
+
+- The workspace may now sit inside the project it localizes, for example `<project>/localization`
+  with `"project_root": ".."` (#1009). The config, the adapter and the approved canon
+  (`canon.json`, `canon.lock.json`, `canon.history.json`) can then be committed and reviewed with
+  the project instead of living in a separate directory or repository. A workspace equal to the
+  project root, or one that contains the project, is still refused.
+- `scaffold.py` writes `R/.gitignore` when the workspace has none. It keeps only those decision
+  files in git; run state, the ledger and the adapter acceptance record stay local to one checkout,
+  so a new checkout runs adapter acceptance again. `references/state.md` lists which file is which.
+- `collect` is refused when the adapter lists a file that resolves inside the workspace, also
+  through a symlinked directory. The workspace holds export backups and staged copies of the
+  project's catalogs. The coverage inventory leaves the workspace out, and the coverage prompt says
+  its files are not the project's text.
+- The documented codex translation command passes `-c project_doc_max_bytes=0`, so a project's own
+  `AGENTS.md` does not reach the translation turn when the batch directory is inside the project's
+  repository.
+
 ## [software-localizer 0.3.0] — 2026-10-24
 
 ### Added

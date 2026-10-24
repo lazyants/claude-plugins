@@ -240,7 +240,10 @@ def _check_parse_sanity(root: str, cfg: dict, project_dir: Path, messages: dict)
     return {"ok": not source_failures, "source_failures": source_failures, "target_failures": target_failures}
 
 
-def _project_inventory(project_dir: Path) -> list[str]:
+def _project_inventory(project_dir: Path, exclude: str | None) -> list[str]:
+    """List the project's files, leaving out `exclude` and everything under
+    it: a project-relative posix path, the workspace when it sits inside the
+    project."""
     # A project can be a subdirectory of a larger git checkout without a
     # `.git` entry of its own (a monorepo layout); detect the ENCLOSING
     # work tree, not just a local `.git`, or the tracked-plus-unignored
@@ -260,14 +263,16 @@ def _project_inventory(project_dir: Path) -> list[str]:
 
     if in_work_tree:
         try:
+            # NUL-separated: in newline mode git C-quotes a non-ASCII path, which is
+            # neither the real file name nor comparable to `exclude`.
             proc = subprocess.run(
-                ["git", "-C", str(project_dir), "ls-files", "--cached", "--others", "--exclude-standard"],
+                ["git", "-C", str(project_dir), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
             if proc.returncode == 0:
-                return sorted({line for line in proc.stdout.splitlines() if line})
+                return sorted({p for p in proc.stdout.split("\0") if p and not lz_common.path_within(p, exclude)})
         except (OSError, subprocess.SubprocessError):
             pass  # fall through to the directory walk
 
@@ -276,23 +281,26 @@ def _project_inventory(project_dir: Path) -> list[str]:
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for name in filenames:
             rel = os.path.relpath(os.path.join(dirpath, name), project_dir)
-            paths.append(rel.replace(os.sep, "/"))
+            rel = rel.replace(os.sep, "/")
+            if not lz_common.path_within(rel, exclude):
+                paths.append(rel)
     return sorted(paths)
 
 
-def _build_coverage_packet(project_dir: Path, messages: dict, run_id: str, coverage_dir: Path) -> dict:
+def _build_coverage_packet(root: Path, project_dir: Path, messages: dict, run_id: str, coverage_dir: Path) -> dict:
     ids_by_file: dict[str, list[str]] = {}
     for message in messages["messages"]:
         f = message["context"]["file"]
         ids_by_file.setdefault(f, []).append(message["id"])
     files = [{"file": path, "ids": sorted(ids)} for path, ids in sorted(ids_by_file.items())]
-    inventory = _project_inventory(project_dir)
+    inventory = _project_inventory(project_dir, exclude=lz_common.workspace_relpath(root, project_dir))
     inventory_path = coverage_dir / "inventory.txt"
     lz_common.atomic_write_text(inventory_path, "".join(path + "\n" for path in inventory))
     return {
         "schema": 1,
         "run_id": run_id,
         "project_root": str(project_dir),
+        "workspace_root": str(root),
         "files": files,
         "inventory": {"path": str(inventory_path), "line_count": len(inventory)},
     }
@@ -361,7 +369,7 @@ def cmd_run(args) -> int:
         lz_common.atomic_write_json(root / lz_common.ADAPTER_CHECK_RESULT, check_result)
 
         coverage_dir = root / "runs" / COVERAGE_DIR_NAME
-        packet = _build_coverage_packet(project_dir, live_messages, run_id, coverage_dir)
+        packet = _build_coverage_packet(root, project_dir, live_messages, run_id, coverage_dir)
         lz_common.atomic_write_json(coverage_dir / "packet.json", packet)
         plugin_root = Path(__file__).resolve().parent.parent
         _write_coverage_prompt(plugin_root, coverage_dir, packet)
