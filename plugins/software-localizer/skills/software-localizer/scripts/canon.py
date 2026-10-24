@@ -34,9 +34,30 @@ an active do-not-translate rule the moment someone runs `freeze` (security-
 review observation). `R/canon.history.json` is an append-only record of
 every approval and change (who, when, before, after).
 
-`load_lock` is the only function other owners import directly (`packets.py`
-builds packets from it; `ledger.py`'s CLI passes it into `sync`); `import`,
-`approve`, `freeze` and `change` are reached through the CLI.
+`R/canon.research/<locale>.json` holds the usage-research evidence for that
+locale's entries (one file per locale, so parallel per-locale loops never
+write the same file):
+
+    {"schema": 1, "locale": "de", "entries": {"t-cart": {
+        "kind": "term", "source": "Cart",
+        "research": {"recommendation", "confidence", "note",
+                     "findings": [{"site", "url", "rendering", "quote"}]},
+        "research_sha256": "...", "researched": {"run", "at"},
+        "verification": None | {"research_sha256", "findings":
+            [{"index", "confirmed", "detail"}], "verdict", "problems",
+            "better", "run", "at"}}}}
+
+Only `packets.py accept` of a research or research_verify run writes it.
+Nothing hashes it and `freeze` never reads it: evidence for a person's
+decision, never an input to a candidate, a check or the lock. `approve`
+copies `research_summary` of the entry's record into its history event.
+
+`load_lock` (`packets.py` builds packets from it; `ledger.py`'s CLI passes
+it into `sync`) and the research helpers (`load_research`, `save_research`,
+`research_sha256`, `research_summary`, `research_flags`; used by
+`packets.py` and `report.py`) are the functions other owners import
+directly; `import`, `approve`, `freeze` and `change` are reached through the
+CLI.
 """
 
 from __future__ import annotations
@@ -83,6 +104,71 @@ def _append_history(root, event: dict) -> None:
     history = load_history(root)
     history["events"].append(event)
     lz_common.atomic_write_json(Path(root) / "canon.history.json", history)
+
+
+# ---------------------------------------------------------------------------
+# usage-research evidence (see the module docstring)
+# ---------------------------------------------------------------------------
+
+RESEARCH_DIR_NAME = "canon.research"
+RESEARCH_CONFIDENCE = ("high", "medium", "low")
+RESEARCH_VERDICTS = ("holds", "weak", "refuted")
+
+
+def research_path(root, locale: str) -> Path:
+    return Path(root) / RESEARCH_DIR_NAME / f"{locale}.json"
+
+
+def load_research(root, locale: str) -> dict:
+    return _read_or_default(
+        research_path(root, locale), f"canon research ({locale})",
+        {"schema": 1, "locale": locale, "entries": {}},
+    )
+
+
+def save_research(root, locale: str, data: dict) -> None:
+    lz_common.atomic_write_json(research_path(root, locale), data)
+
+
+def research_sha256(research: dict) -> str:
+    """The hash a verification verdict binds to: a re-researched entry gets a
+    new one, so a verdict cast on the old research never attaches to it."""
+    return lz_common.sha256_json(research)
+
+
+def research_summary(record: dict) -> dict:
+    """The short view of one entry's evidence a person sees beside the
+    proposal. `confirmed`, `verdict` and `better` stay `None` until the
+    research has been verified."""
+    research = record.get("research") or {}
+    verification = record.get("verification")
+    summary = {
+        "recommendation": research.get("recommendation"),
+        "confidence": research.get("confidence"),
+        "findings": len(research.get("findings") or []),
+        "confirmed": None, "verdict": None, "better": None,
+    }
+    if verification:
+        summary["confirmed"] = sum(1 for f in verification.get("findings") or [] if f.get("confirmed") is True)
+        summary["verdict"] = verification.get("verdict")
+        summary["better"] = verification.get("better") or None
+    return summary
+
+
+def research_flags(record: dict) -> list:
+    """Why a native speaker should check this entry: empty when the research
+    was verified, holds, is not low-confidence and has a confirmed source."""
+    summary = research_summary(record)
+    flags = []
+    if summary["verdict"] is None:
+        flags.append("not verified")
+    elif summary["verdict"] != "holds":
+        flags.append(f"verdict {summary['verdict']}")
+    if summary["confidence"] == "low":
+        flags.append("low confidence")
+    if summary["verdict"] is not None and summary["confirmed"] == 0:
+        flags.append("no confirmed source")
+    return flags
 
 
 # ---------------------------------------------------------------------------
@@ -288,11 +374,18 @@ def approve(root, canon: dict, entry_id: str, locale: str | None, value: str | N
     entry["translations"][locale] = {
         "value": final_value, "status": "approved", "approved_by": by, "approved_at": at,
     }
-    _append_history(root, {
+    event = {
         "at": at, "by": by, "action": "approve", "entry": entry_id, "locale": locale,
         "before": before_value, "after": final_value,
-    })
-    return {"entry": entry_id, "locale": locale, "value": final_value}
+    }
+    result = {"entry": entry_id, "locale": locale, "value": final_value}
+    # Evidence the person decided with, recorded beside the decision; it
+    # never refuses an approval, whatever the research recommended.
+    record = load_research(root, locale)["entries"].get(entry_id)
+    if record is not None:
+        event["research"] = result["research"] = research_summary(record)
+    _append_history(root, event)
+    return result
 
 
 # ---------------------------------------------------------------------------
