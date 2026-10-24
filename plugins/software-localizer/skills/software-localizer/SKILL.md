@@ -28,7 +28,7 @@ what it names), or `2` (cannot run). The workspace `R` is a directory **outside*
 References: `references/adapter-contract.md` (what an adapter must do),
 `references/checks.md` (what scripts check and what the review judges),
 `references/project-checks.md` (project tests before approval and export),
-`references/state.md` (ledger states, export safety, recovery).
+`references/state.md` (ledger states, canon research evidence, export safety, recovery).
 
 `packets.py build` returns each batch's `dir`: use that path for the model turn, its answer and
 `packets.py accept --run`. Batches live in `R/runs/<locale>/_packets/<kind>/<batch>` (canon uses
@@ -66,6 +66,10 @@ python3 S/scaffold.py --root R
 ```
 
 Ask the operator which strings are in scope (UI only? emails? docs?) and where they live.
+Ask which target languages they — or a native speaker on the team — can judge. For the others
+the canon gets usage research before approval (step 4): record the project's field and any
+reference sites the operator trusts per locale in `localize.json`'s optional `research` block,
+`{"field": "genealogy and DNA research web app", "sites": {"de": ["wiki.genealogy.net"]}}`.
 Identify the project's own i18n checks and test commands from its instructions and CI; record
 their prerequisites and run an unchanged baseline in a scratch copy. Keep the commands and
 results in `R/project-checks/` ([procedure](references/project-checks.md)).
@@ -139,10 +143,43 @@ python3 S/packets.py accept --root R --run <run dir> --output <answer.json>
 python3 S/canon.py import --root R --file <run dir>/candidates.json
 ```
 
+**Usage research.** A proposal comes only from the project's own strings. Before the operator
+approves a term in a language they cannot judge, find out how established products and
+communities in the project's field name it there. Per locale:
+
+```bash
+python3 S/packets.py build --root R --kind research --locale L [--entry ID …]
+# one Claude subagent per batch, with web search and page fetch: prompt.md, JSON only, save
+python3 S/packets.py accept --root R --run <batch dir> --output <answer.json>
+python3 S/packets.py build --root R --kind research_verify --locale L
+# a DIFFERENT subagent per batch, never the one that researched it: prompt.md, JSON only, save
+python3 S/packets.py accept --root R --run <batch dir> --output <answer.json>
+```
+
+By default `research` takes every term and UI label not yet approved in `L` that has no
+research; agree the scope with the operator first and narrow it to the core list with `--entry`
+(repeatable; naming an entry also re-researches it, which discards its old verification).
+Batches hold 8 terms. The research turn cites a site, URL, rendering and verbatim quote per
+source and gives a recommendation, a confidence and a note per term; the verification turn
+re-opens every source, marks each confirmed or not, and tries to refute the recommendation
+(`holds`, `weak` or `refuted`, with a better rendering if it has one). An unconfirmed source
+is not evidence. The evidence is kept in `R/canon.research/<L>.json`, next to the canon
+([state](references/state.md#canon-research-evidence)); accept a locale's batches one at a
+time. Expect gaps: some sites block automated fetches (their quotes cannot be confirmed), the
+web-search budget can run out mid-batch, and a concept that exists only in this product has no
+outside evidence — it gets low confidence and says so. Both turns read untrusted web pages, so
+give their subagents web search and page fetch only, no file or shell tools; the session saves
+each answer itself.
+
 Show the operator the proposals — **a short core list**: product terms, UI labels that other
 messages refer to, do-not-translate names. In audit mode the proposals also show every current
-rendering side by side, which is where inconsistent terms surface. Approve what the operator
-confirms, then freeze:
+rendering side by side, which is where inconsistent terms surface. Where research exists, show
+each proposal with its recommendation, confidence, verdict and the confirmed sources (site, URL,
+quote); `report.py --locale L` lists the terms a native speaker should still check (low
+confidence, unverified, `weak`/`refuted`, or no confirmed source). The research only informs:
+the operator may approve the proposal, the recommendation or another value, and `approve`
+records the research summary beside the decision in `canon.history.json`. Approve what the
+operator confirms, then freeze:
 
 ```bash
 python3 S/canon.py approve --root R --entry ID --locale L [--value V] --by "<operator>"

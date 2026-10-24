@@ -13,6 +13,10 @@
     "ru": {"formality": "вы", "notes": "Polite form; prefer an established Russian term over an anglicism."}
   },
   "allow_identical": [],
+  "research": {
+    "field": "genealogy and DNA research web app",
+    "sites": {"de": ["wiki.genealogy.net", "https://www.myheritage.de"]}
+  },
   "batch_size": 40,
   "max_rounds": 3,
   "adapter_timeout_s": 300

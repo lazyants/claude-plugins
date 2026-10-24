@@ -293,6 +293,37 @@ def test_validate_config_refuses_project_root_containing_workspace_root(work_roo
     assert any(p["field"] == "project_root" for p in problems)
 
 
+def test_validate_config_accepts_an_absent_or_valid_research_block(work_root, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(work_root, project)
+    assert "research" not in cfg
+    assert lz_common.validate_config(cfg, work_root) == []
+    cfg["research"] = {"field": "genealogy web app", "sites": {"de": ["wiki.genealogy.net", "https://example.de"]}}
+    assert lz_common.validate_config(cfg, work_root) == []
+    cfg["research"] = {}  # both parts are optional
+    assert lz_common.validate_config(cfg, work_root) == []
+
+
+@pytest.mark.parametrize("research, field", [
+    ("not an object", "research"),
+    ({"field": ""}, "research.field"),
+    ({"field": 3}, "research.field"),
+    ({"sites": ["de"]}, "research.sites"),
+    ({"sites": {"fr": ["example.fr"]}}, "research.sites.fr"),
+    ({"sites": {"de": "example.de"}}, "research.sites.de"),
+    ({"sites": {"de": ["example.de", ""]}}, "research.sites.de"),
+    ({"sites": {"de": [3]}}, "research.sites.de"),
+])
+def test_validate_config_refuses_a_malformed_research_block(work_root, tmp_path, research, field):
+    project = tmp_path / "project"
+    project.mkdir()
+    cfg = _valid_config(work_root, project)
+    cfg["research"] = research
+    problems = lz_common.validate_config(cfg, work_root)
+    assert [p["field"] for p in problems] == [field]
+
+
 def test_validate_config_refuses_source_locale_among_targets(work_root, tmp_path):
     project = tmp_path / "project"
     project.mkdir()

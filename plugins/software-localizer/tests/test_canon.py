@@ -304,6 +304,123 @@ def test_approve_appends_to_history(work_root):
     assert events[0]["after"] == "Warenkorb"
 
 
+def make_research_record(confidence="high", verdict=None, confirmed=(), findings=1, better=""):
+    """A research record shaped as `packets.py accept` stores it. `verdict`
+    None leaves it unverified; otherwise `confirmed` lists one bool per
+    finding."""
+    research = {
+        "recommendation": "Warenkorb", "confidence": confidence, "note": "n",
+        "findings": [
+            {"site": f"s{i}", "url": f"https://example.org/{i}", "rendering": "Warenkorb", "quote": "q"}
+            for i in range(findings)
+        ],
+    }
+    verification = None
+    if verdict is not None:
+        verification = {
+            "research_sha256": canon.research_sha256(research),
+            "findings": [{"index": i, "confirmed": c, "detail": "d"} for i, c in enumerate(confirmed)],
+            "verdict": verdict, "problems": "", "better": better, "run": "r", "at": "2026-01-01T00:00:00Z",
+        }
+    return {
+        "kind": "term", "source": "Cart", "research": research,
+        "research_sha256": canon.research_sha256(research),
+        "researched": {"run": "r", "at": "2026-01-01T00:00:00Z"}, "verification": verification,
+    }
+
+
+def save_research_record(root, record, entry_id="t-cart", locale="de"):
+    data = canon.load_research(root, locale)
+    data["entries"][entry_id] = record
+    canon.save_research(root, locale, data)
+
+
+def test_approve_with_a_verified_research_record_adds_the_summary(work_root):
+    save_research_record(work_root, make_research_record(
+        verdict="weak", confirmed=[True, False, False], findings=3, better="Einkaufswagen"))
+    canon_data = {"schema": 1, "entries": [make_entry(translations={"de": proposed("Warenkorb")})]}
+    result = canon.approve(work_root, canon_data, "t-cart", "de", None, "alice")
+    expected = {"recommendation": "Warenkorb", "confidence": "high", "findings": 3,
+                "confirmed": 1, "verdict": "weak", "better": "Einkaufswagen"}
+    assert result["research"] == expected
+    assert canon.load_history(work_root)["events"][0]["research"] == expected
+
+
+def test_approve_with_an_unverified_research_record_adds_a_summary_with_none_fields(work_root):
+    save_research_record(work_root, make_research_record())
+    canon_data = {"schema": 1, "entries": [make_entry(translations={"de": proposed("Warenkorb")})]}
+    result = canon.approve(work_root, canon_data, "t-cart", "de", None, "alice")
+    assert result["research"]["confirmed"] is None
+    assert result["research"]["verdict"] is None
+    assert canon.load_history(work_root)["events"][0]["research"] == result["research"]
+
+
+def test_approve_never_refuses_a_refuted_recommendation(work_root):
+    save_research_record(work_root, make_research_record(verdict="refuted", confirmed=[False]))
+    canon_data = {"schema": 1, "entries": [make_entry(translations={"de": proposed("Warenkorb")})]}
+    canon.approve(work_root, canon_data, "t-cart", "de", None, "alice")
+    assert canon_data["entries"][0]["translations"]["de"]["status"] == "approved"
+
+
+def test_approve_without_a_research_record_adds_no_research_key(work_root):
+    # A record for ANOTHER entry and for ANOTHER locale must not leak in.
+    save_research_record(work_root, make_research_record(), entry_id="t-other")
+    save_research_record(work_root, make_research_record(), locale="ru")
+    canon_data = {"schema": 1, "entries": [make_entry(translations={"de": proposed("Warenkorb")})]}
+    result = canon.approve(work_root, canon_data, "t-cart", "de", None, "alice")
+    assert "research" not in result
+    assert "research" not in canon.load_history(work_root)["events"][0]
+
+
+# --- research_summary / research_flags -------------------------------------
+
+
+def test_research_flags_unverified():
+    assert canon.research_flags(make_research_record()) == ["not verified"]
+
+
+@pytest.mark.parametrize("verdict, flag", [("weak", "verdict weak"), ("refuted", "verdict refuted")])
+def test_research_flags_a_verdict_other_than_holds(verdict, flag):
+    record = make_research_record(verdict=verdict, confirmed=[True])
+    assert canon.research_flags(record) == [flag]
+
+
+def test_research_flags_low_confidence():
+    record = make_research_record(confidence="low", verdict="holds", confirmed=[True])
+    assert canon.research_flags(record) == ["low confidence"]
+
+
+def test_research_flags_a_verified_record_with_zero_confirmed_findings():
+    record = make_research_record(verdict="holds", confirmed=[False, False], findings=2)
+    assert canon.research_flags(record) == ["no confirmed source"]
+
+
+def test_research_flags_a_verified_record_with_no_findings_at_all():
+    record = make_research_record(confidence="low", verdict="holds", confirmed=[], findings=0)
+    assert canon.research_flags(record) == ["low confidence", "no confirmed source"]
+
+
+def test_research_flags_collects_every_reason():
+    record = make_research_record(confidence="low", verdict="refuted", confirmed=[False])
+    assert canon.research_flags(record) == ["verdict refuted", "low confidence", "no confirmed source"]
+
+
+def test_research_flags_empty_for_a_clean_record():
+    record = make_research_record(confidence="high", verdict="holds", confirmed=[True, False], findings=2)
+    assert canon.research_flags(record) == []
+    summary = canon.research_summary(record)
+    assert summary["confirmed"] == 1
+    assert summary["findings"] == 2
+    assert summary["better"] is None  # an empty `better` is reported as None
+
+
+def test_research_summary_of_an_unverified_record():
+    assert canon.research_summary(make_research_record(findings=2)) == {
+        "recommendation": "Warenkorb", "confidence": "high", "findings": 2,
+        "confirmed": None, "verdict": None, "better": None,
+    }
+
+
 # --- freeze ----------------------------------------------------------------
 
 
@@ -380,6 +497,25 @@ def test_freeze_writes_canon_lock_json(work_root):
     canon.freeze(work_root)
     on_disk = json.loads((work_root / "canon.lock.json").read_text(encoding="utf-8"))
     assert on_disk == canon.load_lock(work_root)
+
+
+def test_freeze_output_is_byte_identical_with_and_without_a_research_file(work_root):
+    canon_data = {"schema": 1, "entries": [
+        make_entry(entry_id="t-cart", translations={"de": approved("Warenkorb")}),
+        make_entry(entry_id="d-brand", kind="dnt", source="Kinprove"),
+    ]}
+    canon_data["entries"][1]["approved_by"] = "alice"
+    canon_data["entries"][1]["approved_at"] = "2026-01-01T00:00:00Z"
+    canon.save(work_root, canon_data)
+
+    canon.freeze(work_root)
+    lock_path = work_root / "canon.lock.json"
+    without_research = lock_path.read_bytes()
+    assert canon.load_lock(work_root)["entries"], "the lock must be non-empty for this comparison to bite"
+
+    save_research_record(work_root, make_research_record(verdict="weak", confirmed=[False]))
+    canon.freeze(work_root)
+    assert lock_path.read_bytes() == without_research
 
 
 # --- change ------------------------------------------------------------
