@@ -58,8 +58,11 @@ refusal replies `{"ok": false, "error": "…"}` with exit code 1.
   **`collect` and `export` must work in a directory that holds only these files** (at their
   relative paths): acceptance and every export run them in such a staged copy, never in a copy
   of the whole project. Anything else the adapter needs — the project's compiler, `node_modules`,
-  a PHP binary — is reached by absolute path, e.g. through `adapter.options`. `parse` always runs
-  in the live project root (it only reads).
+  a PHP binary — is reached by absolute path, e.g. through `adapter.options`, or by a path the
+  adapter computes from its own file's location, which also works in other checkouts. `parse`
+  always runs in the live project root (it only reads). Never read or list a file inside the
+  workspace `R`: it may sit inside the project and holds copies of the project's catalogs (export
+  backups, staged copies). `collect` is refused when `files` names one.
 - `targets` — one entry per target locale; `null` when the project has no translation yet.
 - Values are carried **exactly**: leading and trailing spaces included.
 - `plural` — only for plural messages. `target_labels` must cover every target locale, in the

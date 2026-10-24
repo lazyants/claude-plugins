@@ -8,6 +8,10 @@ read it in portions until you have examined the full list. Find user-visible, tr
 the adapter **missed**. You may read the inventory file and any file under `project_root`; you
 return data only: do not create, edit or delete any file.
 
+The packet's `workspace_root` is the localization tool's own directory: its term canon, adapter and
+run files. It may sit under `project_root`. It is not the project's UI text and it is not in the
+inventory. Never report a file under it.
+
 Check:
 
 1. In each file the adapter reads: any string a user would see that is not among the collected

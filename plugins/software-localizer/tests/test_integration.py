@@ -75,30 +75,48 @@ def write_json(path: Path, obj) -> None:
 # --- seam steps ----------------------------------------------------------
 
 
-def drive_to_ledger_sync(work_root: Path, target_locales=("de", "ru"), after_copy=None):
+def drive_to_ledger_sync(work_root: Path, target_locales=("de", "ru"), after_copy=None,
+                         workspace_in_project=False):
     """Every step common to the happy path and every failure case: a fresh
     workspace, a writable copy of the fixture project, an accepted adapter,
     one collect, one ledger sync. Returns `(root, project_dir)`. `after_copy`,
     when given, is called with the writable `project_dir` right after it is
     copied and before scaffold/collect run -- a test mutates its OWN copy
     there (e.g. to make an otherwise-`existing` message `pending`), never the
-    shared fixture under `tests/fixtures/toy_project`."""
+    shared fixture under `tests/fixtures/toy_project`. `workspace_in_project`
+    puts the workspace at `<project>/localization` inside a git repository of
+    the project, with the adapter copied under it (#1009)."""
     project_dir = work_root / "project"
     shutil.copytree(FIXTURES_DIR / "toy_project", project_dir)
     if after_copy is not None:
         after_copy(project_dir)
     root = work_root / "R"
+    if workspace_in_project:
+        git_identity = ["-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run(["git", "init", "-q", str(project_dir)], check=True, timeout=30)
+        subprocess.run(["git", "-C", str(project_dir), "add", "-A"], check=True, timeout=30)
+        subprocess.run(["git", "-C", str(project_dir), *git_identity, "commit", "-q", "-m", "toy project"], check=True, timeout=30)
+        root = project_dir / "localization"
 
     expect_ok("scaffold.py", ["--root", str(root)])
 
-    cfg = read_json(root / "localize.json")
-    cfg.update({
-        "project_root": str(project_dir), "source_locale": "en", "target_locales": list(target_locales),
-        "adapter": {
+    if workspace_in_project:
+        (root / "adapter").mkdir()
+        shutil.copyfile(FIXTURES_DIR / "toy_adapter.py", root / "adapter" / "adapter.py")
+        adapter_cfg = {"argv": [sys.executable, "adapter/adapter.py"], "options": dict(TOY_OPTIONS)}
+        project_root = ".."
+    else:
+        adapter_cfg = {
             "argv": [sys.executable, str(FIXTURES_DIR / "toy_adapter.py")],
             "code_dir": str(FIXTURES_DIR),  # the shared fixture script lives here
             "options": dict(TOY_OPTIONS),
-        },
+        }
+        project_root = str(project_dir)
+
+    cfg = read_json(root / "localize.json")
+    cfg.update({
+        "project_root": project_root, "source_locale": "en", "target_locales": list(target_locales),
+        "adapter": adapter_cfg,
         "style": {loc: {"formality": "Sie" if loc == "de" else "вы", "notes": "concise"} for loc in target_locales},
     })
     write_json(root / "localize.json", cfg)
@@ -256,6 +274,26 @@ def test_seam_happy_path(work_root):
     do_review(root)
     do_export(root, project_dir)
     do_audit_and_report(root)
+
+
+def test_seam_workspace_inside_a_git_project_commits_only_the_decisions(work_root):
+    """#1009: with the workspace at `<project>/localization`, the project's git
+    status shows the exported locale file and the durable decisions, never a
+    run-state file."""
+    root, project_dir = drive_to_ledger_sync(work_root, workspace_in_project=True)
+    do_canon(root)
+    do_translate(root)
+    do_review(root)
+    do_export(root, project_dir)
+    do_audit_and_report(root)
+
+    status = subprocess.run(
+        ["git", "-C", str(project_dir), "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    durable = [".gitignore", "localize.json", "adapter/adapter.py", "canon.json", "canon.lock.json",
+               "canon.history.json"]
+    assert set(status) == {" M locales/de.json", *(f"?? localization/{rel}" for rel in durable)}, status
 
 
 @pytest.mark.parametrize("kind", ["translate", "audit"])

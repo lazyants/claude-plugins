@@ -66,8 +66,9 @@ def _write_adapter(root: Path, body: str) -> None:
     (root / "adapter.py").write_text(header + "\n" + textwrap.dedent(body) + "\n" + footer, encoding="utf-8")
 
 
-def _cfg(argv=("python3", "adapter.py"), timeout=5, options=None):
+def _cfg(argv=("python3", "adapter.py"), timeout=5, options=None, project_root="/lz-test-no-such-project"):
     return {
+        "project_root": project_root,
         "adapter": {"argv": list(argv), "options": options or {}},
         "adapter_timeout_s": timeout,
         "source_locale": "en",
@@ -743,3 +744,112 @@ def test_parse_fails_when_a_requested_key_is_missing_from_results(work_root, pro
             [{"key": "k1", "text": "Hi"}, {"key": "k2", "text": "Bye"}],
         )
     assert "k2" in str(exc_info.value)
+
+
+def test_collect_refuses_a_declared_file_inside_a_workspace_inside_the_project(work_root, project_dir, capsys):
+    # The workspace holds byte copies of the project's catalogs (export
+    # backups, staged copies); a declared file under it is refused before
+    # out_path is touched.
+    workspace = project_dir / "localization"
+    workspace.mkdir()
+    leaked = "localization/exports/20260101/backup/project/en.json"
+    messages = {
+        "schema": 1,
+        "files": ["locales/en.json", leaked],
+        "messages": [
+            {
+                "id": "m1",
+                "source": "Hi",
+                "context": {"file": "locales/en.json", "key": "m1", "max_length": None, "comment": None},
+                "targets": {"de": None},
+            }
+        ],
+    }
+    _write_adapter(workspace, f"""
+        from pathlib import Path
+        def cmd_collect(args):
+            Path(args.out).write_text({json.dumps(json.dumps(messages))})
+            emit({{"ok": True}})
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            pass
+    """)
+    out_path = workspace / "messages.json"
+    out_path.write_text(json.dumps(VALID_MESSAGES), encoding="utf-8")
+    before = out_path.read_bytes()
+
+    cfg = _cfg(project_root=str(project_dir))
+    with pytest.raises(SystemExit) as exc_info:
+        adapter_client.collect(str(workspace), cfg, str(project_dir), str(out_path))
+
+    assert exc_info.value.code == 1  # EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert payload["ok"] is False
+    assert leaked in payload["error"]
+    assert out_path.read_bytes() == before
+
+
+def _inside_project_messages(declared: str) -> dict:
+    return {
+        "schema": 1,
+        "files": ["locales/en.json", declared],
+        "messages": [
+            {
+                "id": "m1",
+                "source": "Hi",
+                "context": {"file": "locales/en.json", "key": "m1", "max_length": None, "comment": None},
+                "targets": {"de": None},
+            }
+        ],
+    }
+
+
+def _write_collect_adapter(workspace: Path, messages: dict) -> None:
+    _write_adapter(workspace, f"""
+        from pathlib import Path
+        def cmd_collect(args):
+            Path(args.out).write_text({json.dumps(json.dumps(messages))})
+            emit({{"ok": True}})
+        def cmd_export(args):
+            pass
+        def cmd_parse(args):
+            pass
+    """)
+
+
+def test_collect_refuses_a_declared_file_reached_through_a_symlink_into_the_workspace(project_dir, capsys):
+    # <project>/catalogs is a symlink to localization/catalogs: the declared
+    # path does not start with the workspace name, but it resolves inside it.
+    workspace = project_dir / "localization"
+    (workspace / "catalogs").mkdir(parents=True)
+    os.symlink("localization/catalogs", project_dir / "catalogs")
+    _write_collect_adapter(workspace, _inside_project_messages("catalogs/en.json"))
+    out_path = workspace / "messages.json"
+    out_path.write_text(json.dumps(VALID_MESSAGES), encoding="utf-8")
+    before = out_path.read_bytes()
+
+    cfg = _cfg(project_root=str(project_dir))
+    with pytest.raises(SystemExit) as exc_info:
+        adapter_client.collect(str(workspace), cfg, str(project_dir), str(out_path))
+
+    assert exc_info.value.code == 1  # EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert payload["ok"] is False
+    assert "catalogs/en.json" in payload["error"]
+    assert out_path.read_bytes() == before
+
+
+def test_collect_accepts_an_ordinary_declared_file_with_the_workspace_inside_the_project(project_dir):
+    workspace = project_dir / "localization"
+    workspace.mkdir()
+    (project_dir / "locales").mkdir()
+    messages = _inside_project_messages("locales/de.json")
+    _write_collect_adapter(workspace, messages)
+    out_path = workspace / "messages.json"
+
+    cfg = _cfg(project_root=str(project_dir))
+    result = adapter_client.collect(str(workspace), cfg, str(project_dir), str(out_path))
+
+    assert result == messages
+    assert json.loads(out_path.read_text()) == messages

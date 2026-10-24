@@ -22,6 +22,9 @@ native speaker.
 - **Safety.** A person's translation is never overwritten; nothing is exported without script
   checks and a review verdict bound to the exact value; export re-collects, compares, and writes
   under a journal that rolls back on failure.
+- **Workspace.** The workspace can sit outside the project or inside it (for example
+  `<project>/localization`). Inside, the config, the adapter and the approved canon are committed
+  with the project; a generated `.gitignore` keeps run state out of git.
 
 The procedure is in `skills/software-localizer/SKILL.md`. Scripts are stdlib-only Python ≥ 3.11.
 

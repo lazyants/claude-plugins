@@ -254,6 +254,26 @@ def _locale_ok(value) -> bool:
     return isinstance(value, str) and _LOCALE_RE.match(value) is not None
 
 
+def workspace_relpath(root, project_root) -> str | None:
+    """The posix path of workspace `root` relative to `project_root`, or
+    None unless `root` is STRICTLY inside it (equal, outside, or the project
+    inside the workspace all give None). Used where a workspace inside the
+    project must be kept apart from the project's own files: `collect`
+    refuses a declared file under it, and the coverage inventory leaves it
+    out."""
+    try:
+        rel = Path(root).resolve().relative_to(Path(project_root).resolve())
+    except ValueError:
+        return None
+    return rel.as_posix() if rel.parts else None
+
+
+def path_within(path: str, prefix: str | None) -> bool:
+    """True when the posix project-relative `path` equals `prefix` or sits
+    under it; always False when `prefix` is None."""
+    return prefix is not None and (path == prefix or path.startswith(prefix + "/"))
+
+
 def validate_config(cfg, root) -> list:
     """Every problem with `cfg` (`localize.json`'s already-parsed content).
     Never raises or exits: reports every problem found, at once, as
@@ -300,7 +320,12 @@ def validate_config(cfg, root) -> list:
                 problems.append({"field": "target_locales", "message": "source_locale must not also be a target locale"})
 
     # project_root: a relative value resolves against R, the same convention
-    # `adapter.argv` uses, and must not equal, sit inside, or contain R.
+    # `adapter.argv` uses. R may sit INSIDE the project (e.g. `<project>/
+    # localization` with project_root ".."): its durable files are then
+    # committed in the project's own repository. Two refusals stay: equal
+    # roots (the workspace's run files and the project's catalogs would be
+    # one directory) and a project inside R (R's own directories -- exports,
+    # temporary copies -- would be project files the adapter may collect).
     project_root = cfg.get("project_root")
     if not _is_choose(project_root):
         if not isinstance(project_root, str) or not project_root:
@@ -310,26 +335,11 @@ def validate_config(cfg, root) -> list:
             p_resolved = p.resolve()
             if not p_resolved.is_dir():
                 problems.append({"field": "project_root", "message": f"project_root does not exist: {project_root}"})
-            else:
-                root_resolved = root.resolve()
-                overlap = p_resolved == root_resolved
-                if not overlap:
-                    try:
-                        p_resolved.relative_to(root_resolved)
-                        overlap = True
-                    except ValueError:
-                        pass
-                if not overlap:
-                    try:
-                        root_resolved.relative_to(p_resolved)
-                        overlap = True
-                    except ValueError:
-                        pass
-                if overlap:
-                    problems.append({
-                        "field": "project_root",
-                        "message": "project_root must not equal, sit inside, or contain the workspace root",
-                    })
+            elif p_resolved.is_relative_to(root.resolve()):
+                problems.append({
+                    "field": "project_root",
+                    "message": "project_root must not equal or sit inside the workspace root",
+                })
 
     # style: exactly one entry per target locale, each with a formality.
     style = cfg.get("style")

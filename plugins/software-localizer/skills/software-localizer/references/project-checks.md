@@ -14,8 +14,9 @@ catalog and code changes; a checkout of HEAD alone does not reproduce a dirty pr
 Include the code, tests and configuration those commands need, not just the adapter's declared
 catalogs. Install dependencies by the project's normal method. Catalogs and any other writable
 inputs must be independent copies, never symlinks or hard links to the live project. Keep test
-outputs and other writes in scratch too. Any new Git worktree must follow the host's worktree
-location rules.
+outputs and other writes in scratch too. When the workspace `R` sits inside the project, leave it
+out of every scratch copy: it holds export backups and journals with live absolute paths. Any new
+Git worktree must follow the host's worktree location rules.
 
 Run the commands before applying values. Save the baseline output and exit codes under
 `R/project-checks/`. If required checks are absent or cannot run, report what is missing and

@@ -189,6 +189,58 @@ def test_run_passes_on_the_unmodified_fixture(work_root):
     assert '"app.title"' in prompt
 
 
+def _make_inner_workspace(work_root: Path, name: str, *, project_git: bool):
+    """A workspace INSIDE its project: `<project>/<name>` holds `localize.json`
+    (project_root ".."), the toy adapter under `adapter/`, and returns
+    `(root, project_dir)`. The project lives in an OS temp dir for the reason
+    `_make_workspace` documents."""
+    project_dir = Path(tempfile.mkdtemp(prefix="lz-swloc-project-")).resolve()
+    atexit.register(shutil.rmtree, project_dir, ignore_errors=True)
+    shutil.copytree(TOY_PROJECT, project_dir, dirs_exist_ok=True)
+    root = project_dir / name
+    (root / "adapter").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(TOY_ADAPTER, root / "adapter" / "adapter.py")
+    _, _, cfg = _make_workspace(work_root)
+    cfg["project_root"] = ".."
+    lz_common.atomic_write_json(root / "localize.json", cfg)
+    if project_git:
+        subprocess.run(["git", "init", "-q"], cwd=str(project_dir), check=True, timeout=30)
+    return root, project_dir
+
+
+@pytest.mark.parametrize("project_git", [True, False], ids=["git-project", "plain-walk"])
+def test_run_leaves_a_workspace_inside_the_project_out_of_the_inventory(work_root, project_git):
+    root, project_dir = _make_inner_workspace(work_root, "localización", project_git=project_git)
+    lz_common.atomic_write_json(root / "canon.json", {"schema": 1})
+    (root / "runs").mkdir(exist_ok=True)
+    (root / "runs" / "state.json").write_text("{}", encoding="utf-8")
+
+    code, reply = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+
+    assert code == 0, reply
+    packet = json.loads((root / "runs" / "_coverage" / "packet.json").read_text(encoding="utf-8"))
+    assert packet["workspace_root"] == str(root)
+    inventory = Path(packet["inventory"]["path"]).read_text(encoding="utf-8").splitlines()
+    assert "locales/en.json" in inventory
+    # A substring, not a prefix: git's default listing C-quotes a non-ASCII
+    # path ("localizaci\303\263n/..."), which a prefix check would miss.
+    assert not [line for line in inventory if "localizaci" in line], inventory
+
+
+def test_run_refuses_when_the_adapter_declares_files_inside_the_workspace(work_root):
+    # R = <project>/locales: the toy adapter's catalogs sit under the workspace.
+    root, _ = _make_inner_workspace(work_root, "locales", project_git=False)
+
+    code_validate, _ = _run(SCRIPTS_DIR / "config_validate.py", ["--root", str(root)])
+    assert code_validate == 0
+
+    code, reply = _run(ADAPTER_CHECK, ["run", "--root", str(root)])
+
+    assert code == 1
+    assert reply["ok"] is False
+    assert "locales/en.json" in reply["error"]
+
+
 def test_run_is_idempotent(work_root):
     root, project_dir, cfg = _make_workspace(work_root)
     _run(ADAPTER_CHECK, ["run", "--root", str(root)])
@@ -552,7 +604,7 @@ def test_coverage_prompt_stays_small_and_preserves_the_complete_inventory(
 ):
     root, project_dir, cfg = _make_workspace(work_root)
     coverage_dir = root / "runs" / "_coverage"
-    monkeypatch.setattr(adapter_check, "_project_inventory", lambda project: [])
+    monkeypatch.setattr(adapter_check, "_project_inventory", lambda project, exclude=None: [])
     assert adapter_check.cmd_run(argparse.Namespace(root=str(root))) == 0
     baseline_size = (coverage_dir / "prompt.md").stat().st_size
 
@@ -561,7 +613,7 @@ def test_coverage_prompt_stays_small_and_preserves_the_complete_inventory(
         f"packages/feature_{i:05d}/UI assets/日本語_{i:05d}.{extensions[i % len(extensions)]}"
         for i in range(path_count)
     ]
-    monkeypatch.setattr(adapter_check, "_project_inventory", lambda project: inventory)
+    monkeypatch.setattr(adapter_check, "_project_inventory", lambda project, exclude=None: inventory)
     assert adapter_check.cmd_run(argparse.Namespace(root=str(root))) == 0
     capsys.readouterr()
 
