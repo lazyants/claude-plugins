@@ -181,7 +181,7 @@ def informational_canon_context(message: dict, canon_lock: dict, locale: str) ->
 
 
 def canon_note_context(message: dict, canon_lock: dict, locale: str | None = None) -> list:
-    """Corrected notes for explicit nonliteral occurrences, informational only.
+    """Corrected notes linked by explicit occurrence or approved locale group.
 
     These entries travel beside enforcement entries, so a review sees the
     corrected meaning without making the term applicable as a literal rule.
@@ -204,7 +204,7 @@ def canon_dependencies(message: dict, canon_lock: dict, locale: str | None = Non
 
 def canon_sha256(message: dict, canon_lock: dict, locale: str | None = None) -> str:
     """A candidate's canon snapshot: enforcement entries plus corrected-note
-    context for explicit occurrences, sorted by id so a
+    context for explicit occurrences and locale-scoped groups, sorted by id so a
     packet's first-seen batch order and the lock's order hash identically.
     A candidate stores this at accept time; `sync()` clears it once it no
     longer matches the canon lock's current relevant entries (a newly

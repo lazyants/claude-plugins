@@ -211,7 +211,7 @@ def filter_canon_lock(canon_lock: dict, messages: list, locale: str | None = Non
     """The canon snapshot a batch packet embeds: the union of
     `ledger.relevant_canon` for every message in the batch (a single
     enforcement relevance rule, owned by `ledger.py`). Corrected-note
-    context travels separately for explicit nonliteral occurrences and
+    context travels separately for explicit occurrences and approved locale groups and
     participates in `ledger.canon_sha256`. Preserve lock
     order so each message's canon hash also matches sync and export."""
     seen_ids: set = set()
@@ -230,7 +230,9 @@ def filter_canon_lock(canon_lock: dict, messages: list, locale: str | None = Non
 
 
 def audit_canon_context(canon_lock: dict, messages: list, locale: str) -> dict:
-    """Per-message informational links, separate from checks and candidate hashes.
+    """Per-message informational links, separate from mechanical enforcement.
+
+    Corrected-note dependencies are bound separately through `canon.note_context`.
 
     Seed with literal relevance and explicit approved occurrences; expand
     only through directly linked, approved groups for this locale. Never
@@ -735,18 +737,18 @@ def _write_batch(run_locale_dir: Path, name: str, kind: str, packet: dict, templ
         packet["note_revisions"] = revisions
     try:
         prefix, suffix = prompt_instructions(templates_dir, kind)
-        prompt = prefix + json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=True) + suffix
     except LookupError as exc:
         lz_common.fail(str(exc), lz_common.EXIT_CANNOT)
     if revisions:
-        prompt += ("\nCopy the packet's `note_revisions` object unchanged into a top-level "
+        suffix += ("\nCopy the packet's `note_revisions` object unchanged into a top-level "
                    "`note_revisions` field in your JSON answer. It binds this answer to the "
                    "corrected shared meanings, even if an older answer has identical wording.\n")
     if lock.get("note_context"):
-        prompt += ("\n`canon.note_context` supplies corrected meanings per message through explicit "
+        suffix += ("\n`canon.note_context` supplies corrected meanings per message through explicit "
                    "occurrences or approved groups. Read the supplied group notes and scopes. "
                    "It is informational: do not expand literal term enforcement or require "
                    "copying a full term into an item that does not use it.\n")
+    prompt = prefix + json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=True) + suffix
     lz_common.atomic_write_json(batch_dir / "packet.json", packet)
     lz_common.atomic_write_text(batch_dir / "prompt.md", prompt)
     lz_common.atomic_write_json(batch_dir / "instructions.json", {"prefix": prefix, "suffix": suffix})
