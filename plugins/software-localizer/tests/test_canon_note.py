@@ -208,6 +208,28 @@ def test_import_keeps_existing_nonempty_note(work_root):
     assert data["entries"][0]["note"] == OLD_NOTE
 
 
+@pytest.mark.parametrize("lock_state", ["absent", "missing_entry"])
+def test_affected_scope_comes_from_approved_entry_before_freeze(work_root, lock_state):
+    setup(work_root)
+    if lock_state == "absent":
+        (work_root / "canon.lock.json").unlink()
+    else:
+        lock = canon.load_lock(work_root)
+        lock["entries"] = [e for e in lock["entries"] if e["id"] != "t-poi"]
+        lz_common.atomic_write_json(work_root / "canon.lock.json", lock)
+    before = deepcopy(ledger.load(work_root))
+    event = correct(work_root)
+    assert event["affected"]["occurrences"] == ["named", "substring"]
+    for locale in ("de", "fr"):
+        request = lz_common.read_json(work_root / "runs" / locale / "canon-audit-t-poi.json", "audit")
+        assert request["occurrences"] == ["named", "substring"]
+        entries = ledger.load(work_root)["locales"][locale]
+        for msg_id in ("named", "substring"):
+            assert entries[msg_id]["candidate"] is None and "audit_proposal" not in entries[msg_id]
+            assert event["ledger_before"][locale][msg_id] == before["locales"][locale][msg_id]
+        assert entries["unrelated"] == before["locales"][locale]["unrelated"]
+
+
 def test_import_preserves_a_person_cleared_note(work_root):
     setup(work_root)
     event = correct(work_root, note="")

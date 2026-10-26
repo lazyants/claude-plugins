@@ -709,7 +709,6 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
 
     cfg = lz_common.load_config(root)
     messages = lz_common.load_messages(root / "messages.json")
-    old_lock = load_lock(root)
     ledger_data = ledger_mod.load(root)
     locales = sorted(set(cfg["target_locales"]) | set(entry.get("translations", {})) |
                      {p.stem for p in (root / RESEARCH_DIR_NAME).glob("*.json")} |
@@ -719,7 +718,7 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
     records = {locale: load_research(root, locale) for locale in locales}
     occurrences = list(dict.fromkeys(list(entry.get("occurrences", [])) + [
         m["id"] for m in messages["messages"]
-        if any(e["id"] == entry_id for e in ledger_mod.relevant_canon(m, old_lock))
+        if ledger_mod.relevant_canon(m, {"entries": [entry]})
     ]))
     at = lz_common.now_iso()
     event = {
