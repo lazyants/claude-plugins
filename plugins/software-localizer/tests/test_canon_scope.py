@@ -298,3 +298,131 @@ def test_unavailable_impact_inputs_refuse_before_mutation(workspace, missing):
     code, payload = decide(root, "--remove", "old")
     assert code == 2 and payload["ok"] is False
     assert bytes_under(root) == before
+
+
+# --- ui_label coherence (#1016) ------------------------------------------------
+
+BRAND_LABELS = {  # message id -> (label id, source, approved ru value)
+    # m1's source has no brand on purpose: DNT scope is explicit occurrences, so
+    # only the ids in scope (not source-text matching) can bring m1 into an audit.
+    "m1": ("u-add", "Install extension", "Установить расширение"),
+    "m2": ("u-open", "Open BrowserX", "Открыть"),
+    "m3": ("u-close", "Close BrowserX", "Закрыть BrowserX"),
+}
+
+
+def coherence_workspace(work_root, active, stored=None, bad=("m1", "m2")):
+    """A DNT `BrowserX` over three exact whole-label messages. `bad` labels
+    omit the brand. The lock is written raw, as a pre-coherence install had."""
+    messages = make_messages([
+        make_message(mid, src, targets={"de": src, "ru": src}) for mid, (_, src, _) in BRAND_LABELS.items()
+    ])
+    setup_workspace(work_root, make_cfg(target_locales=("de", "ru")), messages)
+    labels = []
+    for mid, (lid, src, value) in BRAND_LABELS.items():
+        if mid not in bad and "BrowserX" not in value:
+            value += " BrowserX"
+        labels.append(make_entry(lid, kind="ui_label", source=src, translations={"ru": approved(value)}))
+    dnt = make_entry("d-brand", kind="dnt", source="BrowserX", occurrences=list(stored or active))
+    data = {"schema": 1, "entries": [*labels, dnt]}
+    canon.approve(work_root, data, "d-brand", None, None, "fixture-person")
+    if stored is not None:
+        dnt["approved_occurrences"] = list(active)
+    canon.save(work_root, data)
+    lz_common.atomic_write_json(work_root / "canon.lock.json", canon._build_lock(data))
+    return data
+
+
+def scope_events(root):
+    return [e for e in canon.load_history(root)["events"] if e["action"] == "change-scope"]
+
+
+def test_freeze_ignores_a_pending_only_dnt_occurrence_but_enforces_legacy_scope(work_root):
+    data = coherence_workspace(work_root, active=[], stored=["m1"])
+
+    lock = canon.freeze(work_root, data)
+    assert [e["occurrences"] for e in lock["entries"] if e["kind"] == "dnt"] == [[]]
+
+    del data["entries"][-1]["approved_occurrences"]  # legacy approval: stored scope is active
+    code, result = run_cli(["freeze", "--root", str(work_root)])
+    assert code == 0  # canon.json still holds the explicit empty snapshot
+    canon.save(work_root, data)
+    code, result = run_cli(["freeze", "--root", str(work_root)])
+    assert code == 1 and result["conflicts"][0]["occurrence"] == "m1"
+
+
+def test_cli_scope_add_that_creates_a_conflict_is_refused_before_any_write(work_root):
+    data = coherence_workspace(work_root, active=["m3"], stored=["m3", "m1"], bad=("m1",))
+    (work_root / "canon.lock.json").write_bytes(
+        json.dumps(canon._build_lock(data), indent=2, sort_keys=True).encode() + b"\n",
+    )
+    assert canon.load_lock(work_root)  # coherent before the delta
+    before = bytes_under(work_root)
+    in_memory = copy.deepcopy(canon.load(work_root))
+    held = copy.deepcopy(in_memory)
+
+    code, result = decide(work_root, "--add", "m1")
+
+    assert code == 1 and result["ok"] is False
+    conflict = result["conflicts"][0]
+    assert (conflict["ui_label"], conflict["locale"], conflict["dnt"], conflict["occurrence"]) == (
+        "u-add", "ru", "d-brand", "m1",
+    )
+    assert bytes_under(work_root) == before
+    with pytest.raises(SystemExit):
+        canon.change_scope(
+            work_root, held, "d-brand", canon.scope(held, "d-brand")["entry_sha256"],
+            ["m1"], [], "Reviewed explicit scope", "fixture-person",
+        )
+    assert held == in_memory
+
+
+def test_cli_scope_removals_repair_two_legacy_conflicts_one_at_a_time(work_root):
+    coherence_workspace(work_root, active=["m1", "m2", "m3"])
+    old_lock = (work_root / "canon.lock.json").read_bytes()
+
+    code, first = decide(work_root, "--remove", "m1")
+
+    assert code == 0 and first["frozen"] is False
+    assert [(c["ui_label"], c["locale"], c["occurrence"]) for c in first["conflicts"]] == [("u-open", "ru", "m2")]
+    assert (work_root / "canon.lock.json").read_bytes() == old_lock
+    with pytest.raises(SystemExit):
+        canon.load_lock(work_root)
+    events = scope_events(work_root)
+    assert [(e["by"], e["removals"]) for e in events] == [("fixture-person", ["m1"])]
+    assert events[0]["reason"] == "Reviewed explicit scope"
+    assert (work_root / "runs" / "de" / "canon-audit-d-brand.json").is_file()
+    assert (work_root / "runs" / "ru" / "canon-audit-d-brand.json").is_file()
+
+    code, second = decide(work_root, "--remove", "m2")
+
+    assert code == 0 and "frozen" not in second and "conflicts" not in second
+    lock = canon.load_lock(work_root)
+    assert [e["occurrences"] for e in lock["entries"] if e["kind"] == "dnt"] == [["m3"]]
+    assert [e["removals"] for e in scope_events(work_root)] == [["m1"], ["m2"]]
+    # The history event keeps this decision's own before/after; the audit
+    # request carries the net scope, so the first removal is still audited.
+    assert (second["before"], second["after"]) == (["m2", "m3"], ["m3"])
+    for locale in ("de", "ru"):
+        request = lz_common.read_json(work_root / "runs" / locale / "canon-audit-d-brand.json", "request")
+        assert set(request["occurrences"]) == {"m1", "m2", "m3"}
+        assert set(request["scope_change"]["before"]) == {"m1", "m2", "m3"}
+        assert request["scope_change"]["after"] == ["m3"]
+        result = packets.do_build(work_root, "audit", locale, TEMPLATES_DIR, ["d-brand"])
+        packet = json.loads((Path(result["batches"][0]["dir"]) / "packet.json").read_text())
+        assert {i["id"] for i in packet["items"]} == {"m1", "m2", "m3"}
+        assert packet["canon_entry"]["scope_change"] == request["scope_change"]
+
+
+def test_cli_scope_correction_is_recorded_beside_an_unrelated_conflict(work_root):
+    coherence_workspace(work_root, active=["m1", "m3"], bad=("m1",))
+    old_lock = (work_root / "canon.lock.json").read_bytes()
+
+    code, result = decide(work_root, "--remove", "m3")
+
+    assert code == 0 and result["frozen"] is False
+    assert [c["occurrence"] for c in result["conflicts"]] == ["m1"]
+    assert (work_root / "canon.lock.json").read_bytes() == old_lock
+    assert scope_events(work_root)[-1]["removals"] == ["m3"]
+    code, frozen = run_cli(["freeze", "--root", str(work_root)])
+    assert code == 1 and frozen["conflicts"][0]["occurrence"] == "m1"

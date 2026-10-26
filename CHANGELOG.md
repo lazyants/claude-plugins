@@ -2,6 +2,25 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.5.3] — 2026-10-26
+
+### Fixed
+
+- Canon freeze and lock loading reject an approved whole UI-label value that
+  violates an approved do-not-translate rule at the same collected message (#1016).
+  Diagnostics name the locale, both canon entries, occurrence, approved value and
+  failed constraint so the owner can reconcile wording or scope. A label fragment
+  inside a longer message does not establish a conflict.
+- Refused wording, scope or note changes leave canon, history and the previous lock
+  intact. Only active approved DNT scope participates; pending occurrences stay pending.
+- Owners can repair several conflicts sequentially with `change` or `change-scope`,
+  retaining each decision in history. Remaining conflicts keep freeze blocked and
+  the previous lock unchanged; the result explicitly reports `frozen: false` until
+  all are resolved. Approved UI labels and DNT rules together require a collected
+  message snapshot to distinguish whole labels from longer mentions.
+- Scope-repair audit packets retain previously frozen affected IDs across sequential
+  repairs, so an earlier removal is still audited after coherence is restored.
+
 ## [software-localizer 0.5.2] — 2026-10-26
 
 ### Added

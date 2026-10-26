@@ -72,6 +72,7 @@ CLI.
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from copy import deepcopy
@@ -79,6 +80,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import checks  # noqa: E402
 import lz_common  # noqa: E402
 
 _KIND_PREFIX = {"term": "t", "ui_label": "u", "dnt": "d"}
@@ -104,7 +106,11 @@ def save(root, canon: dict) -> None:
 
 
 def load_lock(root) -> dict:
-    return _read_or_default(Path(root) / "canon.lock.json", "canon.lock.json", {"schema": 1, "entries": []})
+    path = Path(root) / "canon.lock.json"
+    lock = _read_or_default(path, "canon.lock.json", {"schema": 1, "entries": []})
+    if path.exists():
+        _require_coherent(root, lock, "canon.lock.json")
+    return lock
 
 
 def load_history(root) -> dict:
@@ -432,6 +438,58 @@ def approve(root, canon: dict, entry_id: str, locale: str | None, value: str | N
 
 
 # ---------------------------------------------------------------------------
+# lock coherence: approved ui_label vs approved dnt
+# ---------------------------------------------------------------------------
+
+
+def _coherence_conflicts(root, lock: dict) -> list:
+    """Approved `ui_label` translations that break an approved `dnt` rule.
+
+    A non-plural message whose source equals the label's source exactly IS
+    that label; its approved translation is the message's value, so the
+    existing DNT predicate applies to it. A longer message that merely
+    mentions the label is not the label. `messages.json` is read only when
+    the lock holds both a `ui_label` and a `dnt` entry."""
+    entries = lock.get("entries", [])
+    labels = [e for e in entries if e.get("kind") == "ui_label"]
+    dnts = [e for e in entries if e.get("kind") == "dnt"]
+    if not labels or not dnts:
+        return []
+    messages = lz_common.load_messages(Path(root) / "messages.json")["messages"]
+    conflicts = []
+    for label in labels:
+        matching = [m for m in messages if m.get("plural") is None and m.get("source") == label.get("source")]
+        for locale, translation in label.get("translations", {}).items():
+            value = translation.get("value")
+            if translation.get("status") != "approved" or not isinstance(value, str):
+                continue
+            for message in matching:
+                for dnt in dnts:
+                    for problem in checks._check_dnt(message, [value], False, [], {"entries": [dnt]}):
+                        conflicts.append({
+                            "locale": locale, "ui_label": label["id"], "dnt": dnt["id"],
+                            "occurrence": message["id"], "value": value, "detail": problem["detail"],
+                        })
+    return conflicts
+
+
+def _require_coherent(root, lock: dict, what: str) -> None:
+    _refuse_conflicts(_coherence_conflicts(root, lock), what)
+
+
+def _refuse_conflicts(conflicts: list, what: str) -> None:
+    if not conflicts:
+        return
+    first = conflicts[0]
+    lz_common.fail(
+        f"{what}: approved ui_label {first['ui_label']}/{first['locale']} {first['value']!r} conflicts with "
+        f"approved dnt {first['dnt']} at {first['occurrence']}: {first['detail']} "
+        f"({len(conflicts)} conflict(s))",
+        lz_common.EXIT_FAIL, conflicts=conflicts,
+    )
+
+
+# ---------------------------------------------------------------------------
 # freeze
 # ---------------------------------------------------------------------------
 
@@ -440,6 +498,7 @@ def freeze(root, canon: dict | None = None) -> dict:
     if canon is None:
         canon = load(root)
     lock = _build_lock(canon)
+    _require_coherent(root, lock, "freeze refused")
     lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
     return lock
 
@@ -531,7 +590,10 @@ def change(
     refreezes `canon.lock.json`, appends to `canon.history.json`, and writes
     `R/runs/<locale>/canon-audit-<entry_id>.json`, the restricted-audit
     request `packets.py` builds an audit packet from (its occurrences,
-    scoped to this one entry)."""
+    scoped to this one entry). The new value must itself satisfy every
+    approved DNT rule; if other entries/locales still conflict, the change is
+    recorded but the lock is not replaced and the result carries
+    `frozen: false` plus the remaining `conflicts`."""
     entry = _find_by_id(canon, entry_id)
     if entry is None:
         lz_common.fail(f"no canon entry: {entry_id}", lz_common.EXIT_FAIL, entry=entry_id)
@@ -552,6 +614,22 @@ def change(
     request_path = Path(root) / "runs" / locale / f"canon-audit-{entry_id}.json"
     previous_request = _read_or_default(request_path, "previous canon audit request", {})
     at = lz_common.now_iso()
+    # Preflight on a copy: a refused change leaves canon, history and lock untouched.
+    tentative = copy.deepcopy(canon)
+    tentative_entry = _find_by_id(tentative, entry_id)
+    assert tentative_entry is not None
+    tentative_entry["translations"][locale] = {
+        "value": value, "status": "approved", "approved_by": by, "approved_at": at,
+    }
+    # The new value must satisfy the DNT rules itself. Conflicts of OTHER
+    # entries/locales do not block recording this correction (else two
+    # conflicting locales could never be repaired one at a time); they only
+    # block the refreeze below.
+    lock = _build_lock(tentative)  # also validates groups, before any write
+    conflicts = _coherence_conflicts(root, lock)
+    _refuse_conflicts(
+        [c for c in conflicts if c["ui_label"] == entry_id and c["locale"] == locale], "change refused",
+    )
     entry["translations"][locale] = {
         "value": value, "status": "approved", "approved_by": by, "approved_at": at,
     }
@@ -560,11 +638,12 @@ def change(
         "at": at, "by": by, "action": "change", "entry": entry_id, "locale": locale,
         "before": before, "after": value, "reason": reason,
     }
-    lock = _build_lock(canon)
     if previous_request.get("field") == "note":
         event["audit_request_before"] = previous_request
     _append_history(root, event)
-    lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
+    # With conflicts left, the old lock stays; the result says so.
+    if not conflicts:
+        lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
 
     audit_request = {
         "entry": entry_id, "kind": entry["kind"], "source": entry["source"], "locale": locale,
@@ -580,7 +659,7 @@ def change(
         }
     lz_common.atomic_write_json(request_path, audit_request)
 
-    return event
+    return {**event, "frozen": not conflicts, "conflicts": conflicts}
 
 
 # ---------------------------------------------------------------------------
@@ -642,10 +721,35 @@ def change_scope(root, canon: dict, entry_id: str, expect_sha256: str,
     stored_after = [i for i in stored_before if i not in removals]
     stored_after += [i for i in additions if i not in stored_after]
 
+    # Refuse a conflict this delta introduces before any write. Conflicts that
+    # already existed do not block recording the correction; they only block
+    # the refreeze below.
+    tentative = copy.deepcopy(canon)
+    tentative_entry = _find_by_id(tentative, entry_id)
+    assert tentative_entry is not None
+    tentative_entry["occurrences"] = stored_after
+    tentative_entry["approved_occurrences"] = after
+    lock = _build_lock(tentative)  # also validates groups, before any write
+    conflicts_before = _coherence_conflicts(root, _build_lock(canon))
+    conflicts = _coherence_conflicts(root, lock)
+    _refuse_conflicts([c for c in conflicts if c not in conflicts_before], "change-scope refused")
+
+    # While a repair leaves the old lock in place, that lock's scope is still
+    # the last published one: it joins the impact baseline so an earlier
+    # unpublished removal is not dropped from the audit. Raw read, because
+    # `load_lock` rejects the very legacy conflict being repaired.
+    lock_path = Path(root) / "canon.lock.json"
+    frozen_scope = []
+    if lock_path.exists():
+        for locked in lz_common.read_json(lock_path, "canon.lock.json").get("entries", []):
+            if locked.get("id") == entry_id and locked.get("kind") == "dnt":
+                frozen_scope = list(locked.get("occurrences", []))
+    net_before = list(dict.fromkeys(frozen_scope + before))
+
     affected = []
     if before != after:
         # Keep removed/deleted ids for the packet builder's explicit skip report.
-        affected = list(dict.fromkeys(before + after))
+        affected = list(dict.fromkeys(net_before + after))
         # Use the same relevance rule as candidate hashes: source matches share
         # this entry's hash even outside its explicit DNT occurrence scope.
         import ledger
@@ -668,29 +772,35 @@ def change_scope(root, canon: dict, entry_id: str, expect_sha256: str,
         "entry_sha256_before": expect_sha256, "entry_sha256_after": lz_common.sha256_json(entry),
         "affected_occurrences": affected, "target_locales": list(cfg["target_locales"]),
     }
-    lock = _build_lock(canon)
     if any(request.get("field") == "note" for request in previous_requests.values()):
         event["audit_requests_before"] = previous_requests
     _append_history(root, event)
-    lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
+    # With conflicts left, the old lock stays; the result says so.
+    if not conflicts:
+        lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
     for locale in cfg["target_locales"]:
         if not affected:
             continue
         audit_request = {
             **event, "kind": "dnt", "source": entry["source"], "locale": locale,
-            "occurrences": affected, "scope_change": {"before": before, "after": after},
+            "occurrences": affected, "scope_change": {"before": net_before, "after": after},
         }
         previous = previous_requests.get(locale, {})
         if previous.get("field") == "note":
+            earlier_before = previous.get("scope_change", {}).get("before", [])
             audit_request = {
                 **previous,
                 "occurrences": list(dict.fromkeys(previous.get("occurrences", []) + affected)),
-                "scope_change": {"before": previous.get("scope_change", {}).get("before", before), "after": after},
+                # Keep the earlier saved scope-before and the net frozen one, so an
+                # unpublished removed id is never dropped from the audit.
+                "scope_change": {"before": list(dict.fromkeys(earlier_before + net_before)), "after": after},
                 "scope_decision": {"before": before, "after": after, "reason": reason, "by": by, "at": at},
             }
         lz_common.atomic_write_json(
             Path(root) / "runs" / locale / f"canon-audit-{entry_id}.json", audit_request,
         )
+    if conflicts:
+        return {**event, "frozen": False, "conflicts": conflicts}
     return event
 
 
@@ -767,6 +877,15 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
     # Chain revisions so reverting a note never revives an old packet/verdict.
     revision = lz_common.sha256_json(event)
     event["note_revision"] = revision
+    # Prepare the lock and require it coherent before the first write, so no
+    # unpublished note revision is recorded against a coherent older lock.
+    tentative = copy.deepcopy(canon)
+    tentative_entry = _find_by_id(tentative, entry_id)
+    assert tentative_entry is not None
+    tentative_entry["note"] = note
+    tentative_entry["note_revision"] = revision
+    lock = _build_lock(tentative)
+    _require_coherent(root, lock, "change-note refused")
     _append_history(root, event)
     for locale, data in records.items():
         record = data["entries"].get(entry_id)
@@ -797,7 +916,7 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
     entry["note"] = note
     entry["note_revision"] = revision
     save(root, canon)
-    freeze(root, canon)
+    lz_common.atomic_write_json(root / "canon.lock.json", lock)
     return event
 
 
