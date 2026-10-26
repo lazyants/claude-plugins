@@ -42,11 +42,13 @@ Design decisions worth calling out:
   research it was cast on. `accept` re-reads the locale's file and treats a
   verdict whose research was replaced since the build as missing, so a
   verdict never attaches to research it did not check.
-- An audit `fail` with a `proposed` value is stored on the ledger entry as
+- Every accepted audit `fail` is stored on the ledger entry as
   `audit_proposal` (an extra field beyond `ledger.py`'s documented entry
   schema; JSON round-trips it fine) — there is no setter for it in
   `ledger.py`, so it is read and written as a plain dict field, matching
-  `accept-audit`'s own job of turning it into a candidate. A `review` `fail`
+  `accept-audit`'s own job of turning a checked replacement into a candidate.
+  A null value keeps an unresolved finding, with no checks or candidate.
+  A `review` `fail`
   with a `proposed` value routes here too when the candidate it is
   reviewing has `origin: "audit"` (i.e. it was itself installed by
   `accept-audit` and is now being reviewed per that command's "still needs a
@@ -1025,6 +1027,8 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         else:  # audit
             failed_ids.append(msg_id)
             proposed = verdict.get("proposed")
+            audit_cfg = {**cfg, "style": {locale: packet.get("style", cfg.get("style", {}).get(locale))}}
+            problems = []
             if proposed is not None:
                 is_plural = item.get("target_labels") is not None
                 source_forms = checks_mod.forms_of(item["source"])
@@ -1032,23 +1036,23 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                 source_parse = _single_or_list(_parse_list(parse_results, msg_id, "source", source_forms), is_plural)
                 proposed_parse = _single_or_list(_parse_list(parse_results, msg_id, "proposed", proposed_forms), is_plural)
                 problems = checks_mod.check_candidate(
-                    message, locale, proposed, source_parse, proposed_parse, canon_lock, cfg,
+                    message, locale, proposed, source_parse, proposed_parse, canon_lock, audit_cfg,
                 )
-                entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
-                entry["audit_proposal"] = {
-                    "value": proposed,
-                    "value_sha256": lz_common.value_sha256(proposed),
-                    "audited_target_sha256": item["value_sha256"],
-                    "source_sha256": ledger_mod.source_sha256(message),
-                    "context_sha256": ledger_mod.context_sha256(message, locale),
-                    "style_sha256": ledger_mod.style_sha256(cfg, locale),
-                    "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
-                    "checks": "fail" if problems else "pass",
-                    "problems": problems,
-                    "issues": verdict.get("issues", []),
-                    "run": batch_name,
-                }
                 proposals_stored.append(msg_id)
+            entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
+            entry["audit_proposal"] = {
+                "value": proposed,
+                "value_sha256": lz_common.value_sha256(proposed) if proposed is not None else None,
+                "audited_target_sha256": item["value_sha256"],
+                "source_sha256": ledger_mod.source_sha256(message),
+                "context_sha256": ledger_mod.context_sha256(message, locale),
+                "style_sha256": ledger_mod.style_sha256(audit_cfg, locale),
+                "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
+                "checks": ("fail" if problems else "pass") if proposed is not None else None,
+                "problems": problems,
+                "issues": verdict.get("issues", []),
+                "run": batch_name,
+            }
 
     if new_canon_candidates:
         lz_common.atomic_write_json(
@@ -1366,6 +1370,9 @@ def do_accept_audit(root: Path, locale: str, ids: list, by: str) -> dict:
         proposal = entry.get("audit_proposal") if entry else None
         if not proposal:
             failed.append({"id": msg_id, "reason": "no stored audit proposal"})
+            continue
+        if proposal.get("value") is None:
+            failed.append({"id": msg_id, "reason": "audit finding has no proposed replacement"})
             continue
         if proposal.get("checks") != "pass":
             failed.append({"id": msg_id, "reason": "audit proposal failed checks"})

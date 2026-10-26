@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.3.3] — 2026-10-26
+
+### Fixed
+
+- Accepted audit failures without a proposed replacement retain their issues and source,
+  target, context, style and canon snapshot hashes in the ledger (#1012). The generated report
+  shows them as unresolved findings; they cannot become candidates or be accepted for export.
+  A newer unresolved finding also replaces an older proposal instead of leaving it actionable.
+- Audit finding provenance uses the style from the reviewed packet, even when the workspace
+  configuration changes before acceptance.
+
 ## [software-localizer 0.3.2] — 2026-10-26
 
 ### Added

@@ -1324,6 +1324,99 @@ def test_accept_audit_fail_with_proposed_stores_audit_proposal(work_root):
     assert entry["audit_proposal"]["audited_target_sha256"] == value_sha
 
 
+@pytest.mark.parametrize("state", ["existing", "translated", "human_locked"])
+@pytest.mark.parametrize("plural", [False, True])
+def test_accept_audit_without_replacement_survives_save_load_and_report(work_root, state, plural):
+    cfg = make_cfg()
+    if plural:
+        message = make_plural_message(
+            "a", ["One item", "{count} items"],
+            {"de": [{"label": "one", "exact": False}, {"label": "other", "exact": False}]},
+            general_index=1, targets={"de": {"forms": ["Ein Artikel", "{count} Artikel"]}},
+        )
+    else:
+        message = make_message("a", "Hello", targets={"de": "Hallo"})
+    original_entry = make_entry(state)
+    run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": original_entry}}, "audit", "de")
+    packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
+    item = packet["items"][0]
+    issues = [{"kind": "meaning", "text": "Needs domain clarification before a safe replacement."}]
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": item["value_sha256"], "verdict": "fail", "issues": issues,
+        "proposed": None, "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["ok"] is True
+    assert result["failed"] == ["a"]
+    assert result["missing"] == result["extra"] == result["audit_proposals"] == []
+    saved = ledger_mod.load(work_root)
+    entry = saved["locales"]["de"]["a"]
+    finding = entry["audit_proposal"]
+    assert finding == {
+        "value": None, "value_sha256": None, "checks": None, "problems": [], "issues": issues,
+        "audited_target_sha256": item["value_sha256"],
+        "source_sha256": ledger_mod.source_sha256(message),
+        "context_sha256": ledger_mod.context_sha256(message, "de"),
+        "style_sha256": ledger_mod.style_sha256(cfg, "de"),
+        "canon_sha256": ledger_mod.canon_sha256(message, packet["canon"]), "run": packet["batch"],
+    }
+    assert {key: entry[key] for key in original_entry} == original_entry
+    assert ledger_mod.exportable(saved, "de") == []
+
+    # A finding is durable evidence, never an operator-approved candidate.
+    acceptance = packets.do_accept_audit(work_root, "de", ["a"], "alice")
+    assert acceptance["accepted"] == []
+    assert acceptance["failed"] == [{"id": "a", "reason": "audit finding has no proposed replacement"}]
+    assert ledger_mod.load(work_root) == saved
+    report_result = report_mod.do_report(work_root, "de")
+    text = Path(report_result["report"]).read_text(encoding="utf-8")
+    audit_section = text.split("## Audit findings")[1].split("## Existing")[0]
+    assert "`a`" in audit_section
+    assert "unresolved: no proposed replacement" in audit_section
+    assert "meaning: Needs domain clarification before a safe replacement." in audit_section
+    assert "proposed: None" not in text
+    assert "checks pass" not in audit_section
+    existing_section = text.split("## Existing")[1].split("## Canon candidates")[0]
+    assert "`a`" not in existing_section
+
+
+@pytest.mark.parametrize("proposed", [None, "Hallo!"])
+def test_accept_audit_retains_packet_style_provenance(work_root, proposed):
+    cfg = make_cfg()
+    message = make_message("a", "Hello", targets={"de": "Hallo"})
+    run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": make_entry("existing")}}, "audit", "de")
+    packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "style", "text": "Needs follow-up."}], "proposed": proposed,
+    }}})
+    changed_cfg = {**cfg, "style": {"de": {"formality": "du", "notes": "Changed since build."}}}
+    lz_common.atomic_write_json(work_root / "localize.json", changed_cfg)
+
+    packets.do_accept(work_root, run_dir, output_path)
+    finding = ledger_mod.load(work_root)["locales"]["de"]["a"]["audit_proposal"]
+    assert finding["style_sha256"] == ledger_mod.style_sha256(cfg, "de")
+    assert finding["style_sha256"] != ledger_mod.style_sha256(changed_cfg, "de")
+
+
+def test_accept_audit_without_replacement_replaces_old_proposal(work_root):
+    cfg = make_cfg()
+    message = make_message("a", "Hello", targets={"de": "Hallo"})
+    entry = make_entry("existing")
+    entry["audit_proposal"] = {"value": "Old correction", "checks": "pass", "issues": []}
+    run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": entry}}, "audit", "de")
+    packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "meaning", "text": "The earlier correction is unsafe."}], "proposed": None,
+    }}})
+
+    packets.do_accept(work_root, run_dir, output_path)
+    assert ledger_mod.load(work_root)["locales"]["de"]["a"]["audit_proposal"]["value"] is None
+    assert packets.do_accept_audit(work_root, "de", ["a"], "alice")["accepted"] == []
+
+
 def test_accept_audit_pass_does_not_mutate_ledger(work_root):
     cfg = make_cfg()
     msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo"})])
