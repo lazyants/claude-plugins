@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import canon
+import export_values
 import ledger
 import lz_common
 import packets
@@ -344,6 +345,105 @@ def test_note_and_scope_decisions_preserve_each_others_pending_audits(work_root,
     assert metadata["scope_change"]["after"] == ["unrelated"]
 
 
+@pytest.mark.parametrize("lock_state", ["present", "absent"])
+def test_corrected_group_context_binds_audit_review_and_export_in_its_locale(work_root, lock_state):
+    setup(work_root)
+    data = canon.load(work_root)
+    group = {"id": "person-screen", "locale": "de", "entry_ids": ["t-cart", "t-poi"],
+             "note": "These labels belong to the same person screen.",
+             "scope": "Informational context; do not copy a label into another message.",
+             "approved_by": "owner", "approved_at": "2026-01-01"}
+    data["groups"] = [group]
+    canon.save(work_root, data)
+    old_lock = canon.freeze(work_root)
+    messages = lz_common.load_messages(work_root / "messages.json")
+    messages["messages"] = [m for m in messages["messages"] if m["id"] == "unrelated"]
+    message = messages["messages"][0]
+    lz_common.atomic_write_json(work_root / "messages.json", messages)
+    original_fr = deepcopy(ledger.load(work_root)["locales"]["fr"]["unrelated"])
+    before_fr_hash = ledger.canon_sha256(message, old_lock, "fr")
+    batch = packets.do_build(work_root, "audit", "de", TEMPLATES_DIR)["batches"][0]
+    old_dir = Path(batch["dir"])
+    packet = packet_of(batch)
+    assert {e["id"] for e in packet["canon_context"]["unrelated"]["entries"]} == {"t-poi", "t-cart"}
+    output = {"verdicts": {"unrelated": {
+        "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "grammar", "text": "Example review proposal"}],
+        "proposed": "Der Warenkorb", "new_canon_candidates": [],
+    }}}
+    old_output = write_output(old_dir, output)
+    if lock_state == "absent":
+        (work_root / "canon.lock.json").unlink()
+    event = correct(work_root)
+    assert "unrelated" in event["affected"]["occurrences_by_locale"]["de"]
+    assert "unrelated" not in event["affected"]["occurrences_by_locale"]["fr"]
+    assert ledger.load(work_root)["locales"]["fr"]["unrelated"] == original_fr
+    current_lock = canon.load_lock(work_root)
+    assert ledger.canon_sha256(message, current_lock, "fr") == before_fr_hash
+    assert ledger.canon_sha256(message, current_lock, "de") != ledger.canon_sha256(message, old_lock, "de")
+    with pytest.raises(SystemExit):
+        packets.do_accept(work_root, old_dir, old_output)
+    batch = packets.do_build(work_root, "audit", "de", TEMPLATES_DIR)["batches"][0]
+    packet = packet_of(batch)
+    assert [e["id"] for e in packet["canon"]["entries"]] == ["t-cart"]
+    context = packet["canon"]["note_context"]["unrelated"]
+    assert context["entries"][0]["id"] == "t-poi" and context["entries"][0]["note"] == NEW_NOTE
+    assert context["groups"] == [group]
+    assert ledger.canon_sha256(message, packet["canon"], "de") == ledger.canon_sha256(message, current_lock, "de")
+    output["note_revisions"] = packet["note_revisions"]
+    run_dir = Path(batch["dir"])
+    assert packets.do_accept(work_root, run_dir, write_output(run_dir, output))["audit_proposals"] == ["unrelated"]
+    assert packets.do_accept_audit(work_root, "de", ["unrelated"], "alice")["accepted"] == ["unrelated"]
+    review = packets.do_build(work_root, "review", "de", TEMPLATES_DIR)["batches"][0]
+    review_packet = packet_of(review)
+    assert review_packet["canon"]["note_context"]["unrelated"]["groups"] == [group]
+    assert review_packet["canon"]["note_context"]["unrelated"]["entries"][0]["note"] == NEW_NOTE
+    cfg = lz_common.load_config(work_root)
+    entries = deepcopy(ledger.load(work_root)["locales"]["de"])
+    assert export_values._staleness_problems(cfg, "de", ["unrelated"], {"unrelated": message}, entries, current_lock) == []
+    correct(work_root, expect=NEW_NOTE, note="A person under investigation")
+    problems = export_values._staleness_problems(cfg, "de", ["unrelated"], {"unrelated": message}, entries,
+                                                  canon.load_lock(work_root))
+    assert problems == [{"id": "unrelated", "reason": "the canon changed since this candidate was reviewed"}]
+
+
+def test_removed_scope_note_audit_binds_revision_without_enforcing_dnt(work_root):
+    setup(work_root, "dnt")
+    messages = lz_common.load_messages(work_root / "messages.json")
+    messages["messages"] = [m for m in messages["messages"] if m["id"] == "named"]
+    lz_common.atomic_write_json(work_root / "messages.json", messages)
+    data = canon.load(work_root)
+    canon.change_scope(work_root, data, "t-poi", canon.scope(data, "t-poi")["entry_sha256"],
+                       [], ["named"], "Owner removed this scope", "bob")
+    canon.save(work_root, data)
+    first = correct(work_root)
+    batch = packets.do_build(work_root, "audit", "de", TEMPLATES_DIR, entry_ids=["t-poi"])["batches"][0]
+    packet = packet_of(batch)
+    assert packet["canon"]["entries"] == [] and not packet["canon"].get("note_context")
+    assert packet["note_revisions"] == {"t-poi": first["note_revision"]}
+    item = packet["items"][0]
+    answer = {"note_revisions": packet["note_revisions"], "verdicts": {"named": {
+        "value_sha256": item["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "meaning", "text": "Example correction"}],
+        "proposed": "Person", "new_canon_candidates": [],
+    }}}
+    run_dir = Path(batch["dir"])
+    output = write_output(run_dir, answer)
+    second = correct(work_root, expect=NEW_NOTE, note="A person under investigation")
+    before = snapshot(work_root)
+    with pytest.raises(SystemExit):
+        packets.do_accept(work_root, run_dir, output)
+    assert snapshot(work_root) == before
+    fresh = packets.do_build(work_root, "audit", "de", TEMPLATES_DIR, entry_ids=["t-poi"])["batches"][0]
+    assert fresh["dir"] == batch["dir"]
+    before = snapshot(work_root)
+    with pytest.raises(SystemExit):
+        packets.do_accept(work_root, run_dir, output)
+    assert snapshot(work_root) == before
+    answer["note_revisions"] = {"t-poi": second["note_revision"]}
+    assert packets.do_accept(work_root, run_dir, write_output(run_dir, answer))["audit_proposals"] == ["named"]
+
+
 def test_rebuilt_packet_refuses_an_old_answer_without_the_revision_echo(work_root):
     setup(work_root)
     correct(work_root)
@@ -416,7 +516,7 @@ def test_nonliteral_ordinary_packets_and_following_review_keep_corrected_meaning
     fresh = packets.do_build(work_root, kind, "de", TEMPLATES_DIR)["batches"][0]
     fresh_packet = packet_of(fresh)
     assert fresh_packet["canon"]["entries"] == []  # no broader mechanical rule
-    assert fresh_packet["canon"]["note_context"][0]["note"] == NEW_NOTE
+    assert fresh_packet["canon"]["note_context"]["named"]["entries"][0]["note"] == NEW_NOTE
     output["note_revisions"] = fresh_packet["note_revisions"]
     fresh_dir = Path(fresh["dir"])
     result = packets.do_accept(work_root, fresh_dir, write_output(fresh_dir, output))
@@ -429,7 +529,7 @@ def test_nonliteral_ordinary_packets_and_following_review_keep_corrected_meaning
     review_batch = packets.do_build(work_root, "review", "de", TEMPLATES_DIR)["batches"][0]
     review_packet = packet_of(review_batch)
     assert review_packet["canon"]["entries"] == []
-    assert review_packet["canon"]["note_context"][0]["note"] == NEW_NOTE
+    assert review_packet["canon"]["note_context"]["named"]["entries"][0]["note"] == NEW_NOTE
     assert review_packet["note_revisions"] == {"t-poi": correction["note_revision"]}
     review_dir = Path(review_batch["dir"])
     item = review_packet["items"][0]

@@ -169,7 +169,7 @@ def _staleness_problems(cfg: dict, locale: str, candidate_ids: list, by_id: dict
         # newly approved term) without touching source/context/style at
         # all; a candidate snapshot taken against the old canon lock must
         # not export against the new one.
-        if ledger_mod.canon_sha256(message, canon_lock) != candidate.get("canon_sha256"):
+        if ledger_mod.canon_sha256(message, canon_lock, locale) != candidate.get("canon_sha256"):
             problems.append({"id": msg_id, "reason": "the canon changed since this candidate was reviewed"})
     return problems
 

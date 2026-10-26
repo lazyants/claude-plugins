@@ -734,13 +734,22 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
     if any(not lz_common._locale_ok(locale) for locale in locales):
         lz_common.fail("invalid locale in canon/research/ledger", lz_common.EXIT_CANNOT)
     records = {locale: load_research(root, locale) for locale in locales}
+    impact_lock = _build_lock(canon)
     previous_requests = _audit_requests(root, cfg["target_locales"], entry_id)
     active = _active_dnt_scope(entry) if entry["kind"] == "dnt" else list(entry.get("occurrences", []))
     impact_entry = {**entry, "occurrences": active}
-    occurrences = list(dict.fromkeys(active + [
+    base_occurrences = list(dict.fromkeys(active + [
         m["id"] for m in messages["messages"]
         if ledger_mod.relevant_canon(m, {"entries": [impact_entry]})
-    ] + [i for request in previous_requests.values() for i in request.get("occurrences", [])]))
+    ]))
+    occurrences_by_locale = {}
+    for locale in locales:
+        related = [m["id"] for m in messages["messages"] if any(
+            e["id"] == entry_id for e in
+            ledger_mod.informational_canon_context(m, impact_lock, locale).get("entries", []))]
+        occurrences_by_locale[locale] = list(dict.fromkeys(
+            base_occurrences + related + previous_requests.get(locale, {}).get("occurrences", [])))
+    occurrences = list(dict.fromkeys(i for ids in occurrences_by_locale.values() for i in ids))
     at = lz_common.now_iso()
     event = {
         "action": "change-note", "entry": entry_id, "locale": None, "field": "note",
@@ -748,11 +757,12 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
         "previous_revision": entry.get("note_revision"),
         "research_before": {loc: deepcopy(data["entries"][entry_id]) for loc, data in records.items()
                             if entry_id in data["entries"]},
-        "ledger_before": {loc: {i: deepcopy(e) for i, e in entries.items() if i in occurrences}
+        "ledger_before": {loc: {i: deepcopy(e) for i, e in entries.items() if i in occurrences_by_locale[loc]}
                           for loc, entries in ledger_data["locales"].items()},
         "audit_requests_before": previous_requests,
         "affected": {"research_locales": [loc for loc, data in records.items() if entry_id in data["entries"]],
-                     "audit_locales": cfg["target_locales"], "occurrences": occurrences},
+                     "audit_locales": cfg["target_locales"], "occurrences": occurrences,
+                     "occurrences_by_locale": occurrences_by_locale},
     }
     # Chain revisions so reverting a note never revives an old packet/verdict.
     revision = lz_common.sha256_json(event)
@@ -764,7 +774,7 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
             record["stale_note"] = {"note_revision": revision, "at": at, "reason": reason}
             save_research(root, locale, data)
     for locale, entries in ledger_data["locales"].items():
-        for msg_id in occurrences:
+        for msg_id in occurrences_by_locale[locale]:
             if msg_id in entries:
                 entries[msg_id]["candidate"] = None
                 entries[msg_id].pop("audit_proposal", None)
@@ -774,7 +784,8 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
         request = {
             "entry": entry_id, "kind": entry["kind"], "source": entry["source"], "locale": locale,
             "field": "note", "impact": "semantic", "before": before, "after": note,
-            "note_revision": revision, "reason": reason, "by": by, "at": at, "occurrences": occurrences,
+            "note_revision": revision, "reason": reason, "by": by, "at": at,
+            "occurrences": occurrences_by_locale[locale],
         }
         previous = previous_requests.get(locale, {})
         for field in ("scope_change", "scope_decision", "translation_change"):

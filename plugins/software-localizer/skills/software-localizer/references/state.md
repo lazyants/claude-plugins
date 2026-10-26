@@ -167,9 +167,12 @@ scoped fresh research packet does not resume or union findings for the old meani
 
 The revision is included in the frozen entry/hash, even when a later correction restores an old
 note's text. Affected candidates and proposals are cleared; their old state remains in history.
-For explicit occurrences without a literal term match, `canon.note_context` carries the corrected
-meaning through translation, audit and subsequent review packets. It participates in the candidate's
-canon hash, while mechanical enforcement still reads only `canon.entries`.
+For explicit occurrences or approved locale-scoped groups without a literal term match,
+`canon.note_context` carries the corrected meaning and group scopes per message through translation,
+audit and subsequent review packets. These corrected-note dependencies participate in the candidate's
+locale-specific canon hash; ordinary uncorrected informational context retains its previous hash
+behavior. Mechanical enforcement still reads only `canon.entries`. A correction reports affected IDs
+per locale, so a group in one language does not invalidate another language's unrelated candidates.
 Pre-correction research/verification and translation/review/audit packets are refused. Fresh
 packets with corrected entries require an exact top-level `note_revisions` echo in their answers,
 so rebuilding a packet in the same directory cannot relabel an old answer as a fresh turn.
