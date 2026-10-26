@@ -226,33 +226,6 @@ def _project_value_sha256(message: dict, locale: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def audit_canon_context(canon_lock: dict, messages: list, locale: str) -> dict:
-    """Per-message informational links, separate from checks and candidate hashes.
-
-    Seed with literal relevance and explicit approved occurrences; expand
-    only through directly linked, approved groups for this locale. Never
-    infer aliases, follow transitive groups, or read the unfrozen canon.
-    """
-    entries = [entry for entry in canon_lock.get("entries", [])
-               if entry.get("kind") == "dnt" or
-               entry.get("translations", {}).get(locale, {}).get("status") == "approved"]
-    result = {}
-    for message in messages:
-        literal = {entry["id"] for entry in relevant_canon(message, {"entries": entries})}
-        occurrences = {entry["id"] for entry in entries if message["id"] in entry.get("occurrences", [])}
-        seeds = literal | occurrences
-        groups = [group for group in canon_lock.get("groups", [])
-                  if group.get("locale") == locale and group.get("approved_by")
-                  and group.get("approved_at") and seeds.intersection(group["entry_ids"])]
-        context_ids = (occurrences - literal) | {entry_id for group in groups for entry_id in group["entry_ids"]}
-        if context_ids:
-            result[message["id"]] = {
-                "entries": [entry for entry in entries if entry["id"] in context_ids],
-                "groups": groups,
-            }
-    return result
-
-
 def audit_snapshot(message: dict, locale: str, cfg: dict, canon_lock: dict, *, canon_context=None) -> dict:
     """The exact inputs a full audit judges, independent of translation state.
 
@@ -260,13 +233,13 @@ def audit_snapshot(message: dict, locale: str, cfg: dict, canon_lock: dict, *, c
     build must notice drift even before the operator runs sync again.
     """
     if canon_context is None:
-        canon_context = audit_canon_context(canon_lock, [message], locale).get(message["id"], {})
+        canon_context = informational_canon_context(message, canon_lock, locale)
     return {
         "source_sha256": source_sha256(message),
         "value_sha256": _project_value_sha256(message, locale),
         "context_sha256": context_sha256(message, locale),
         "style_sha256": style_sha256(cfg, locale),
-        "canon_sha256": canon_sha256(message, canon_lock),
+        "canon_sha256": canon_sha256(message, canon_lock, locale),
         "canon_context_sha256": lz_common.sha256_json(canon_context),
     }
 

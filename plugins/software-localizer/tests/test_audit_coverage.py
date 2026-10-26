@@ -84,7 +84,10 @@ def _record_answer(batch, verdicts=None):
     if verdicts is None:
         verdicts = {item["id"]: _verdict(item) for item in packet["items"]}
     output_path = run_dir / "answer.json"
-    lz_common.atomic_write_json(output_path, {"verdicts": verdicts})
+    output = {"verdicts": verdicts}
+    if "note_revisions" in packet:
+        output["note_revisions"] = copy.deepcopy(packet["note_revisions"])
+    lz_common.atomic_write_json(output_path, output)
     record_agent_turn(run_dir, output_path)
     return run_dir, output_path
 
@@ -428,7 +431,7 @@ def test_unrelated_or_unapproved_audit_context_does_not_invalidate(work_root, ap
         })
     changed_lock = canon.freeze(work_root, source_canon)
     assert ledger.canon_sha256(message, initial_lock) == ledger.canon_sha256(message, changed_lock)
-    assert ledger.audit_canon_context(changed_lock, messages["messages"], "de") == first_context
+    assert ledger.informational_canon_context(message, changed_lock, "de") == first_context[message["id"]]
     assert _coverage(work_root)["reviewed"] == 1
     assert _build(work_root)["selected"] == 0
 
@@ -441,7 +444,7 @@ def test_accept_keeps_frozen_approved_context_when_live_lock_changed_without_reb
     frozen_context = frozen_packet["canon_context"][msg_id]
     approved_context["canon"]["groups"][0]["scope"] += " A later approved scope clarification."
     current_lock = canon.freeze(work_root, approved_context["canon"])
-    assert ledger.audit_canon_context(current_lock, messages["messages"], "de")[msg_id] != frozen_context
+    assert ledger.informational_canon_context(messages["messages"][0], current_lock, "de") != frozen_context
     result = _accept(work_root, batch)
     assert result["passed"] == [msg_id]
     record = ledger.load(work_root)["locales"]["de"][msg_id]["audit"]
@@ -469,6 +472,43 @@ def test_audit_context_hash_stays_separate_from_proposal_and_candidate_canon_has
     assert packets.do_accept_audit(work_root, "de", [message["id"]], "operator")["accepted"] == [message["id"]]
     candidate = ledger.load(work_root)["locales"]["de"][message["id"]]["candidate"]
     assert candidate["value"] == proposed and candidate["canon_sha256"] == mechanical_hash
+
+
+def test_group_only_corrected_note_keeps_accepted_audit_current_and_candidate_hash_consistent(work_root, approved_context):
+    _, messages, initial_lock = _approved_context_workspace(work_root, approved_context)
+    message = messages["messages"][0]
+    msg_id = message["id"]
+    corrected = approved_context["canon"]["entries"][1]
+    corrected_id = corrected["id"]
+    assert corrected_id not in {entry["id"] for entry in ledger.relevant_canon(message, initial_lock)}
+    assert msg_id not in corrected["occurrences"]
+    assert corrected_id in {
+        entry["id"] for entry in ledger.informational_canon_context(message, initial_lock, "de")["entries"]
+    }
+    event = canon.change_note(
+        work_root, approved_context["canon"], corrected_id, corrected["note"],
+        "A corrected meaning for the approved positioning adjective.",
+        "The operator clarified the shared meaning.", "operator",
+    )
+    full_lock = canon.load_lock(work_root)
+    expected_hash = ledger.canon_sha256(message, full_lock, "de")
+    assert expected_hash != ledger.canon_sha256(message, full_lock)
+    batch = _build(work_root)["batches"][0]
+    run_dir, packet = _packet(batch)
+    assert packet["note_revisions"][corrected_id] == event["note_revision"]
+    proposed = "evidenzbasierte Auswertung"
+    result = _accept(work_root, batch, {msg_id: _verdict(packet["items"][0], "fail", proposed)})
+    assert result["audit_proposals"] == [msg_id]
+    answer = lz_common.read_json(run_dir / "answer.json", "audit answer")
+    assert answer["note_revisions"] == packet["note_revisions"]
+    saved = ledger.load(work_root)["locales"]["de"][msg_id]
+    assert saved["audit"]["snapshot"]["canon_sha256"] == expected_hash
+    assert saved["audit_proposal"]["canon_sha256"] == expected_hash
+    coverage = _coverage(work_root)
+    assert coverage["reviewed"] == 1 and coverage["stale"] == 0 and coverage["fail"] == 1
+    assert packets.do_accept_audit(work_root, "de", [msg_id], "operator")["accepted"] == [msg_id]
+    candidate = ledger.load(work_root)["locales"]["de"][msg_id]["candidate"]
+    assert candidate["value"] == proposed and candidate["canon_sha256"] == expected_hash
 
 
 @pytest.mark.parametrize("verdict,proposed", [("pass", None), ("fail", "Hallo!")])
