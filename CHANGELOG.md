@@ -16,6 +16,17 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   the noun/adjective group and the initial-capital occurrence example; they prove context transfer,
   not a model's linguistic verdict or a translation-quality improvement.
 
+## [software-localizer 0.3.3] — 2026-10-26
+
+### Fixed
+
+- Accepted audit failures without a proposed replacement retain their issues and source,
+  target, context, style and canon snapshot hashes in the ledger (#1012). The generated report
+  shows them as unresolved findings; they cannot become candidates or be accepted for export.
+  A newer unresolved finding also replaces an older proposal instead of leaving it actionable.
+- Audit finding provenance uses the style from the reviewed packet, even when the workspace
+  configuration changes before acceptance.
+
 ## [software-localizer 0.3.2] — 2026-10-26
 
 ### Added
