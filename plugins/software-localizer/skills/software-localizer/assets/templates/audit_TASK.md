@@ -23,6 +23,10 @@ question rather than treating the decision as absent. Related phrases are not ma
 replacements outside their scope. This context never expands `canon`'s mechanical rules,
 waives a failed check, or widens a restricted audit beyond `canon_entry`.
 
+When `canon_entry.field` is `note`, `before` and `after` are shared semantic notes, not
+replacement translations. Reassess the current wording against the corrected meaning; the
+approved locale wording and do-not-translate spelling have not been changed by this correction.
+
 Reply with ONE JSON object and nothing else:
 
 ```json

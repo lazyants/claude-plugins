@@ -272,8 +272,7 @@ def build_report(root: Path, locale: str) -> str:
     records = canon_mod.load_research(root, locale)["entries"]
     canon_translations = {e["id"]: e.get("translations") or {} for e in canon_mod.load(root)["entries"]}
     completed = sum(1 for r in records.values() if not canon_mod.resource_limited(r.get("research")))
-    verified = sum(1 for r in records.values() if r.get("verification")
-                   and not canon_mod.resource_limited(r["verification"]))
+    verified = sum(1 for r in records.values() if canon_mod.research_summary(r)["verdict"] is not None)
     flagged = [(eid, r) for eid, r in sorted(records.items()) if canon_mod.research_flags(r)]
     lines.append("## Canon usage research")
     lines.append("")
@@ -290,6 +289,9 @@ def build_report(root: Path, locale: str) -> str:
     lines.extend(["## Canon work awaiting another turn", ""])
     pending = []
     for eid, record in sorted(records.items()):
+        if record.get("stale_note"):
+            pending.append(f"- `{eid}`: canon note changed; scope fresh reassessment before continuing")
+            continue
         for phase in ("research", "verification"):
             result = record.get(phase)
             if canon_mod.resource_limited(result):

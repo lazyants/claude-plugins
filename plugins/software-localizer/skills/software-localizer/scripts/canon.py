@@ -56,7 +56,8 @@ write the same file):
 `progress` distinguishes a complete bounded search (even with no findings)
 from resource-limited work with exact remaining checks. `attempts` retains
 the accepted answers; new packets carry checkpoints for safe continuation.
-Only `packets.py accept` of a research or research_verify run writes it.
+`packets.py accept` stores research/verification; `change-note` marks affected
+records stale while preserving their evidence and verification verbatim.
 Nothing hashes it and `freeze` never reads it: evidence for a person's
 decision, never an input to a candidate, a check or the lock. `approve`
 copies `research_summary` of the entry's record into its history event.
@@ -73,6 +74,7 @@ from __future__ import annotations
 
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -155,7 +157,7 @@ def research_summary(record: dict) -> dict:
     proposal. `confirmed`, `verdict` and `better` stay `None` until the
     research has been verified."""
     research = record.get("research") or {}
-    verification = record.get("verification")
+    verification = None if record.get("stale_note") else record.get("verification")
     summary = {
         "recommendation": research.get("recommendation"),
         "confidence": research.get("confidence"),
@@ -180,6 +182,8 @@ def research_flags(record: dict) -> list:
     for phase in ("research", "verification"):
         if resource_limited(record.get(phase)):
             flags.append(f"{phase} resource limited")
+    if record.get("stale_note"):
+        flags.append("canon note changed; research and verification need reassessment")
     if summary["verdict"] is None:
         flags.append("not verified")
     elif summary["verdict"] != "holds":
@@ -248,7 +252,7 @@ def import_candidates(canon: dict, candidates: list) -> dict:
     """Merge `candidates` into `canon` in place.
 
     An entry with the same `kind` and `source` merges: occurrences are
-    unioned, `note` fills in only if the existing entry's is empty, and an
+    unioned, `note` fills in only if empty and never person-corrected, and an
     incoming locale's `proposed` value either creates a fresh `proposed`
     translation or replaces an existing *proposed* one -- an already
     `approved` translation is never overwritten by an import. A well-shaped
@@ -306,7 +310,7 @@ def import_candidates(canon: dict, candidates: list) -> dict:
             for occ in occurrences:
                 if occ not in entry["occurrences"]:
                     entry["occurrences"].append(occ)
-            if not entry.get("note") and note:
+            if not entry.get("note") and note and not entry.get("note_revision"):
                 entry["note"] = note
             merged.append(entry["id"])
 
@@ -459,6 +463,8 @@ def _build_lock(canon: dict) -> dict:
                 "note": entry.get("note", ""), "occurrences": list(entry.get("occurrences", [])),
                 "translations": approved,
             }
+        if entry.get("note_revision"):
+            locked["note_revision"] = entry["note_revision"]
         locked["sha256"] = lz_common.sha256_json(locked)
         locked_entries.append(locked)
 
@@ -536,6 +542,8 @@ def change(
         )
 
     before = current.get("value")
+    request_path = Path(root) / "runs" / locale / f"canon-audit-{entry_id}.json"
+    previous_request = _read_or_default(request_path, "previous canon audit request", {})
     at = lz_common.now_iso()
     entry["translations"][locale] = {
         "value": value, "status": "approved", "approved_by": by, "approved_at": at,
@@ -546,6 +554,8 @@ def change(
         "before": before, "after": value, "reason": reason,
     }
     lock = _build_lock(canon)
+    if previous_request.get("field") == "note":
+        event["audit_request_before"] = previous_request
     _append_history(root, event)
     lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
 
@@ -554,7 +564,14 @@ def change(
         "before": before, "after": value, "reason": reason, "by": by, "at": at,
         "occurrences": list(entry.get("occurrences", [])),
     }
-    lz_common.atomic_write_json(Path(root) / "runs" / locale / f"canon-audit-{entry_id}.json", audit_request)
+    if previous_request.get("field") == "note":
+        audit_request = {
+            **previous_request,
+            "translation_change": {"before": before, "after": value, "reason": reason, "by": by, "at": at},
+            "occurrences": list(dict.fromkeys(previous_request.get("occurrences", []) +
+                                               list(entry.get("occurrences", [])))),
+        }
+    lz_common.atomic_write_json(request_path, audit_request)
 
     return event
 
@@ -664,6 +681,92 @@ def change_scope(root, canon: dict, entry_id: str, expect_sha256: str,
 # ---------------------------------------------------------------------------
 
 
+def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason: str, by: str) -> dict:
+    """Person-approved semantic correction of a shared note, across locales.
+
+    Preserve evidence in history before marking it stale. All reads precede
+    writes; invalidations precede the new canon/lock so an interrupted operation
+    errs toward reassessment. Run in the coordinator with locale workers stopped,
+    like other canon mutations; this is not a multi-file transaction.
+    """
+    import ledger as ledger_mod
+
+    root = Path(root)
+    entry = _find_by_id(canon, entry_id)
+    if entry is None:
+        lz_common.fail(f"no canon entry: {entry_id}", lz_common.EXIT_FAIL)
+    is_approved = (bool(entry.get("approved_by")) if entry["kind"] == "dnt" else
+                   any(t.get("status") == "approved" for t in entry.get("translations", {}).values()))
+    if not is_approved:
+        lz_common.fail("change-note requires an approved entry", lz_common.EXIT_FAIL, entry=entry_id)
+    if not by.strip() or not reason.strip():
+        lz_common.fail("change-note requires non-empty --by and --reason", lz_common.EXIT_FAIL)
+    before = entry.get("note", "")
+    if before != expect:
+        lz_common.fail("current note does not match --expect", lz_common.EXIT_FAIL, entry=entry_id)
+    if note == before:
+        lz_common.fail("new note equals the current note", lz_common.EXIT_FAIL, entry=entry_id)
+
+    cfg = lz_common.load_config(root)
+    messages = lz_common.load_messages(root / "messages.json")
+    old_lock = load_lock(root)
+    ledger_data = ledger_mod.load(root)
+    locales = sorted(set(cfg["target_locales"]) | set(entry.get("translations", {})) |
+                     {p.stem for p in (root / RESEARCH_DIR_NAME).glob("*.json")} |
+                     set(ledger_data["locales"]))
+    if any(not lz_common._locale_ok(locale) for locale in locales):
+        lz_common.fail("invalid locale in canon/research/ledger", lz_common.EXIT_CANNOT)
+    records = {locale: load_research(root, locale) for locale in locales}
+    occurrences = list(dict.fromkeys(list(entry.get("occurrences", [])) + [
+        m["id"] for m in messages["messages"]
+        if any(e["id"] == entry_id for e in ledger_mod.relevant_canon(m, old_lock))
+    ]))
+    at = lz_common.now_iso()
+    event = {
+        "action": "change-note", "entry": entry_id, "locale": None, "field": "note",
+        "impact": "semantic", "before": before, "after": note, "reason": reason, "by": by, "at": at,
+        "previous_revision": entry.get("note_revision"),
+        "research_before": {loc: deepcopy(data["entries"][entry_id]) for loc, data in records.items()
+                            if entry_id in data["entries"]},
+        "ledger_before": {loc: {i: deepcopy(e) for i, e in entries.items() if i in occurrences}
+                          for loc, entries in ledger_data["locales"].items()},
+        "audit_requests_before": {
+            loc: lz_common.read_json(path, "previous canon audit request") for loc in cfg["target_locales"]
+            if (path := root / "runs" / loc / f"canon-audit-{entry_id}.json").exists()
+        },
+        "affected": {"research_locales": [loc for loc, data in records.items() if entry_id in data["entries"]],
+                     "audit_locales": cfg["target_locales"], "occurrences": occurrences},
+    }
+    # Chain revisions so reverting a note never revives an old packet/verdict.
+    revision = lz_common.sha256_json(event)
+    event["note_revision"] = revision
+    _append_history(root, event)
+    for locale, data in records.items():
+        record = data["entries"].get(entry_id)
+        if record is not None:
+            record["stale_note"] = {"note_revision": revision, "at": at, "reason": reason}
+            save_research(root, locale, data)
+    for locale, entries in ledger_data["locales"].items():
+        for msg_id in occurrences:
+            if msg_id in entries:
+                entries[msg_id]["candidate"] = None
+                entries[msg_id].pop("audit_proposal", None)
+                entries[msg_id].pop("review_proposal", None)
+    ledger_mod.save(root, ledger_data)
+    for locale in cfg["target_locales"]:
+        request = {
+            "entry": entry_id, "kind": entry["kind"], "source": entry["source"], "locale": locale,
+            "field": "note", "impact": "semantic", "before": before, "after": note,
+            "note_revision": revision, "reason": reason, "by": by, "at": at, "occurrences": occurrences,
+        }
+        lz_common.atomic_write_json(root / "runs" / locale / f"canon-audit-{entry_id}.json", request)
+    entry["note"] = note
+    entry["note_revision"] = revision
+    save(root, canon)
+    freeze(root, canon)
+    return event
+
+
 def _cmd_import(args) -> int:
     root = lz_common.resolve_root(args.root)
     data = lz_common.read_json(Path(args.file), "canon import file")
@@ -718,6 +821,14 @@ def _cmd_change_scope(args) -> int:
     return lz_common.EXIT_OK
 
 
+def _cmd_change_note(args) -> int:
+    root = lz_common.resolve_root(args.root)
+    event = change_note(root, load(root), args.entry, args.expect, args.note, args.reason, args.by)
+    lz_common.emit({"ok": True, **{k: v for k, v in event.items()
+                                  if k not in ("research_before", "ledger_before", "audit_requests_before")}})
+    return lz_common.EXIT_OK
+
+
 def build_parser():
     parser = lz_common.make_parser("canon.py", "Canon (glossary) management")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -758,6 +869,14 @@ def build_parser():
     p_scope_change.add_argument("--reason", required=True)
     p_scope_change.add_argument("--by", required=True)
 
+    p_note = sub.add_parser("change-note", help="person-approved semantic correction of a shared note")
+    p_note.add_argument("--root", required=True)
+    p_note.add_argument("--entry", required=True)
+    p_note.add_argument("--expect", required=True, help="exact current shared note")
+    p_note.add_argument("--note", required=True, help="replacement shared note (may be empty)")
+    p_note.add_argument("--reason", required=True)
+    p_note.add_argument("--by", required=True)
+
     return parser
 
 
@@ -766,6 +885,7 @@ def main() -> int:
     dispatch = {
         "import": _cmd_import, "approve": _cmd_approve, "freeze": _cmd_freeze, "change": _cmd_change,
         "scope": _cmd_scope, "change-scope": _cmd_change_scope,
+        "change-note": _cmd_change_note,
     }
     return dispatch[args.command](args)
 

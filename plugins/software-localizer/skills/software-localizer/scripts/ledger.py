@@ -146,9 +146,9 @@ def relevant_canon(message: dict, canon_lock: dict) -> list:
     """The `canon.lock.json` entries relevant to one message: every `dnt`
     entry naming this message's id in `occurrences`, plus every entry whose
     `source` occurs as a substring of any form of this message's own source
-    text. This is the one relevance rule packets.py embeds into a packet's
-    `canon` field and `canon_sha256` below pins a candidate against -- kept
-    here so both call sites share it."""
+    text. This is the enforcement subset packets embed in `canon.entries`.
+    `canon_sha256` also binds informational corrected-note context for
+    explicit nonliteral occurrences."""
     entries = canon_lock.get("entries", []) if isinstance(canon_lock, dict) else []
     msg_id = message.get("id")
     source_forms = checks.forms_of(message.get("source"))
@@ -163,15 +163,32 @@ def relevant_canon(message: dict, canon_lock: dict) -> list:
     return kept
 
 
+def canon_note_context(message: dict, canon_lock: dict) -> list:
+    """Corrected notes for explicit nonliteral occurrences, informational only.
+
+    These entries travel beside enforcement entries, so a review sees the
+    corrected meaning without making the term applicable as a literal rule.
+    """
+    enforced = {entry["id"] for entry in relevant_canon(message, canon_lock)}
+    available = {entry["id"]: entry for entry in
+                 canon_lock.get("entries", []) + canon_lock.get("note_context", [])}
+    return [entry for entry in available.values() if entry.get("note_revision")
+            and message.get("id") in entry.get("occurrences", []) and entry["id"] not in enforced]
+
+
+def canon_dependencies(message: dict, canon_lock: dict) -> list:
+    return relevant_canon(message, canon_lock) + canon_note_context(message, canon_lock)
+
+
 def canon_sha256(message: dict, canon_lock: dict) -> str:
-    """A candidate's canon snapshot: the sha256 of exactly the canon lock
-    entries `relevant_canon` finds for this message, sorted by id so a
+    """A candidate's canon snapshot: enforcement entries plus corrected-note
+    context for explicit occurrences, sorted by id so a
     packet's first-seen batch order and the lock's order hash identically.
     A candidate stores this at accept time; `sync()` clears it once it no
     longer matches the canon lock's current relevant entries (a newly
     approved/changed entry must force a fresh check, the same way a
     source/context/style change does)."""
-    entries = sorted(relevant_canon(message, canon_lock), key=lambda entry: entry["id"])
+    entries = sorted(canon_dependencies(message, canon_lock), key=lambda entry: entry["id"])
     return lz_common.sha256_json(entries)
 
 

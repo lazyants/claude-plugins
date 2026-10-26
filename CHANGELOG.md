@@ -2,6 +2,20 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.5.2] — 2026-10-26
+
+### Added
+
+- `canon.py change-note` lets a person correct an approved term, UI-label or DNT entry's shared
+  semantic note with an exact expected-note guard, actor and reason (#1020). History retains the
+  exact notes and prior affected evidence; locale wording/approvals, DNT spelling/occurrences and
+  sibling entries are preserved. All note corrections take the semantic path.
+- Note revisions change the frozen hash, invalidate affected candidates/proposals, mark old
+  research/verification stale, and identify restricted audits across configured target locales.
+  Old evidence stays available, reports no longer count stale verification as current, and old
+  model turns cannot acquire a new meaning through packet rebuilds or a return to an old note.
+  Reassessment requests launch no research or model work automatically.
+
 ## [software-localizer 0.5.1] — 2026-10-26
 
 ### Added

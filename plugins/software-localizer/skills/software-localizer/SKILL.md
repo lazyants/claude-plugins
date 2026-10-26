@@ -66,8 +66,9 @@ alone does not prove what the worker saw.
    accepted audit proposal changes that.
 5. **Refuse, don't degrade.** A message still failing after `max_rounds` is `escalated` and left
    untranslated, listed in the report.
-6. **The canon is decided once.** Changing an approved entry is `canon.py change`, which
-   records who and why and triggers an audit of that entry.
+6. **The canon is decided once.** Use `canon.py change` for approved locale wording and
+   `canon.py change-note` for a shared semantic note. Both require a person's decision,
+   record who and why, and request an audit of that entry.
 7. **Project checks precede approval and export.** Test proposed values in a scratch project
    before asking a person to accept audit fixes, and test the final reviewed values again before
    live export. A model verdict or an export dry run does not run the project's tests.
@@ -284,6 +285,30 @@ sync, fresh checks/review and the restricted audits are required before export. 
 pending proposals leaves the active lock unchanged and requests no new audit. Spelling, approved
 locale wording, sibling entries and prior research/history are retained. See
 [scope state and recovery](references/state.md#reviewed-dnt-scope-decisions).
+
+To correct the **shared note** of an approved term, UI label or do-not-translate entry, first
+show the person the exact old/new notes, reason and affected locales/messages. Execute only
+the correction they confirm; model output is not approval. Stop locale workers while changing
+the canon. With a validated config and current `messages.json`:
+
+```bash
+python3 S/canon.py change-note --root R --entry ID --expect "exact current note" \
+  --note "corrected meaning" --reason "person's reason" --by "<operator>"
+```
+
+The exact-note guard refuses stale input. This route treats **every note correction as semantic**,
+including editorial edits; there is no lighter editorial mode. It preserves all locale approvals,
+wording, DNT spelling/occurrences and sibling entries. It records exact notes and prior affected
+evidence in history, refreezes the lock with a new revision, clears affected candidates/proposals,
+marks existing research/verification stale, and lists audit requests for every configured target
+locale. Inspect `affected` in its JSON result, then build a restricted audit as above per locale.
+These requests schedule no model work by themselves. Reassessment does not authorize another
+research run: agree the unanswered question and bounded scope with the operator before explicitly
+building `research --entry ID` and then a fresh `research_verify` turn. DNT entries have no usage-
+research turn; their corrected meaning goes through the restricted audit. Old evidence remains
+available in history and old run files, and old turns cannot become current on the new meaning.
+For corrected entries, answers must echo the packet's top-level `note_revisions` unchanged,
+as its prompt directs. See [state and evidence](references/state.md#shared-note-corrections).
 
 ## 5. Audit an existing translation
 
