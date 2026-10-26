@@ -97,6 +97,9 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   messages. A newly accepted verdict retires an older unaccepted proposal from the same scope.
   Missing or invalid answers remain unreviewed, and accepting a verdict never grants export
   permission.
+- Audit replies echo a snapshot token as well as the target hash, so a late answer cannot earn
+  coverage for a rebuilt packet with changed inputs. Pending audit packets from earlier versions
+  must be rebuilt and their audit turns rerun.
 
 ## [software-localizer 0.4.0] — 2026-10-26
 

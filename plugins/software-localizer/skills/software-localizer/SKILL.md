@@ -343,6 +343,9 @@ again, add `--fresh` (unrestricted audit only). A canon-entry audit never substi
 message audit. Accepted passes and failures are saved with their snapshot and run provenance;
 missing or invalid verdicts remain unreviewed. Changed source, target, context, style or relevant
 canon makes the saved verdict stale. Run collect and sync after project edits before resuming.
+Audit replies must echo each item's `audit_sha256` as well as `value_sha256`, so a late answer
+cannot claim changed inputs after a rebuild. For pending packets from an older plugin version,
+rebuild the packet and rerun the audit turn before accepting its answer.
 
 For each batch run a Claude subagent on its `prompt.md` (JSON only), save the answer, and
 `packets.py accept --root R --run <batch dir> --output <answer.json>`. Every accepted failure

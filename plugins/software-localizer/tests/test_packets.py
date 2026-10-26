@@ -1108,7 +1108,7 @@ def test_accept_audit_invalid_verdict_enum_treated_as_missing(work_root):
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     value_sha = packet["items"][0]["value_sha256"]
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": value_sha, "verdict": "nope",
+        "value_sha256": value_sha, "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "nope",
         "issues": [], "proposed": "Hallo!", "new_canon_candidates": [],
     }}})
 
@@ -1329,8 +1329,10 @@ def test_accept_new_canon_candidates_written_beside_packet(work_root, kind, lega
         legacy_dir = work_root / "runs" / "de" / "a"
         run_dir.rename(legacy_dir)
         run_dir = legacy_dir
+    packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     output_path = write_output(run_dir, {"verdicts": {"a": {
         "value_sha256": candidate["value_sha256"], "verdict": "pass", "issues": [], "proposed": None,
+        **({"audit_sha256": packet["items"][0]["audit_sha256"]} if kind == "audit" else {}),
         "new_canon_candidates": [{"kind": "term", "source": "Cart", "proposed": "Warenkorb", "note": "seen twice"}],
     }}})
 
@@ -1434,7 +1436,7 @@ def test_accept_audit_fail_with_proposed_stores_audit_proposal(work_root):
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     value_sha = packet["items"][0]["value_sha256"]
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": value_sha, "verdict": "fail",
+        "value_sha256": value_sha, "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "fail",
         "issues": [{"kind": "meaning", "text": "wrong"}], "proposed": "Hallo!",
         "new_canon_candidates": [],
     }}})
@@ -1550,7 +1552,8 @@ def test_accept_audit_pass_persists_provenance_without_changing_translation_stat
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     value_sha = packet["items"][0]["value_sha256"]
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": value_sha, "verdict": "pass", "issues": [], "proposed": None, "new_canon_candidates": [],
+        "value_sha256": value_sha, "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "pass",
+        "issues": [], "proposed": None, "new_canon_candidates": [],
     }}})
 
     packets.do_accept(work_root, run_dir, output_path)

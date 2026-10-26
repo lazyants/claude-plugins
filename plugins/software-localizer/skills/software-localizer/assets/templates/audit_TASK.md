@@ -32,6 +32,7 @@ Reply with ONE JSON object and nothing else:
 ```json
 {"verdicts": {"<id>": {
   "value_sha256": "<copy the item's value_sha256 exactly>",
+  "audit_sha256": "<copy the item's audit_sha256 exactly>",
   "verdict": "pass or fail",
   "issues": [{"kind": "meaning|canon|style|untranslated|plural|consistency|grammar", "text": "…"}],
   "proposed": null,
@@ -39,7 +40,9 @@ Reply with ONE JSON object and nothing else:
 }}}
 ```
 
-- Give a verdict for **every** id. Copy each `value_sha256` exactly.
+- Give a verdict for **every** id. Copy each `value_sha256` and `audit_sha256` exactly.
+  The audit hash binds your verdict to this item's source, target, context, style, canon,
+  locale and audit scope. An answer with a different audit hash cannot review this snapshot.
 - `fail` needs at least one issue and, whenever you can, a corrected value in `proposed` (same
   shape as the current value; keep every placeholder, reference, markup token and surrounding
   space exactly as in the source).

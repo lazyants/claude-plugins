@@ -66,6 +66,7 @@ def _packet(batch):
 def _verdict(item, verdict="pass", proposed=None):
     return {
         "value_sha256": item["value_sha256"],
+        "audit_sha256": item["audit_sha256"],
         "verdict": verdict,
         "issues": [] if verdict == "pass" else [{"kind": "meaning", "text": "Check the greeting's intended meaning."}],
         "proposed": proposed,
@@ -188,6 +189,95 @@ def test_partial_and_refused_verdicts_remain_unreviewed_and_resume(work_root):
     assert coverage["reviewed"] == 1 and coverage["unreviewed"] == 3
     assert coverage["ids"]["unreviewed"] == ["b", "c", "d"]
     assert _selected(_build(work_root)) == {"b", "c", "d"}
+
+
+@pytest.mark.parametrize("changed", ["source", "context", "style", "canon"])
+def test_old_answer_cannot_cover_rebuilt_packet_with_same_target(work_root, changed):
+    canon_lock = {"schema": 1, "entries": [_canon_entry()]}
+    cfg, messages = _workspace(work_root, canon_lock=canon_lock)
+    first = _build(work_root)["batches"][0]
+    first_dir, first_packet = _packet(first)
+    first_item = first_packet["items"][0]
+    retained_answer = _verdict(first_item)
+    if changed == "source":
+        messages["messages"][0]["source"] = "Hello again"
+    elif changed == "context":
+        messages["messages"][0]["context"]["comment"] = "A changed greeting context"
+    elif changed == "style":
+        cfg["style"]["de"]["notes"] = "A changed style instruction"
+    else:
+        canon_lock["entries"][0]["translations"]["de"]["value"] = "Guten Tag"
+    lz_common.atomic_write_json(work_root / "messages.json", messages)
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+    lz_common.atomic_write_json(work_root / "canon.lock.json", canon_lock)
+    rebuilt = _build(work_root)["batches"][0]
+    rebuilt_dir, rebuilt_packet = _packet(rebuilt)
+    rebuilt_item = rebuilt_packet["items"][0]
+    assert rebuilt_dir == first_dir  # The ordinary rebuild reuses its existing run path.
+    assert rebuilt_item["value_sha256"] == first_item["value_sha256"]
+    assert rebuilt_item["audit_sha256"] != first_item["audit_sha256"]
+    before = ledger.load(work_root)
+    refused = _accept(work_root, rebuilt, {"a": retained_answer})
+    assert refused["passed"] == [] and refused["missing"] == ["a"]
+    assert ledger.load(work_root) == before
+    assert _coverage(work_root)["reviewed"] == 0
+    accepted = _accept(work_root, rebuilt, {"a": _verdict(rebuilt_item)})
+    assert accepted["passed"] == ["a"] and accepted["missing"] == []
+    assert _coverage(work_root)["reviewed"] == 1
+
+
+@pytest.mark.parametrize("binding", ["missing", "wrong"])
+def test_invalid_reply_binding_preserves_previous_verdict_and_proposal(work_root, binding):
+    _workspace(work_root)
+    first = _build(work_root)["batches"][0]
+    _accept(work_root, first, {"a": _verdict(_packet(first)[1]["items"][0], "fail", "Hallo!")})
+    fresh = _build(work_root, fresh=True)["batches"][0]
+    answer = _verdict(_packet(fresh)[1]["items"][0])
+    if binding == "missing":
+        answer.pop("audit_sha256")
+    else:
+        answer["audit_sha256"] = "0" * 64
+    before = ledger.load(work_root)
+    result = _accept(work_root, fresh, {"a": answer})
+    assert result["passed"] == [] and result["missing"] == ["a"]
+    assert ledger.load(work_root) == before
+    assert _coverage(work_root)["fail"] == 1
+
+
+@pytest.mark.parametrize("old_scope,new_scope", [("full", "restricted"), ("restricted", "full")])
+def test_audit_response_binding_cannot_cross_full_and_restricted_scopes(work_root, old_scope, new_scope):
+    _workspace(work_root)
+    _restricted_request(work_root)
+    first = _build(work_root, **({"entry_ids": ["t-hello"]} if old_scope == "restricted" else {}))["batches"][0]
+    first_item = _packet(first)[1]["items"][0]
+    current = _build(work_root, **({"entry_ids": ["t-hello"]} if new_scope == "restricted" else {}))["batches"][0]
+    current_item = _packet(current)[1]["items"][0]
+    assert first_item["value_sha256"] == current_item["value_sha256"]
+    assert first_item["audit_sha256"] != current_item["audit_sha256"]
+    before = ledger.load(work_root)
+    result = _accept(work_root, current, {"a": _verdict(first_item)})
+    assert result["missing"] == ["a"] and result["passed"] == []
+    assert ledger.load(work_root) == before
+    accepted = _accept(work_root, current, {"a": _verdict(current_item)})
+    assert accepted["passed"] == ["a"]
+    assert _coverage(work_root)["reviewed"] == (1 if new_scope == "full" else 0)
+
+
+def test_legacy_packet_without_binding_requires_rebuild_and_cannot_gain_coverage(work_root):
+    _workspace(work_root)
+    batch = _build(work_root)["batches"][0]
+    run_dir, packet = _packet(batch)
+    answer = _verdict(packet["items"][0])
+    packet["items"][0].pop("audit_sha256")
+    lz_common.atomic_write_json(run_dir / "packet.json", packet)
+    before = ledger.load(work_root)
+    result = _accept(work_root, batch, {"a": answer})
+    assert result["passed"] == [] and result["missing"] == ["a"]
+    assert ledger.load(work_root) == before
+    assert _coverage(work_root)["reviewed"] == 0
+    rebuilt = _build(work_root)["batches"][0]
+    assert _accept(work_root, rebuilt)["passed"] == ["a"]
+    assert _coverage(work_root)["reviewed"] == 1
 
 
 def test_completed_audit_resumes_empty_and_fresh_rebuilds_all(work_root):
