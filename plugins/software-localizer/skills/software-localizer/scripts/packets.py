@@ -1,6 +1,7 @@
 """Build and accept model-turn packets: translate, review, audit, canon,
 research, research_verify.
-Every packet is a frozen snapshot of what the model saw — a turn is
+Every packet is a frozen intended input; native Claude turns also require a
+receipt from the actual Agent request/result before acceptance. A turn is
 validated against that snapshot, never against a possibly-changed
 `messages.json` or `canon.json` read again later.
 
@@ -74,6 +75,7 @@ import canon as canon_mod  # noqa: E402
 import checks as checks_mod  # noqa: E402
 import ledger as ledger_mod  # noqa: E402
 import lz_common  # noqa: E402
+import packet_handoff  # noqa: E402
 
 KINDS = ("translate", "review", "audit", "canon")
 RESEARCH_KINDS = ("research", "research_verify")
@@ -95,6 +97,11 @@ def default_templates_dir() -> Path:
 
 
 def render_prompt(templates_dir, kind: str, packet: dict) -> str:
+    prefix, suffix = prompt_instructions(templates_dir, kind)
+    return prefix + json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=True) + suffix
+
+
+def prompt_instructions(templates_dir, kind: str) -> tuple[str, str]:
     """Render `<kind>_TASK.md`, replacing the literal line `{{PACKET_JSON}}`
     with the packet's JSON. Raises `LookupError` naming the problem when the
     template file is missing or does not carry the placeholder line — the
@@ -103,20 +110,13 @@ def render_prompt(templates_dir, kind: str, packet: dict) -> str:
     if not template_path.is_file():
         raise LookupError(f"template is missing: {template_path}")
     text = template_path.read_text(encoding="utf-8")
-    packet_json = json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=False)
-
     lines = text.split("\n")
-    out_lines = []
-    replaced = False
-    for line in lines:
-        if line.strip() == "{{PACKET_JSON}}":
-            out_lines.append(packet_json)
-            replaced = True
-        else:
-            out_lines.append(line)
-    if not replaced:
-        raise LookupError(f"template has no {{{{PACKET_JSON}}}} line: {template_path}")
-    return "\n".join(out_lines)
+    positions = [n for n, line in enumerate(lines) if line.strip() == "{{PACKET_JSON}}"]
+    if len(positions) != 1:
+        raise LookupError(f"template needs exactly one {{{{PACKET_JSON}}}} line: {template_path}")
+    n = positions[0]
+    return ("\n".join(lines[:n]) + "\n" if n else "",
+            "\n" + "\n".join(lines[n + 1:]) if n + 1 < len(lines) else "")
 
 
 # ---------------------------------------------------------------------------
@@ -706,11 +706,18 @@ def _write_batch(run_locale_dir: Path, name: str, kind: str, packet: dict, templ
             n += 1
         packet = {**packet, "batch": name}
     try:
-        prompt = render_prompt(templates_dir, kind, packet)
+        prefix, suffix = prompt_instructions(templates_dir, kind)
+        prompt = prefix + json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=True) + suffix
     except LookupError as exc:
         lz_common.fail(str(exc), lz_common.EXIT_CANNOT)
     lz_common.atomic_write_json(batch_dir / "packet.json", packet)
     lz_common.atomic_write_text(batch_dir / "prompt.md", prompt)
+    lz_common.atomic_write_json(batch_dir / "instructions.json", {"prefix": prefix, "suffix": suffix})
+    if kind in packet_handoff.GUARDED_KINDS:
+        request = packet_handoff.agent_request(kind, name, prompt)
+        # The parent can submit these complete Agent arguments as ASCII JSON;
+        # the child never needs Read/Bash to recover the packet.
+        lz_common.atomic_write_text(batch_dir / "request.json", json.dumps(request, indent=2, ensure_ascii=True) + "\n")
     return {"batch": name, "dir": str(batch_dir), "items": len(packet["items"])}
 
 
@@ -1139,6 +1146,8 @@ def do_accept(root: Path, run_dir: Path, output_path: Path) -> dict:
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     output = lz_common.read_json(output_path, "accept output")
     kind = packet.get("kind")
+    if kind in packet_handoff.GUARDED_KINDS:
+        packet, output = packet_handoff.verify(run_dir, output_path)
     batch_name = packet.get("batch", run_dir.name)
     cfg = lz_common.load_config(root)
     lz_common.require_accepted_adapter(root, cfg)

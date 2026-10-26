@@ -42,6 +42,15 @@ Repeated builds of the same kind may reuse their directory for fix rounds. Older
 directories stay in place and can still be passed to `accept` with their own answers.
 The reserved `_packets` directory keeps new runs separate from legacy batch names.
 
+**Native Claude turns require verified transport.** For canon, research,
+research verification, audit and review, submit the generated ASCII `request.json`
+as the complete native `Agent` arguments. Save the answer, then capture a receipt
+from the actual parent's session JSONL and call id before `packets.py accept`.
+The parent does all file operations; research children have only web tools.
+Follow [packet handoff](references/packet-handoff.md) for the executable commands,
+supported log format and failed-attempt recovery. A packet file or value hash
+alone does not prove what the worker saw.
+
 ## Hard rules
 
 1. **Nothing runs on defaults.** `localize.json` ships `CHOOSE_` sentinels; `config_validate.py`
@@ -164,10 +173,10 @@ communities in the project's field name it there. Per locale:
 
 ```bash
 python3 S/packets.py build --root R --kind research --locale L [--entry ID …]
-# one Claude subagent per batch, with web search and page fetch: prompt.md, JSON only, save
+# dispatch each request.json via the web-only usage-research Agent; save and capture receipt
 python3 S/packets.py accept --root R --run <batch dir> --output <answer.json>
 python3 S/packets.py build --root R --kind research_verify --locale L
-# a DIFFERENT subagent per batch, never the one that researched it: prompt.md, JSON only, save
+# a DIFFERENT fresh usage-research Agent per batch; save and capture receipt
 python3 S/packets.py accept --root R --run <batch dir> --output <answer.json>
 ```
 
@@ -191,7 +200,8 @@ time. Expect gaps: some sites block automated fetches (their quotes cannot be co
 web-search budget can run out mid-batch, and a concept that exists only in this product has no
 outside evidence — it gets low confidence and says so. Both turns read untrusted web pages, so
 give their subagents web search and page fetch only, no file or shell tools; the session saves
-each answer itself.
+each answer itself. The generated requests select the packaged `usage-research`
+agent to enforce that tool restriction.
 
 **Pace the coordinator across ordinary user turns.** A tool allowance is shared by the
 coordinator and its nested agents in that user turn, so adding subagents or locales does not

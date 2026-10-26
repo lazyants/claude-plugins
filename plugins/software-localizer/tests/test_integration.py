@@ -30,6 +30,7 @@ FIXTURES_DIR = TESTS_DIR / "fixtures"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import lz_common  # noqa: E402  (read-only: value hashing/atomic writes for the recovery fixture)
+from handoff_fixture import record_agent_turn  # noqa: E402
 
 # Derived empirically from tests/fixtures/toy_project's actual form counts
 # (cart.itemCount: en/de have 2 forms, ru has 3; mail.unreadCount: en/ru have
@@ -49,6 +50,9 @@ TOY_OPTIONS = {
 
 
 def run_cli(script: str, args: list):
+    if script == "packets.py" and args[0] == "accept":
+        # Canned model turns also exercise the production receipt path.
+        record_agent_turn(Path(args[args.index("--run") + 1]), Path(args[args.index("--output") + 1]))
     proc = subprocess.run(
         [sys.executable, str(SCRIPTS_DIR / script), *args],
         capture_output=True, text=True,

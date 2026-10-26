@@ -27,7 +27,10 @@ native speaker.
   expansions stay pending until that decision; subset imports never delete scope.
 - **Safety.** A person's translation is never overwritten; nothing is exported without script
   checks and a review verdict bound to the exact value; export re-collects, compares, and writes
-  under a journal that rolls back on failure.
+  under a journal that rolls back on failure. Native Claude packet turns require a receipt
+  comparing their actual submitted input and returned answer with the original packet and
+  instructions ([handoff](skills/software-localizer/references/packet-handoff.md)). This
+  verifies transport separately from linguistic correctness.
 - **Workspace.** The workspace can sit outside the project or inside it (for example
   `<project>/localization`). Inside, the config, the adapter and the approved canon are committed
   with the project; a generated `.gitignore` keeps run state out of git.
