@@ -246,12 +246,29 @@ def test_changed_inputs_visibly_stale_saved_observations(work_root, changed):
     lz_common.atomic_write_json(work_root / "localize.json", cfg)
     text = _report(work_root)
     assert "current-value checks: observations (stale)" in text
+    model_freshness = "current" if changed in ("adapter", "options", "allow_identical") else "stale"
+    assert f"verdict: pass ({model_freshness} full audit)" in text
     assert "- stale: 1" in text.split("## Current-value mechanical coverage")[1].split("## Exported")[0]
     assert ledger.load(work_root) == saved
     # Model provenance can remain current when only parser/check inputs moved;
     # the ordinary build must nevertheless offer the missing mechanical work.
     lz_common.atomic_write_json(work_root / "adapter.lock.json", lz_common.adapter_digest(work_root, cfg))
     assert packets.do_build(work_root, "audit", "de", TEMPLATES_DIR)["selected"] == 1
+
+
+def test_check_input_drift_keeps_model_issues_current_and_replacement_checks_stale(work_root):
+    cfg, _, _ = _workspace(work_root)
+    run_dir, packet = _build(work_root)
+    _accept(work_root, run_dir, packet, "fail", "Hallo {name}")
+    cfg["allow_identical"] = ["a"]
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+    text = _report(work_root)
+    assert "verdict: fail (current full audit)" in text
+    assert "current-value checks: observations (stale)" in text
+    assert "replacement checks: pass (stale)" in text
+    assert "  - issue: meaning: Owner clarification needed." in text
+    assert "saved issue:" not in text
+    assert "proposal snapshot: stale" in text
 
 
 def test_old_packet_cannot_overwrite_checks_after_adapter_reacceptance(work_root):

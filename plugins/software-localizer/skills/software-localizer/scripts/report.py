@@ -125,7 +125,7 @@ def _row_escalated(msg_id, entry, message):
     return out
 
 
-def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, proposal=None):
+def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, proposal=None, checks_stale=False):
     out = [f"- `{msg_id}` — {_context_or_missing(message)}"]
     if message is not None:
         source_label = "current source" if stale else "source"
@@ -143,7 +143,7 @@ def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, 
         current_checks = record.get("current_checks")
         if current_checks:
             out.append(f"  - audited value: {_value_text(record.get('audited_value'))}")
-            out.append(f"  - current-value checks: {current_checks['status']} ({'stale' if stale else 'current'})")
+            out.append(f"  - current-value checks: {current_checks['status']} ({'stale' if checks_stale else 'current'})")
             for problem in current_checks.get("problems", []):
                 out.append(f"  - current-value observation: {_problem_text(problem)}")
             for gap in current_checks.get("unavailable", []):
@@ -155,7 +155,7 @@ def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, 
             out.append("  - current-value checks: unreviewed (legacy audit)")
         if record.get("proposal_checks"):
             replacement = record["proposal_checks"]
-            out.append(f"  - replacement checks: {replacement['status']} ({'stale' if stale else 'current'})")
+            out.append(f"  - replacement checks: {replacement['status']} ({'stale' if checks_stale else 'current'})")
             for problem in replacement.get("problems", []):
                 out.append(f"  - replacement observation: {_problem_text(problem)}")
             for gap in replacement.get("unavailable", []):
@@ -167,7 +167,7 @@ def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, 
             out.append("  - unresolved: no proposed replacement; needs follow-up")
         else:
             out.append(f"  - proposed: {_value_text(proposal.get('value'))} (checks {proposal.get('checks')})")
-        if stale:
+        if stale or checks_stale:
             out.append("  - proposal snapshot: stale; audit again before approval")
     elif record and record.get("verdict") == "fail" and record.get("proposed") is None:
         out.append("  - unresolved: no proposed replacement; needs follow-up")
@@ -208,11 +208,12 @@ def _audit_rows(msg_id, entry, message, cfg, canon_lock, locale, check_inputs):
         if not record:
             continue
         checks_status = ledger_mod.audit_checks_status(record, snapshot, check_inputs)
-        stale = current_value is None or record.get("snapshot") != snapshot or checks_status == "stale"
+        stale = current_value is None or record.get("snapshot") != snapshot
         scoped_proposal = proposal if proposal_scope == scope else None
         if (record.get("verdict") == "fail" or record.get("issues") or stale or scoped_proposal
                 or record.get("proposed") is not None or checks_status != "pass"):
-            rows.append((msg_id, entry, message, current_value, record, stale, scoped_proposal))
+            rows.append((msg_id, entry, message, current_value, record, stale, scoped_proposal,
+                         checks_status == "stale"))
             used_proposal = used_proposal or scoped_proposal is not None
     if proposal and not used_proposal:
         # Older ledgers have a proposal but no complete audit verdict.
