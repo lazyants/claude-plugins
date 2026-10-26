@@ -264,15 +264,16 @@ def _project_inventory(project_dir: Path, exclude: str | None) -> list[str]:
     if in_work_tree:
         try:
             # NUL-separated: in newline mode git C-quotes a non-ASCII path, which is
-            # neither the real file name nor comparable to `exclude`.
+            # neither the real file name nor comparable to `exclude`. Keep bytes until
+            # decoding: text mode's universal-newline conversion also changes CR in names.
             proc = subprocess.run(
                 ["git", "-C", str(project_dir), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                 capture_output=True,
-                text=True,
                 timeout=60,
             )
             if proc.returncode == 0:
-                return sorted({p for p in proc.stdout.split("\0") if p and not lz_common.path_within(p, exclude)})
+                paths = proc.stdout.decode("utf-8").split("\0")
+                return sorted({p for p in paths if p and not lz_common.path_within(p, exclude)})
         except (OSError, subprocess.SubprocessError):
             pass  # fall through to the directory walk
 

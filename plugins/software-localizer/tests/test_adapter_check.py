@@ -736,10 +736,16 @@ def test_documented_classification_refuses_incomplete_or_changed_inventory(work_
     assert not evidence_dir.exists()
 
 
-def test_documented_classification_preserves_non_lf_path_characters(work_root, monkeypatch):
-    root, project_dir, cfg = _make_workspace(work_root)
+def test_documented_classification_preserves_non_lf_path_characters(work_root):
+    root, project_dir, cfg = _make_workspace(work_root, project_git=True)
     paths = ["assets/Icon\r", "locales/catalog\u2028name.json"]
-    monkeypatch.setattr(adapter_check, "_project_inventory", lambda project, exclude=None: paths)
+    for relative in paths:
+        path = project_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-f", "--", *paths], cwd=str(project_dir), check=True, timeout=30)
+    inventory = adapter_check._project_inventory(project_dir, exclude=None)
+    assert set(paths) <= set(inventory)
     coverage_dir = root / "runs" / "_coverage"
     packet = adapter_check._build_coverage_packet(root, project_dir, {"messages": []}, "current", coverage_dir)
     packet_path = coverage_dir / "packet.json"
@@ -749,7 +755,7 @@ def test_documented_classification_preserves_non_lf_path_characters(work_root, m
     for name in ("classification.jsonl", "candidates.jsonl"):
         rows = [json.loads(line) for line in (evidence_dir / name).read_text(
             encoding="utf-8").split("\n") if line]
-        assert [row["path"] for row in rows] == paths
+        assert [row["path"] for row in rows] == inventory
 
 
 def test_inventory_includes_untracked_and_excludes_gitignored(work_root):

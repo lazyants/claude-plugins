@@ -13,6 +13,8 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   extension is automatically excluded; unexpected catalogs remain candidates. Uninspected or
   uncertain candidates must be reported as coverage gaps under the existing run-ID and
   missing-file acceptance contract.
+- Git inventory output is decoded without newline normalization, preserving carriage returns
+  in filenames through the inventory producer and the classification procedure.
 
 ## [software-localizer 0.4.0] — 2026-10-26
 
