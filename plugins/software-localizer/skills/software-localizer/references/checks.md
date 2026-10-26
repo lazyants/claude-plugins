@@ -125,3 +125,11 @@ The same judgement over the translation the project ships today. Findings carry 
 replacement; proposals are checked by script at once but applied only when a person accepts
 them (`packets.py accept-audit`), and each accepted proposal still gets its own review verdict
 before export.
+
+The existing value also receives every applicable script check independently of
+that judgement. Packets and durable audit records keep `current_checks` separate
+from the model verdict and `proposal_checks`. Reports preserve the original
+observations even if the model passes or offers a mechanically clean replacement.
+Parser failures mean unavailable syntax coverage; parser-independent checks still
+run. Identity, fragment composition and legacy DNT scope conflicts remain owner
+holds for contextual adjudication, with no automatic rewrite or waiver.

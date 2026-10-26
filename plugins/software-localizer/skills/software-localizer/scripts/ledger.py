@@ -275,6 +275,23 @@ def audit_coverage(ledger_data: dict, messages: dict, cfg: dict, canon_lock: dic
     return result
 
 
+def audit_check_inputs(root, cfg: dict) -> dict:
+    """Mechanical inputs beyond the per-message audit snapshot."""
+    return {
+        "adapter": lz_common.adapter_digest(root, cfg),
+        "allow_identical": sorted(cfg.get("allow_identical", [])),
+    }
+
+
+def audit_checks_status(record, snapshot, check_inputs) -> str:
+    """Missing checks are unreviewed; obsolete observations remain evidence."""
+    if not record or not record.get("current_checks"):
+        return "unreviewed"
+    if snapshot is None or record.get("snapshot") != snapshot or record.get("check_inputs") != check_inputs:
+        return "stale"
+    return record["current_checks"]["status"]
+
+
 # ---------------------------------------------------------------------------
 # sync
 # ---------------------------------------------------------------------------

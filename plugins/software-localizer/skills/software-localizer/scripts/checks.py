@@ -63,7 +63,8 @@ def check_candidate(
     Returns a list of `{"check", "detail"}` problems, empty on a full pass.
     `source_parse`/`value_parse` are a single parse result for a non-plural
     message, or a list of parse results (one per form, source/value order)
-    for a plural one.
+    for a plural one. When parsing is unavailable, pass None for both to
+    run only parser-independent checks; the caller must report that gap.
     """
     plural_spec = message.get("plural")
     is_plural = plural_spec is not None
@@ -85,8 +86,8 @@ def check_candidate(
         general_index = plural_spec["general_index"]
         count_arguments = set(plural_spec.get("count_arguments", []))
         value_forms = list(value["forms"])
-        source_parses = list(source_parse)
-        value_parses = list(value_parse)
+        source_parses = list(source_parse) if source_parse is not None else []
+        value_parses = list(value_parse) if value_parse is not None else []
     else:
         if not isinstance(value, str):
             return [{
@@ -111,14 +112,15 @@ def check_candidate(
             ),
         })
 
-    problems.extend(_check_parse(value_forms, value_parses, is_plural, target_labels))
-    problems.extend(_check_arguments(
-        is_plural, value_forms, value_parses, source_parses, target_labels,
-        general_index, count_arguments, plural_spec["source_labels"] if is_plural else [],
-    ))
-    problems.extend(_check_structure(
-        is_plural, value_forms, value_parses, source_parses, target_labels, general_index,
-    ))
+    if source_parse is not None and value_parse is not None:
+        problems.extend(_check_parse(value_forms, value_parses, is_plural, target_labels))
+        problems.extend(_check_arguments(
+            is_plural, value_forms, value_parses, source_parses, target_labels,
+            general_index, count_arguments, plural_spec["source_labels"] if is_plural else [],
+        ))
+        problems.extend(_check_structure(
+            is_plural, value_forms, value_parses, source_parses, target_labels, general_index,
+        ))
     problems.extend(_check_whitespace(
         is_plural, value_forms, source_forms, target_labels, general_index,
     ))

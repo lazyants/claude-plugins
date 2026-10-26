@@ -2,6 +2,22 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.7.0] — 2026-10-26
+
+### Added
+
+- Audit packets parse existing values with the accepted project adapter and expose every
+  applicable mechanical check independently of model verdicts or proposed replacements (#1036).
+  Durable audit records and reports retain current-value observations separately from the raw
+  verdict and replacement checks; a clean replacement does not erase the original observation.
+- Reports distinguish clean, observed, unavailable, stale and unreviewed mechanical coverage.
+  Adapter/parser failures never count as clean; parser-independent checks still run. Diagnostics
+  bind source, target, context, style, canon, adapter files/argv/options and identity allowances.
+  Resumed builds include missing, stale or unavailable mechanical work.
+- Mechanical observations remain owner holds for contextual adjudication, including legitimate
+  source identity, fragment boundaries and legacy DNT conflicts. They grant no rewrite, brand
+  insertion, whitespace waiver, occurrence-scope change or export approval.
+
 ## [software-localizer 0.6.0] — 2026-10-26
 
 ### Added
