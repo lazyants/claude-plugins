@@ -581,26 +581,30 @@ def _select_research_verify(research: dict, entry_ids) -> list:
 
 def build_research_item(entry: dict, locale: str, by_id: dict) -> dict:
     translation = entry["translations"].get(locale) or {}
-    return {
+    item = {
         "id": entry["id"], "kind": entry["kind"], "source": entry["source"],
         "note": entry.get("note") or "",
-        "note_revision": entry.get("note_revision"),
         "proposed": translation.get("value"), "status": translation.get("status"),
         "current": list(translation.get("current") or []),
         "examples": _research_examples(entry, by_id, locale),
     }
+    if entry.get("note_revision"):
+        item["note_revision"] = entry["note_revision"]
+    return item
 
 
 def build_research_verify_item(entry_id: str, record: dict, entry: dict, locale: str, by_id: dict) -> dict:
     """A record whose canon entry has since gone (`entry` is `{}`) keeps its
     own kind/source; it just has no note or examples left to show."""
-    return {
+    item = {
         "id": entry_id, "kind": record["kind"], "source": record["source"],
         "note": entry.get("note") or "",
-        "note_revision": entry.get("note_revision"),
         "examples": _research_examples(entry, by_id, locale),
         "research": record["research"], "research_sha256": record["research_sha256"],
     }
+    if entry.get("note_revision"):
+        item["note_revision"] = entry["note_revision"]
+    return item
 
 
 def _build_research(root: Path, cfg: dict, kind: str, locale: str, entry_ids, templates_dir: Path) -> dict:
@@ -1436,7 +1440,7 @@ def accept_research(root: Path, packet: dict, run_dir: Path, output: dict) -> di
             "researched": {"run": run_dir.name, "at": at, "packet": str(run_dir / "packet.json")},
             "verification": None,
             "attempts": _attempt(previous, "research", term, run_dir, at),
-            "note_revision": item.get("note_revision"),
+            **({"note_revision": item["note_revision"]} if item.get("note_revision") else {}),
         }
         stored.append(entry_id)
         if canon_mod.resource_limited(research):
