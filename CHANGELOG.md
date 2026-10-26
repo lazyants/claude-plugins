@@ -59,6 +59,24 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 
 ### Added
 
+- Accepted audit verdicts, including passes and findings without replacements, persist with
+  source/target/context/style/canon hashes and run provenance (#1013). Restricted canon audits
+  retain their own scope and do not count as full-message reviews.
+- Status and reports show current reviewed/total coverage, pass/fail and unresolved counts,
+  and stale/unreviewed IDs. Snapshot changes invalidate coverage without discarding the saved
+  verdict; a completed audit is distinguishable from one that never ran.
+- Full audit builds resume the remaining messages; `--fresh` explicitly reruns all eligible
+  messages. A newly accepted verdict retires an older unaccepted proposal from the same scope.
+  Missing or invalid answers remain unreviewed, and accepting a verdict never grants export
+  permission.
+- Audit replies echo a snapshot token as well as the target hash, so a late answer cannot earn
+  coverage for a rebuilt packet with changed inputs. Pending audit packets from earlier versions
+  must be rebuilt and their audit turns rerun.
+
+## [software-localizer 0.5.0] — 2026-10-26
+
+### Added
+
 - Audit packets carry approved concept groups, their member IDs and scope notes, and approved
   entries linked by exact message occurrence in a separate, per-message `canon_context` (#1014).
   Groups are explicitly reviewed in `canon.json`, locale scoped and frozen only with approved
@@ -82,24 +100,6 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   missing-file acceptance contract.
 - Git inventory output is decoded without newline normalization, preserving carriage returns
   in filenames through the inventory producer and the classification procedure.
-
-## [software-localizer 0.4.0] — 2026-10-26
-
-### Added
-
-- Accepted audit verdicts, including passes and findings without replacements, persist with
-  source/target/context/style/canon hashes and run provenance (#1013). Restricted canon audits
-  retain their own scope and do not count as full-message reviews.
-- Status and reports show current reviewed/total coverage, pass/fail and unresolved counts,
-  and stale/unreviewed IDs. Snapshot changes invalidate coverage without discarding the saved
-  verdict; a completed audit is distinguishable from one that never ran.
-- Full audit builds resume the remaining messages; `--fresh` explicitly reruns all eligible
-  messages. A newly accepted verdict retires an older unaccepted proposal from the same scope.
-  Missing or invalid answers remain unreviewed, and accepting a verdict never grants export
-  permission.
-- Audit replies echo a snapshot token as well as the target hash, so a late answer cannot earn
-  coverage for a rebuilt packet with changed inputs. Pending audit packets from earlier versions
-  must be rebuilt and their audit turns rerun.
 
 ## [software-localizer 0.4.0] — 2026-10-26
 
