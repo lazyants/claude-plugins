@@ -340,6 +340,16 @@ def test_seam_batch_canon_order_preserves_reviewed_candidates(work_root, kind):
     assert [entry["source"] for entry in packet["canon"]["entries"]] == ["Alpha", "Beta"]
     packet["canon"]["entries"].reverse()
     write_json(batch_dir / "packet.json", packet)
+    if kind == "audit":
+        # This fixture simulates the older builder's complete original input,
+        # before dispatch. Its prompt/request must contain that same snapshot;
+        # altering only packet.json is now correctly a transport refusal.
+        parts = read_json(batch_dir / "instructions.json")
+        prompt = parts["prefix"] + json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=True) + parts["suffix"]
+        (batch_dir / "prompt.md").write_text(prompt, encoding="utf-8")
+        request = read_json(batch_dir / "request.json")
+        request["prompt"] = prompt
+        write_json(batch_dir / "request.json", request)
     assert [entry["source"] for entry in packet["canon"]["entries"]] == ["Beta", "Alpha"]
     assert [entry["source"] for entry in read_json(root / "canon.lock.json")["entries"]] == ["Alpha", "Beta"]
     output_path = batch_dir / "output.json"
