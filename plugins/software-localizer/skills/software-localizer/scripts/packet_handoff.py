@@ -337,6 +337,14 @@ def receipt_path(output_path):
     return Path(str(output_path) + ".receipt.json")
 
 
+def _write_new_output(path, answer):
+    # Exclusive creation also refuses a sibling that won the race after the
+    # earlier existence check. A partial failed write is retained as failed work.
+    text = json.dumps(answer, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    with Path(path).open("x", encoding="utf-8") as stream:
+        stream.write(text)
+
+
 def capture(run_dir, output_path, transcript, tool_use_id=None, cli_stream=None, save_output=False):
     """Retain each attempt, including refusals; never relabel an old attempt."""
     run_dir, output_path = Path(run_dir).resolve(), Path(output_path).resolve()
@@ -358,7 +366,7 @@ def capture(run_dir, output_path, transcript, tool_use_id=None, cli_stream=None,
                 raise HandoffError("--save-output requires a CLI stream and a new output path")
             answer = _result_json({"content": evidence["completion"].get("result")})
             bindings, _, answer = _check(run_dir, output_path, evidence, output=answer)
-            lz_common.atomic_write_json(output_path, answer)
+            _write_new_output(output_path, answer)
             lz_common.atomic_write_bytes(attempt / "output.json", output_path.read_bytes())
         else:
             bindings = _check(run_dir, output_path, evidence)[0]

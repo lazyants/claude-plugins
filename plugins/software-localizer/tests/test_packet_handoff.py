@@ -377,6 +377,25 @@ def test_cli_save_output_serializes_the_actual_answer_without_overwriting_old_wo
     assert output.read_bytes() == expected
 
 
+def test_cli_save_output_refuses_a_sibling_that_creates_the_answer_during_validation(work_root, monkeypatch):
+    directory, output, _ = batch(work_root)
+    transcript, stream = cli_records(directory, output)
+    output.unlink()
+    original_check = packet_handoff._check
+    sibling = b'{"answer":"another worker"}\n'
+
+    def sibling_wins(*args, **kwargs):
+        checked = original_check(*args, **kwargs)
+        output.write_bytes(sibling)
+        return checked
+
+    monkeypatch.setattr(packet_handoff, "_check", sibling_wins)
+    with pytest.raises(SystemExit):
+        packet_handoff.capture(directory, output, transcript, cli_stream=stream, save_output=True)
+    assert output.read_bytes() == sibling
+    assert json.loads(packet_handoff.receipt_path(output).read_text())["status"] == "rejected"
+
+
 def test_cli_receipt_is_consumed_by_the_normal_accept_path(work_root, monkeypatch):
     monkeypatch.setattr(packets.adapter_client, "parse", fake_parse)
     setup_workspace(work_root, make_cfg(), make_messages([make_message("a", "Hello", targets={"de": TEXT})]),
