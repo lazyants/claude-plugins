@@ -14,6 +14,15 @@ Only ids in `after` require that brand under this entry. Removed ids and source-
 outside `after` are context for rechecking the decision's impact: do not insert a brand merely
 to satisfy the former scope. Other active canon constraints still apply.
 
+`canon_context` is informational, keyed by message id. It carries already-approved entries
+linked by an explicit occurrence or an owner-reviewed group. Preserve their IDs and read each
+group's `note` and `scope` before proposing a canon finding or a new candidate: an existing
+decision may explain a noun/adjective distinction or a scoped exception. Do not propose the
+same decision again. If its scope does not settle this usage, report that specific scope
+question rather than treating the decision as absent. Related phrases are not mandatory
+replacements outside their scope. This context never expands `canon`'s mechanical rules,
+waives a failed check, or widens a restricted audit beyond `canon_entry`.
+
 Reply with ONE JSON object and nothing else:
 
 ```json

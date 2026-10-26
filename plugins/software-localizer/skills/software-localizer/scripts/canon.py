@@ -428,7 +428,13 @@ def approve(root, canon: dict, entry_id: str, locale: str | None, value: str | N
 def freeze(root, canon: dict | None = None) -> dict:
     if canon is None:
         canon = load(root)
+    lock = _build_lock(canon)
+    lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
+    return lock
 
+
+def _build_lock(canon: dict) -> dict:
+    """Prepare and validate a lock before any history or lock writes."""
     locked_entries = []
     for entry in canon["entries"]:
         if entry["kind"] == "dnt":
@@ -457,8 +463,45 @@ def freeze(root, canon: dict | None = None) -> dict:
         locked_entries.append(locked)
 
     lock = {"schema": 1, "entries": locked_entries}
-    lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
+    groups = _freeze_groups(canon, locked_entries)
+    if groups:
+        lock["groups"] = groups
     return lock
+
+
+def _freeze_groups(canon: dict, locked_entries: list) -> list:
+    """Owner-reviewed, locale-scoped context; never imported from model output.
+
+    Group membership and scope notes are maintained in canon.json through
+    the project's normal review. Every member must already be approved for
+    the group's locale. Groups stay outside entry hashes and enforcement.
+    """
+    entries = {entry["id"]: entry for entry in locked_entries}
+    groups = []
+    seen = set()
+    for group in canon.get("groups", []):
+        if not group.get("approved_by") or not group.get("approved_at"):
+            continue
+        for field in ("id", "locale", "note", "scope", "approved_by", "approved_at"):
+            if not isinstance(group.get(field), str) or not group[field].strip():
+                raise ValueError(f"approved canon group needs a nonempty {field}")
+        ids = group.get("entry_ids")
+        if (not isinstance(ids, list) or not ids
+                or not all(isinstance(entry_id, str) for entry_id in ids)
+                or len(set(ids)) != len(ids)):
+            raise ValueError(f"canon group {group['id']} needs distinct entry_ids")
+        if group["id"] in seen:
+            raise ValueError(f"duplicate canon group: {group['id']}")
+        seen.add(group["id"])
+        for entry_id in ids:
+            entry = entries.get(entry_id)
+            if entry is None or (entry["kind"] != "dnt" and
+                    group["locale"] not in entry.get("translations", {})):
+                raise ValueError(f"canon group {group['id']}: {entry_id} is not approved for {group['locale']}")
+        groups.append({field: group[field] for field in (
+            "id", "locale", "entry_ids", "note", "scope", "approved_by", "approved_at",
+        )})
+    return groups
 
 
 # ---------------------------------------------------------------------------
@@ -502,8 +545,9 @@ def change(
         "at": at, "by": by, "action": "change", "entry": entry_id, "locale": locale,
         "before": before, "after": value, "reason": reason,
     }
+    lock = _build_lock(canon)
     _append_history(root, event)
-    freeze(root, canon)
+    lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
 
     audit_request = {
         "entry": entry_id, "kind": entry["kind"], "source": entry["source"], "locale": locale,
@@ -599,8 +643,9 @@ def change_scope(root, canon: dict, entry_id: str, expect_sha256: str,
         "entry_sha256_before": expect_sha256, "entry_sha256_after": lz_common.sha256_json(entry),
         "affected_occurrences": affected, "target_locales": list(cfg["target_locales"]),
     }
+    lock = _build_lock(canon)
     _append_history(root, event)
-    freeze(root, canon)
+    lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
     for locale in cfg["target_locales"]:
         if not affected:
             continue

@@ -19,6 +19,9 @@ native speaker.
   for a native speaker. A person still approves every term.
 - **Models.** Codex translates (read-only, returns JSON); Claude subagents review, audit, propose
   the canon, research and verify term usage on the web, and check adapter coverage.
+- **Approved audit context.** Explicit reviewed concept groups, scope notes and approved term
+  occurrences accompany audit messages without expanding mechanical enforcement
+  ([format and bounds](skills/software-localizer/references/state.md#approved-audit-context)).
 - **DNT scope decisions.** A person can explicitly add/remove do-not-translate occurrences
   using an expected entry hash, with durable history and audits across target locales. Imported
   expansions stay pending until that decision; subset imports never delete scope.

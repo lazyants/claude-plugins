@@ -2,6 +2,20 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.5.0] — 2026-10-26
+
+### Added
+
+- Audit packets carry approved concept groups, their member IDs and scope notes, and approved
+  entries linked by exact message occurrence in a separate, per-message `canon_context` (#1014).
+  Groups are explicitly reviewed in `canon.json`, locale scoped and frozen only with approved
+  members; selection follows direct membership without fuzzy or transitive expansion.
+- The audit prompt recognizes existing scoped decisions and asks about unresolved scope rather
+  than duplicating an approved term. Context does not expand mechanical canon selection, alter
+  candidate hashes, waive failed checks or widen restricted audits. Golden packet fixtures cover
+  the noun/adjective group and the initial-capital occurrence example; they prove context transfer,
+  not a model's linguistic verdict or a translation-quality improvement.
+
 ## [software-localizer 0.4.1] — 2026-10-26
 
 ### Added

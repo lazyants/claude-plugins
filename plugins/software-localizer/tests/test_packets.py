@@ -42,6 +42,129 @@ import toy_adapter  # noqa: E402
 EMPTY_CANON_LOCK = {"schema": 1, "entries": []}
 
 
+@pytest.fixture
+def approved_context():
+    return json.loads((FIXTURES_DIR / "approved_canon_context.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_audit_approved_context_golden_packet(work_root, approved_context, restricted):
+    """Freeze real decisions, build both audit paths, inspect the rendered prompt.
+
+    This proves context transfer, not the model's eventual linguistic verdict.
+    """
+    lock = canon_mod.freeze(work_root, approved_context["canon"])
+    messages = make_messages([make_message(message["id"], message["source"], targets=message["targets"])
+                              for message in approved_context["messages"]])
+    setup_workspace(work_root, make_cfg(), messages,
+                    {"de": {message["id"]: make_entry("existing") for message in messages["messages"]}},
+                    canon_lock=lock)
+    if restricted:
+        lz_common.atomic_write_json(work_root / "runs/de/canon-audit-t-evidence.json", {
+            "occurrences": [message["id"] for message in messages["messages"]],
+            "source": "evidence", "before": "Nachweis", "after": "Beweis", "reason": "Owner decision",
+        })
+    result = packets.do_build(work_root, "audit", "de", TEMPLATES_DIR,
+                              entry_ids=["t-evidence"] if restricted else None)
+    assert sum(len(_load_batch_items(batch)) for batch in result["batches"]) == 3
+    actual_context = {}
+    for batch in result["batches"]:
+        packet = lz_common.read_json(Path(batch["dir"]) / "packet.json", "packet")
+        # Golden data omits only generated entry hashes; approval, scope,
+        # membership, order and per-message association must match exactly.
+        for msg_id, context in packet["canon_context"].items():
+            actual_context[msg_id] = {
+                "entries": [{key: value for key, value in entry.items() if key != "sha256"}
+                            for entry in context["entries"]],
+                "groups": context["groups"],
+            }
+        assert [entry["id"] for entry in packet["canon"]["entries"]] in ([], ["t-evidence"])
+        for item in packet["items"]:
+            message = packets.item_to_message(item, "de")
+            assert ledger_mod.canon_sha256(message, packet["canon"]) == ledger_mod.canon_sha256(message, lock)
+        prompt = (Path(batch["dir"]) / "prompt.md").read_text(encoding="utf-8")
+        assert "never expands `canon`'s mechanical rules" in prompt
+        assert "waives a failed check" in prompt
+        for context in packet["canon_context"].values():
+            for entry in context["entries"]:
+                assert entry["translations"]["de"]["value"] in prompt
+    assert actual_context == approved_context["expected_context"]
+
+
+def test_audit_without_groups_does_not_duplicate_existing_canon(work_root, approved_context):
+    del approved_context["canon"]["groups"]
+    lock = canon_mod.freeze(work_root, approved_context["canon"])
+    msg = make_message("app:rank.rowCouple", "ancestor couple", targets={"de": "Vorfahrenpaar"})
+    run_dir = build_one_batch(work_root, make_cfg(), make_messages([msg]),
+                              {"de": {msg["id"]: make_entry("existing")}}, "audit", "de", canon_lock=lock)
+    packet = lz_common.read_json(run_dir / "packet.json", "packet")
+    assert [entry["id"] for entry in packet["canon"]["entries"]] == ["t-ancestor-couple"]
+    assert packet["canon_context"] == {}
+
+
+def test_canon_context_is_locale_scoped_one_hop_and_approved_only(work_root, approved_context):
+    canon = approved_context["canon"]
+    evidence_group = canon["groups"][0]
+    canon["groups"].extend([
+        {**evidence_group, "id": "transitive", "entry_ids": ["t-evidence-based-genealogy", "t-save"]},
+        {**evidence_group, "id": "proposed", "approved_by": None},
+    ])
+    lock = canon_mod.freeze(work_root, canon)
+    assert "proposed" not in {group["id"] for group in lock["groups"]}
+    context = packets.audit_canon_context(lock, approved_context["messages"], "de")
+    assert [group["id"] for group in context["app:analysis"]["groups"]] == ["evidence"]
+    assert "t-save" not in {entry["id"] for entry in context["app:analysis"]["entries"]}
+    assert packets.audit_canon_context(lock, approved_context["messages"], "fr") == {}
+    # Matching an occurrence is exact; it introduces no aliases or case folding.
+    assert packets.audit_canon_context(lock, [{"id": "app:rank.rowcouple", "source": "Ancestor couple"}], "de") == {}
+    assert packets.audit_canon_context(lock, [{"id": "different", "source": "Evidence-based analysis"}], "de") == {}
+
+
+@pytest.mark.parametrize("invalid", ["missing_member", "unapproved_member", "duplicate_member", "missing_scope"])
+def test_freeze_refuses_incomplete_approved_group_without_replacing_lock(work_root, approved_context, invalid):
+    canon = approved_context["canon"]
+    canon_mod.freeze(work_root, canon)
+    before = canon_mod.load_lock(work_root)
+    group = canon["groups"][0]
+    if invalid == "missing_member":
+        group["entry_ids"].append("missing")
+    elif invalid == "unapproved_member":
+        canon["entries"][1]["translations"]["de"]["status"] = "proposed"
+    elif invalid == "duplicate_member":
+        group["entry_ids"].append(group["entry_ids"][0])
+    else:
+        del group["scope"]
+    with pytest.raises(ValueError):
+        canon_mod.freeze(work_root, canon)
+    assert canon_mod.load_lock(work_root) == before
+
+
+def test_audit_context_does_not_waive_checks_or_change_candidate_hash(work_root, approved_context):
+    approved_context["canon"]["entries"].append({
+        "id": "d-brand", "kind": "dnt", "source": "Acme", "occurrences": [],
+        "approved_by": "owner", "approved_at": "2026-10-25",
+    })
+    approved_context["canon"]["groups"][0]["entry_ids"].append("d-brand")
+    lock = canon_mod.freeze(work_root, approved_context["canon"])
+    msg = make_message("app:analysis", "evidence-based analysis {count}",
+                       targets={"de": "evidenzbasierte Analysen {count}"})
+    run_dir = build_one_batch(work_root, make_cfg(), make_messages([msg]),
+                              {"de": {msg["id"]: make_entry("existing")}}, "audit", "de", canon_lock=lock)
+    packet = lz_common.read_json(run_dir / "packet.json", "packet")
+    assert packet["canon_context"][msg["id"]]["groups"]
+    for proposal, expected_checks in [("evidenzbasierte Analysen", "fail"),
+                                       ("evidenzbasierte Analysen {count}", "pass")]:
+        output = write_output(run_dir, {"verdicts": {msg["id"]: {
+            "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
+            "issues": [{"kind": "grammar", "text": "Example proposal for mechanical checks"}],
+            "proposed": proposal, "new_canon_candidates": [],
+        }}})
+        packets.do_accept(work_root, run_dir, output)
+        stored = ledger_mod.load(work_root)["locales"]["de"][msg["id"]]["audit_proposal"]
+        assert stored["checks"] == expected_checks
+        assert stored["canon_sha256"] == ledger_mod.canon_sha256(msg, lock)
+
+
 # --- helpers -----------------------------------------------------------
 
 

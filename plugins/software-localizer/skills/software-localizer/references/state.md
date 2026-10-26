@@ -62,6 +62,54 @@ adding or redoing research never makes a translation stale. It is durable eviden
 with `canon.json` and `canon.history.json` — the record of why a term was chosen — and
 `canon.py approve` copies a summary of it into the history event of each approval.
 
+## Approved audit context
+
+Existing `canon.json` files need no changes. To carry an already-reviewed concept group into
+audits, maintain an optional top-level `groups` list in that file through the project's normal
+review. Do not infer membership from similar words or launch research to populate it. For example,
+after approving both entries' German translations:
+
+```json
+{
+  "id": "evidence",
+  "locale": "de",
+  "entry_ids": ["t-evidence", "t-evidence-based-genealogy"],
+  "note": "Use Beweis for the noun; retain evidenzbasiert for the positioning adjective.",
+  "scope": "Noun and positioning adjective; other marketing phrases need a scoped decision.",
+  "approved_by": "<operator>",
+  "approved_at": "2026-10-25T12:00:00Z"
+}
+```
+
+This is one element of `groups`, alongside the existing top-level `schema` and `entries`.
+Only the operator's explicit approval supplies `approved_by` and `approved_at`; model candidate
+imports do not create or update groups. Review changes to membership, note or scope and update
+the approval metadata before refreezing. `canon.py freeze` retains approved groups separately
+from entries. Every group needs a unique ID, a locale, distinct member IDs, a note, a scope and
+approval metadata; every member must be a frozen DNT entry or have an approved translation in
+that locale. An incomplete approved group refuses the freeze without replacing the old lock.
+If `canon.py change` or `change-scope` encounters such a group, it also leaves the canonical
+file and history unchanged and creates no restricted-audit request.
+Groups without both approval fields are omitted. Entry-level decision scopes remain in `note`.
+
+Ordinary and restricted audit packets carry `canon_context` keyed by message ID. For each message,
+the seeds are the existing literal, case-sensitive source matches and DNT occurrences, plus
+approved entries naming that exact message ID in `occurrences`. A group is included only when a
+seed is one of its members and its locale matches the audit. Its members and scope notes travel
+together; membership does not expand transitively through other groups. Unrelated groups and
+unapproved translations stay out. A term's explicit occurrence supplies informational context even
+when `ancestor couple` does not literally match the source `Ancestor couple`.
+Occurrence entries already present in `canon` are not repeated unless they belong to a selected
+group, whose members travel together with their shared note and scope.
+
+`canon` still contains only the existing mechanical relevance selection. `canon_context` is a
+separate frozen snapshot for the reviewer: it never enters checks or candidate canon hashes,
+waives a failure, requires a compound phrase outside its scope, or widens a restricted audit.
+Changing group notes alone therefore does not stale candidates. When the approved scope does not
+settle a usage, the reviewer reports that question rather than inventing a missing decision or
+duplicating an already-approved term. Packet fixtures verify this transfer; they do not certify a
+model's linguistic verdict or measure translation quality.
+
 ## Reviewed DNT scope decisions
 
 For an approved DNT in `canon.json`, `occurrences` is the stored union and

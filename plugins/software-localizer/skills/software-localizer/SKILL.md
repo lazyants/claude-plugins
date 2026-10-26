@@ -224,6 +224,11 @@ Review turns later propose new candidates (each review batch writes
 Nothing a model proposes takes effect until a person approves it — an unapproved entry,
 do-not-translate entries included, stays out of `canon.lock.json`.
 
+Already-reviewed concept groups and scope notes can also be carried into audit packets using
+the optional `canon.json` `groups` list ([approved audit context](references/state.md#approved-audit-context)).
+Reuse explicit membership and approved occurrences; do not infer new relations. This is
+informational context for the reviewer and does not expand mechanical enforcement.
+
 Changing approved locale wording later uses `canon.py change` (it states the current value and
 a reason), followed by a restricted audit of that entry in the locale:
 

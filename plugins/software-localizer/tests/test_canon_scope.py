@@ -187,6 +187,40 @@ def test_import_makes_old_expected_entry_hash_stale(workspace):
     assert bytes_under(root) == before
 
 
+def test_scope_change_invalid_group_preserves_files_and_history(workspace):
+    root, _, _ = workspace
+    data = canon.load(root)
+    data["groups"] = [{
+        "id": "brand", "locale": "de", "entry_ids": ["d-brand", "t-cart"],
+        "note": "Approved related decisions", "scope": "Brand and cart terminology",
+        "approved_by": "fixture-person", "approved_at": "2026-01-01T00:00:00Z",
+    }]
+    canon.save(root, data)
+    canon.freeze(root, data)
+    del data["groups"][0]["scope"]
+    canon.save(root, data)
+    before = bytes_under(root)
+
+    code, payload = decide(root, "--add", "new")
+
+    assert code == 2 and "scope" in payload["error"]
+    assert bytes_under(root) == before
+
+
+def test_audit_context_uses_only_approved_dnt_occurrences(workspace):
+    root, _, messages = workspace
+    lock = import_pending(root, "new")
+    message = next(m for m in messages["messages"] if m["id"] == "new")
+    assert packets.filter_canon_lock(lock, [message]) == {"entries": []}
+    assert packets.audit_canon_context(lock, [message], "de") == {}
+
+    assert decide(root, "--add", "new")[0] == 0
+    lock = canon.load_lock(root)
+    assert [e["id"] for e in packets.filter_canon_lock(lock, [message])["entries"]] == ["d-brand"]
+    # Approved occurrences already present in canon need no duplicate context.
+    assert packets.audit_canon_context(lock, [message], "de") == {}
+
+
 def test_reapprove_cannot_activate_imported_scope(workspace):
     root, _, _ = workspace
     import_pending(root, "new")
