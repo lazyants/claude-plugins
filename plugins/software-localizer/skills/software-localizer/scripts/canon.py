@@ -449,10 +449,11 @@ def _coherence_conflicts(root, lock: dict) -> list:
     that label; its approved translation is the message's value, so the
     existing DNT predicate applies to it. A longer message that merely
     mentions the label is not the label. `messages.json` is read only when
-    the lock holds both a `ui_label` and a `dnt` entry."""
+    the lock holds a `ui_label` and a `dnt` entry with a nonempty active
+    scope; an empty-scope DNT constrains no message."""
     entries = lock.get("entries", [])
     labels = [e for e in entries if e.get("kind") == "ui_label"]
-    dnts = [e for e in entries if e.get("kind") == "dnt"]
+    dnts = [e for e in entries if e.get("kind") == "dnt" and e.get("occurrences")]
     if not labels or not dnts:
         return []
     messages = lz_common.load_messages(Path(root) / "messages.json")["messages"]

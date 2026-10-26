@@ -233,7 +233,7 @@ python3 S/canon.py freeze --root R
 ```
 
 Freeze checks approved whole UI labels against approved do-not-translate rules at
-their collected message occurrences. When these entries coexist, keep `messages.json`
+their collected message occurrences. When labels and active DNT occurrences coexist, keep `messages.json`
 current with `collect` first. A conflict blocks freeze and loading that lock for a new
 packet, ledger sync or export; the diagnostic names the locale, both entries, occurrence,
 approved value and failed rule. Use `canon.py change` for owner-approved wording repairs.

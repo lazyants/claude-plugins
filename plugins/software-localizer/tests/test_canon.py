@@ -847,6 +847,18 @@ def test_freeze_needs_the_snapshot_when_a_label_and_a_dnt_both_lock(work_root):
     assert not (work_root / "canon.lock.json").exists()
 
 
+def test_freeze_and_load_lock_need_no_snapshot_for_an_empty_scope_dnt(work_root):
+    canon_data = coherence_canon()
+    canon_data["entries"][1]["occurrences"] = []
+    canon.save(work_root, canon_data)
+
+    lock = canon.freeze(work_root)
+
+    assert {e["id"] for e in lock["entries"]} == {"u-add", "d-brand"}
+    assert not (work_root / "messages.json").exists()
+    assert canon.load_lock(work_root) == lock
+
+
 def test_freeze_without_both_kinds_does_not_read_the_snapshot(work_root):
     dnt_only = coherence_canon()
     dnt_only["entries"] = dnt_only["entries"][1:]

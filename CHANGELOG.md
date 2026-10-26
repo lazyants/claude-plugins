@@ -16,7 +16,7 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 - Owners can repair several conflicts sequentially with `change` or `change-scope`,
   retaining each decision in history. Remaining conflicts keep freeze blocked and
   the previous lock unchanged; the result explicitly reports `frozen: false` until
-  all are resolved. Approved UI labels and DNT rules together require a collected
+  all are resolved. Approved UI labels and active DNT occurrences require a collected
   message snapshot to distinguish whole labels from longer mentions.
 - Scope-repair audit packets retain previously frozen affected IDs across sequential
   repairs, so an earlier removal is still audited after coherence is restored.

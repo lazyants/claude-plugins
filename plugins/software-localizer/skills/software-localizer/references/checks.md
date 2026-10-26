@@ -85,7 +85,7 @@ source, the approved label value must satisfy every approved DNT entry explicitl
 that occurrence. `canon.py freeze` refuses before replacing the lock if it does not;
 loading an existing contradictory lock also refuses. The diagnostic identifies the
 locale, UI-label entry, DNT entry, occurrence, approved value and failed DNT constraint.
-Approved UI labels and DNT rules together require a collected `messages.json` snapshot.
+Approved UI labels and nonempty active DNT scopes require a collected `messages.json` snapshot.
 Recollect after source changes; occurrences absent from that snapshot are no longer
 current messages.
 
