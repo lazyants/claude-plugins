@@ -146,9 +146,9 @@ def relevant_canon(message: dict, canon_lock: dict) -> list:
     """The `canon.lock.json` entries relevant to one message: every `dnt`
     entry naming this message's id in `occurrences`, plus every entry whose
     `source` occurs as a substring of any form of this message's own source
-    text. This is the one relevance rule packets.py embeds into a packet's
-    `canon` field and `canon_sha256` below pins a candidate against -- kept
-    here so both call sites share it."""
+    text. This is the enforcement subset packets embed in `canon.entries`.
+    `canon_sha256` also binds informational corrected-note context for
+    explicit nonliteral occurrences."""
     entries = canon_lock.get("entries", []) if isinstance(canon_lock, dict) else []
     msg_id = message.get("id")
     source_forms = checks.forms_of(message.get("source"))
@@ -163,15 +163,54 @@ def relevant_canon(message: dict, canon_lock: dict) -> list:
     return kept
 
 
-def canon_sha256(message: dict, canon_lock: dict) -> str:
-    """A candidate's canon snapshot: the sha256 of exactly the canon lock
-    entries `relevant_canon` finds for this message, sorted by id so a
+def informational_canon_context(message: dict, canon_lock: dict, locale: str) -> dict:
+    """Direct owner-approved context, shared by audit packets and note dependencies."""
+    entries = [entry for entry in canon_lock.get("entries", [])
+               if entry.get("kind") == "dnt" or
+               entry.get("translations", {}).get(locale, {}).get("status") == "approved"]
+    literal = {entry["id"] for entry in relevant_canon(message, {"entries": entries})}
+    occurrences = {entry["id"] for entry in entries if message["id"] in entry.get("occurrences", [])}
+    seeds = literal | occurrences
+    groups = [group for group in canon_lock.get("groups", [])
+              if group.get("locale") == locale and group.get("approved_by")
+              and group.get("approved_at") and seeds.intersection(group["entry_ids"])]
+    context_ids = (occurrences - literal) | {entry_id for group in groups for entry_id in group["entry_ids"]}
+    if not context_ids:
+        return {}
+    return {"entries": [entry for entry in entries if entry["id"] in context_ids], "groups": groups}
+
+
+def canon_note_context(message: dict, canon_lock: dict, locale: str | None = None) -> list:
+    """Corrected notes linked by explicit occurrence or approved locale group.
+
+    These entries travel beside enforcement entries, so a review sees the
+    corrected meaning without making the term applicable as a literal rule.
+    """
+    enforced = {entry["id"] for entry in relevant_canon(message, canon_lock)}
+    if "note_context" in canon_lock:
+        available = canon_lock["note_context"].get(message["id"], {}).get("entries", [])
+    else:
+        available = [entry for entry in canon_lock.get("entries", [])
+                     if message.get("id") in entry.get("occurrences", [])]
+        if locale is not None:
+            available += informational_canon_context(message, canon_lock, locale).get("entries", [])
+    unique = {entry["id"]: entry for entry in available}
+    return [entry for entry in unique.values() if entry.get("note_revision") and entry["id"] not in enforced]
+
+
+def canon_dependencies(message: dict, canon_lock: dict, locale: str | None = None) -> list:
+    return relevant_canon(message, canon_lock) + canon_note_context(message, canon_lock, locale)
+
+
+def canon_sha256(message: dict, canon_lock: dict, locale: str | None = None) -> str:
+    """A candidate's canon snapshot: enforcement entries plus corrected-note
+    context for explicit occurrences and locale-scoped groups, sorted by id so a
     packet's first-seen batch order and the lock's order hash identically.
     A candidate stores this at accept time; `sync()` clears it once it no
     longer matches the canon lock's current relevant entries (a newly
     approved/changed entry must force a fresh check, the same way a
     source/context/style change does)."""
-    entries = sorted(relevant_canon(message, canon_lock), key=lambda entry: entry["id"])
+    entries = sorted(canon_dependencies(message, canon_lock, locale), key=lambda entry: entry["id"])
     return lz_common.sha256_json(entries)
 
 
@@ -235,15 +274,12 @@ def sync(root, cfg: dict, messages: dict, parse_fn: Callable[[list], dict], cano
     locales_dict = ledger.setdefault("locales", {})
     target_locales = cfg["target_locales"]
 
-    # `canon_sha256` depends on the message and the canon lock, never on
-    # locale -- computed once per message here instead of once per
-    # (locale, message) pair inside the loop below.
-    canon_sha_by_id = {m["id"]: canon_sha256(m, canon_lock) for m in messages["messages"]}
-
     report: dict = {"gone": [], "notes": [], "counts": {}}
     recheck_items: list = []
 
     for locale in target_locales:
+        # Corrected notes may be linked through locale-scoped approved groups.
+        canon_sha_by_id = {m["id"]: canon_sha256(m, canon_lock, locale) for m in messages["messages"]}
         locale_entries = locales_dict.setdefault(locale, {})
         # `style_sha256` depends only on `cfg`/`locale`, never on the
         # message -- computed once per locale instead of once per message.

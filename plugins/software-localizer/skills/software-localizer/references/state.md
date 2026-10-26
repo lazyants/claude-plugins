@@ -25,8 +25,9 @@ any of them changes, sync clears the candidate.
 ## Canon research evidence
 
 `R/canon.research/<locale>.json`, one file per target locale, holds the usage research and its
-verification for that locale's canon entries, keyed by entry id. Only `packets.py accept` of a
-`research` or `research_verify` run writes it, and only the run's own locale file. A new
+verification for that locale's canon entries, keyed by entry id. `packets.py accept` of a
+`research` or `research_verify` run writes only the run's own locale file. `canon.py change-note`
+also marks affected records stale across locales, retaining the original evidence. A new
 research result for an entry clears the verification; a verification attaches only to the
 exact research it was built from (`research_sha256`). New packets also bind acceptance to the
 entry's full stored checkpoint, so a stale packet cannot overwrite later progress.
@@ -140,6 +141,50 @@ after an interrupted operation compare their readbacks with the appended decisio
 continuing; refreeze the saved canon and rebuild any missing audit requests from that event's
 `affected_occurrences`/`target_locales`, retaining its `scope_change` before/after context.
 Never invent or infer a person's approval to repair an interrupted decision.
+
+## Shared-note corrections
+
+`canon.py change-note` corrects an approved entry's common semantic note with an exact `--expect`,
+replacement `--note`, nonblank `--reason` and `--by`. All note edits take the semantic path; there
+is no editorial exemption. Locale wording/approval records, DNT names/occurrences, other canon
+entries and unrelated ledger entries stay unchanged.
+An explicitly cleared note stays empty on later imports; untouched empty notes retain the
+existing fill-on-import behavior. A later locale-wording `change` preserves the semantic audit's
+scope and records its own wording change alongside it, archiving the replaced request in history.
+Note and DNT-scope decisions also retain each other's pending audit context and affected IDs.
+For a DNT, the correction uses its active approved scope; pending import proposals stay pending.
+An unchanged before/after scope snapshot keeps literal matches outside active scope informational.
+
+The history event records exact before/after notes, actor/reason/time, a chained `note_revision`,
+affected locales/messages, and snapshots of prior research/verification, affected ledger entries
+and any replaced restricted-audit requests. Existing run artifacts stay in place. Research records
+keep their evidence/verdicts with a `stale_note` marker; summaries and reports no longer count
+those verdicts as verified. Re-research can replace the current record without losing the evidence
+archived in history. Fresh verification requires fresh research under the corrected note; neither
+is launched automatically. DNT entries are reassessed through audit, not usage research.
+Resource-limited work for a stale note is excluded from default continuation. An explicitly
+scoped fresh research packet does not resume or union findings for the old meaning.
+
+The revision is included in the frozen entry/hash, even when a later correction restores an old
+note's text. Affected candidates and proposals are cleared; their old state remains in history.
+For explicit occurrences or approved locale-scoped groups without a literal term match,
+`canon.note_context` carries the corrected meaning and group scopes per message through translation,
+audit and subsequent review packets. These corrected-note dependencies participate in the candidate's
+locale-specific canon hash; ordinary uncorrected informational context retains its previous hash
+behavior. Mechanical enforcement still reads only `canon.entries`. A correction reports affected IDs
+per locale, so a group in one language does not invalidate another language's unrelated candidates.
+Pre-correction research/verification and translation/review/audit packets are refused. Fresh
+packets with corrected entries require an exact top-level `note_revisions` echo in their answers,
+so rebuilding a packet in the same directory cannot relabel an old answer as a fresh turn.
+
+`runs/<locale>/canon-audit-<entry>.json` identifies the note correction (`field: "note"`), the
+explicit occurrences plus messages matched by the lock's relevance rule, and the fresh audit
+required in each configured target locale. Build it with `packets.py build --kind audit --locale L
+--entry ID`; the prompt distinguishes semantic notes from replacement translations. A request is
+an input to reassessment, not evidence that an audit ran or passed. Run canon mutations serially
+in the coordinator with locale workers stopped. These files are written separately, with history
+and invalidations before the new canon/lock; interruption can leave conservative invalidations
+or a pending request and requires inspection/retry, not a claim of an atomic transaction.
 
 ## Export safety — `export_values.py`
 

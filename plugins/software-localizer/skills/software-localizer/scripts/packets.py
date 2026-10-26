@@ -207,43 +207,42 @@ def select_audit(ledger_data: dict, locale: str) -> list:
 # ---------------------------------------------------------------------------
 
 
-def filter_canon_lock(canon_lock: dict, messages: list) -> dict:
+def filter_canon_lock(canon_lock: dict, messages: list, locale: str | None = None) -> dict:
     """The canon snapshot a batch packet embeds: the union of
     `ledger.relevant_canon` for every message in the batch (a single
-    relevance rule, owned by `ledger.py` so `ledger.canon_sha256` pins
-    exactly what a candidate saw against the same rule). Preserve lock
+    enforcement relevance rule, owned by `ledger.py`). Corrected-note
+    context travels separately for explicit occurrences and approved locale groups and
+    participates in `ledger.canon_sha256`. Preserve lock
     order so each message's canon hash also matches sync and export."""
     seen_ids: set = set()
+    note_context = {}
     for message in messages:
         for entry in ledger_mod.relevant_canon(message, canon_lock):
             seen_ids.add(entry.get("id"))
-    return {"entries": [entry for entry in canon_lock.get("entries", []) if entry.get("id") in seen_ids]}
+        notes = ledger_mod.canon_note_context(message, canon_lock, locale)
+        if notes:
+            context = ledger_mod.informational_canon_context(message, canon_lock, locale) if locale else {}
+            note_context[message["id"]] = {"entries": notes, "groups": context.get("groups", [])}
+    result = {"entries": [entry for entry in canon_lock.get("entries", []) if entry.get("id") in seen_ids]}
+    if note_context:
+        result["note_context"] = note_context
+    return result
 
 
 def audit_canon_context(canon_lock: dict, messages: list, locale: str) -> dict:
-    """Per-message informational links, separate from checks and candidate hashes.
+    """Per-message informational links, separate from mechanical enforcement.
+
+    Corrected-note dependencies are bound separately through `canon.note_context`.
 
     Seed with literal relevance and explicit approved occurrences; expand
     only through directly linked, approved groups for this locale. Never
     infer aliases, follow transitive groups, or read the unfrozen canon.
     """
-    entries = [entry for entry in canon_lock.get("entries", [])
-               if entry.get("kind") == "dnt" or
-               entry.get("translations", {}).get(locale, {}).get("status") == "approved"]
     result = {}
     for message in messages:
-        literal = {entry["id"] for entry in ledger_mod.relevant_canon(message, {"entries": entries})}
-        occurrences = {entry["id"] for entry in entries if message["id"] in entry.get("occurrences", [])}
-        seeds = literal | occurrences
-        groups = [group for group in canon_lock.get("groups", [])
-                  if group.get("locale") == locale and group.get("approved_by")
-                  and group.get("approved_at") and seeds.intersection(group["entry_ids"])]
-        context_ids = (occurrences - literal) | {entry_id for group in groups for entry_id in group["entry_ids"]}
-        if context_ids:
-            result[message["id"]] = {
-                "entries": [entry for entry in entries if entry["id"] in context_ids],
-                "groups": groups,
-            }
+        context = ledger_mod.informational_canon_context(message, canon_lock, locale)
+        if context:
+            result[message["id"]] = context
     return result
 
 
@@ -480,7 +479,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None)
             "locale": locale,
             "batch": name,
             "style": style,
-            "canon": filter_canon_lock(canon_lock, item_messages),
+            "canon": filter_canon_lock(canon_lock, item_messages, locale),
             "items": items,
         }
         if kind == "audit":
@@ -538,6 +537,8 @@ def _select_research(by_entry: dict, research: dict, locale: str, entry_ids) -> 
         if entry["kind"] not in RESEARCH_TERM_KINDS:
             continue
         record = research["entries"].get(entry["id"])
+        if record and record.get("stale_note"):
+            continue  # A corrected meaning needs separately scoped fresh research.
         if record and canon_mod.resource_limited(record.get("research")):
             selected.append(entry["id"])
             continue
@@ -556,35 +557,44 @@ def _select_research_verify(research: dict, entry_ids) -> list:
         for entry_id in entry_ids:
             if entry_id not in records:
                 lz_common.fail(f"no research record for entry: {entry_id}", lz_common.EXIT_CANNOT, entry=entry_id)
+            if records[entry_id].get("stale_note"):
+                lz_common.fail(f"research is stale after a note correction; build research --entry {entry_id}",
+                                lz_common.EXIT_FAIL, entry=entry_id)
             if canon_mod.resource_limited(records[entry_id].get("research")):
                 lz_common.fail(f"finish resource-limited research before verification: {entry_id}",
                                 lz_common.EXIT_CANNOT, entry=entry_id)
         return list(dict.fromkeys(entry_ids))
     return [i for i, record in records.items()
-            if not canon_mod.resource_limited(record.get("research"))
+            if not record.get("stale_note") and not canon_mod.resource_limited(record.get("research"))
             and (record.get("verification") is None or canon_mod.resource_limited(record["verification"]))]
 
 
 def build_research_item(entry: dict, locale: str, by_id: dict) -> dict:
     translation = entry["translations"].get(locale) or {}
-    return {
+    item = {
         "id": entry["id"], "kind": entry["kind"], "source": entry["source"],
         "note": entry.get("note") or "",
         "proposed": translation.get("value"), "status": translation.get("status"),
         "current": list(translation.get("current") or []),
         "examples": _research_examples(entry, by_id, locale),
     }
+    if entry.get("note_revision"):
+        item["note_revision"] = entry["note_revision"]
+    return item
 
 
 def build_research_verify_item(entry_id: str, record: dict, entry: dict, locale: str, by_id: dict) -> dict:
     """A record whose canon entry has since gone (`entry` is `{}`) keeps its
     own kind/source; it just has no note or examples left to show."""
-    return {
+    item = {
         "id": entry_id, "kind": record["kind"], "source": record["source"],
         "note": entry.get("note") or "",
         "examples": _research_examples(entry, by_id, locale),
         "research": record["research"], "research_sha256": record["research_sha256"],
     }
+    if entry.get("note_revision"):
+        item["note_revision"] = entry["note_revision"]
+    return item
 
 
 def _build_research(root: Path, cfg: dict, kind: str, locale: str, entry_ids, templates_dir: Path) -> dict:
@@ -629,7 +639,7 @@ def _build_research(root: Path, cfg: dict, kind: str, locale: str, entry_ids, te
             record = research["entries"].get(item["id"])
             item["checkpoint_sha256"] = lz_common.sha256_json(record)
             phase = "research" if kind == "research" else "verification"
-            if record and canon_mod.resource_limited(record.get(phase)):
+            if record and not record.get("stale_note") and canon_mod.resource_limited(record.get(phase)):
                 item["resume"] = {"previous": record[phase], "packet": record[
                     "researched" if kind == "research" else "verification"].get("packet")}
         packet = {"kind": kind, "locale": locale, "batch": name, "field": field, "style": style, "items": items}
@@ -665,6 +675,16 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
     }
     if "scope_change" in request:
         canon_entry_meta["scope_change"] = request["scope_change"]
+    if "scope_decision" in request:
+        canon_entry_meta["scope_decision"] = request["scope_decision"]
+    if request.get("field") == "note":
+        canon_entry_meta.update(field="note", impact="semantic", note_revision=request["note_revision"])
+        if request.get("translation_change"):
+            canon_entry_meta["translation_change"] = request["translation_change"]
+    else:
+        target = next((e for e in canon_lock.get("entries", []) if e["id"] == entry_id), {})
+        if target.get("note_revision"):
+            canon_entry_meta["note_revision"] = target["note_revision"]
     skipped, batches_out = [], []
     for n, ids in enumerate(chunks):
         name = f"canon-audit-{entry_id}" if n == 0 else f"canon-audit-{entry_id}-{n + 1}"
@@ -684,7 +704,7 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
             continue
         packet = {
             "kind": "audit", "locale": locale, "batch": name, "style": style,
-            "canon": filter_canon_lock(canon_lock, item_messages),
+            "canon": filter_canon_lock(canon_lock, item_messages, locale),
             "canon_entry": canon_entry_meta,
             "canon_context": audit_canon_context(canon_lock, item_messages, locale),
             "items": items,
@@ -705,11 +725,30 @@ def _write_batch(run_locale_dir: Path, name: str, kind: str, packet: dict, templ
             batch_dir = run_locale_dir / "_packets" / kind / name
             n += 1
         packet = {**packet, "batch": name}
+    lock = packet.get("canon", {})
+    entries = (packet.get("items", []) if kind in RESEARCH_KINDS else
+               lock.get("entries", []) + [entry for context in lock.get("note_context", {}).values()
+                                          for entry in context["entries"]])
+    revisions = {e["id"]: e["note_revision"] for e in entries if e.get("note_revision")}
+    restricted = packet.get("canon_entry") or {}
+    if restricted.get("note_revision"):
+        revisions[restricted["entry"]] = restricted["note_revision"]
+    if revisions:
+        packet["note_revisions"] = revisions
     try:
         prefix, suffix = prompt_instructions(templates_dir, kind)
-        prompt = prefix + json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=True) + suffix
     except LookupError as exc:
         lz_common.fail(str(exc), lz_common.EXIT_CANNOT)
+    if revisions:
+        suffix += ("\nCopy the packet's `note_revisions` object unchanged into a top-level "
+                   "`note_revisions` field in your JSON answer. It binds this answer to the "
+                   "corrected shared meanings, even if an older answer has identical wording.\n")
+    if lock.get("note_context"):
+        suffix += ("\n`canon.note_context` supplies corrected meanings per message through explicit "
+                   "occurrences or approved groups. Read the supplied group notes and scopes. "
+                   "It is informational: do not expand literal term enforcement or require "
+                   "copying a full term into an item that does not use it.\n")
+    prompt = prefix + json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=True) + suffix
     lz_common.atomic_write_json(batch_dir / "packet.json", packet)
     lz_common.atomic_write_text(batch_dir / "prompt.md", prompt)
     lz_common.atomic_write_json(batch_dir / "instructions.json", {"prefix": prefix, "suffix": suffix})
@@ -881,7 +920,7 @@ def accept_translate(root: Path, cfg: dict, packet: dict, output: dict, ledger_d
             "source_sha256": ledger_mod.source_sha256(message),
             "context_sha256": ledger_mod.context_sha256(message, locale),
             "style_sha256": ledger_mod.style_sha256(cfg, locale),
-            "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
+            "canon_sha256": ledger_mod.canon_sha256(message, canon_lock, locale),
             "audited_target_sha256": None,
             "checks": "fail" if problems else "pass",
             "problems": problems,
@@ -1075,7 +1114,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                         "source_sha256": ledger_mod.source_sha256(message),
                         "context_sha256": ledger_mod.context_sha256(message, locale),
                         "style_sha256": ledger_mod.style_sha256(cfg, locale),
-                        "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
+                        "canon_sha256": ledger_mod.canon_sha256(message, canon_lock, locale),
                         "checks": "fail" if problems else "pass",
                         "problems": problems,
                         "issues": verdict.get("issues", []),
@@ -1090,7 +1129,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                         "source_sha256": ledger_mod.source_sha256(message),
                         "context_sha256": ledger_mod.context_sha256(message, locale),
                         "style_sha256": ledger_mod.style_sha256(cfg, locale),
-                        "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
+                        "canon_sha256": ledger_mod.canon_sha256(message, canon_lock, locale),
                         "audited_target_sha256": old_candidate.get("audited_target_sha256"),
                         "checks": "fail" if problems else "pass",
                         "problems": problems,
@@ -1121,7 +1160,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                 "source_sha256": ledger_mod.source_sha256(message),
                 "context_sha256": ledger_mod.context_sha256(message, locale),
                 "style_sha256": ledger_mod.style_sha256(audit_cfg, locale),
-                "canon_sha256": ledger_mod.canon_sha256(message, canon_lock),
+                "canon_sha256": ledger_mod.canon_sha256(message, canon_lock, locale),
                 "checks": ("fail" if problems else "pass") if proposed is not None else None,
                 "problems": problems,
                 "issues": verdict.get("issues", []),
@@ -1151,6 +1190,8 @@ def do_accept(root: Path, run_dir: Path, output_path: Path) -> dict:
     batch_name = packet.get("batch", run_dir.name)
     cfg = lz_common.load_config(root)
     lz_common.require_accepted_adapter(root, cfg)
+    if packet.get("note_revisions") and output.get("note_revisions") != packet["note_revisions"]:
+        lz_common.fail("answer must echo this packet's note_revisions; run a fresh turn", lz_common.EXIT_FAIL)
 
     if kind == "canon":
         return accept_canon(packet, run_dir, output)
@@ -1167,6 +1208,25 @@ def do_accept(root: Path, run_dir: Path, output_path: Path) -> dict:
 
     if kind not in ("translate", "review", "audit"):
         lz_common.fail(f"packet.json has an unknown kind: {kind}", lz_common.EXIT_CANNOT)
+
+    # A note correction invalidates already-built turns too, including audit
+    # passes which otherwise have no persistent candidate to clear.
+    restricted = packet.get("canon_entry") or {}
+    if restricted.get("entry"):
+        target = next((e for e in canon_mod.load(root)["entries"] if e["id"] == restricted["entry"]), {})
+        if restricted.get("note_revision") != target.get("note_revision"):
+            lz_common.fail("canon note changed since restricted audit build; rebuild the packet", lz_common.EXIT_FAIL,
+                            entry=restricted["entry"])
+    current_lock = canon_mod.load_lock(root)
+    old_lock = packet.get("canon", {})
+    for item in packet.get("items", []):
+        message = item_to_message(item, packet["locale"])
+        packet_entries = {e["id"]: e for e in ledger_mod.canon_dependencies(message, old_lock, packet["locale"])}
+        for entry in ledger_mod.canon_dependencies(message, current_lock, packet["locale"]):
+            if (entry.get("note_revision") and
+                    entry["note_revision"] != packet_entries.get(entry["id"], {}).get("note_revision")):
+                lz_common.fail("canon note changed since packet build; rebuild the packet", lz_common.EXIT_FAIL,
+                                entry=entry["id"], id=item["id"])
 
     ledger_data = ledger_mod.load(root)
     if kind == "translate":
@@ -1350,10 +1410,14 @@ def accept_research(root: Path, packet: dict, run_dir: Path, output: dict) -> di
     items = packet.get("items", [])
     extra = sorted(set(terms) - {item["id"] for item in items})
     data = canon_mod.load_research(root, locale)
+    by_entry = {e["id"]: e for e in canon_mod.load(root)["entries"]}
     at = lz_common.now_iso()
     stored, invalid, missing, stale, limited = [], [], [], [], []
     for item in items:
         entry_id = item["id"]
+        if item.get("note_revision") != by_entry.get(entry_id, {}).get("note_revision"):
+            invalid.append({"id": entry_id, "reason": "canon note changed since packet build"})
+            continue
         previous = data["entries"].get(entry_id)
         if not _checkpoint_matches(item, previous):
             stale.append(entry_id)
@@ -1382,6 +1446,7 @@ def accept_research(root: Path, packet: dict, run_dir: Path, output: dict) -> di
             "researched": {"run": run_dir.name, "at": at, "packet": str(run_dir / "packet.json")},
             "verification": None,
             "attempts": _attempt(previous, "research", term, run_dir, at),
+            **({"note_revision": item["note_revision"]} if item.get("note_revision") else {}),
         }
         stored.append(entry_id)
         if canon_mod.resource_limited(research):
@@ -1440,6 +1505,7 @@ def accept_research_verify(root: Path, packet: dict, run_dir: Path, output: dict
     items = packet.get("items", [])
     extra = sorted(set(verdicts) - {item["id"] for item in items})
     data = canon_mod.load_research(root, locale)
+    by_entry = {e["id"]: e for e in canon_mod.load(root)["entries"]}
     at = lz_common.now_iso()
     verified, invalid, missing, limited = [], [], [], []
     for item in items:
@@ -1454,7 +1520,10 @@ def accept_research_verify(root: Path, packet: dict, run_dir: Path, output: dict
         record = data["entries"].get(entry_id)
         if (not _checkpoint_matches(item, record)
                 or verdict.get("research_sha256") != item["research_sha256"]
-                or record is None or record.get("research_sha256") != item["research_sha256"]):
+                or record is None or record.get("research_sha256") != item["research_sha256"]
+                or record.get("stale_note")
+                or item.get("note_revision") != by_entry.get(entry_id, {}).get("note_revision")
+                or record.get("note_revision") != item.get("note_revision")):
             missing.append(entry_id)
             continue
         combined = dict(verdict)
