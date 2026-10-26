@@ -334,7 +334,7 @@ def make_research_record(source="account", confidence="low", verdict="weak", con
 
 def research_section(root, locale="de"):
     # Slice to the research section: other sections print `_none_` too.
-    return report.build_report(root, locale).split("## Canon usage research")[1]
+    return report.build_report(root, locale).split("## Canon usage research", 1)[1].split("\n## ", 1)[0]
 
 
 def setup_research_workspace(root, records):
@@ -364,6 +364,8 @@ def test_report_research_section_lists_a_flagged_record_with_reasons_and_canon_v
     assert "  - check: verdict weak; low confidence" in section
     assert "  - note: conflicts with Benutzerkonto" in section
     assert "_none_" not in section
+    pending = report.build_report(work_root, "de").split("## Canon work awaiting another turn", 1)[1]
+    assert pending.strip() == "_none_"
 
 
 def test_report_research_section_omits_better_when_empty_and_shows_an_unverified_record(work_root):

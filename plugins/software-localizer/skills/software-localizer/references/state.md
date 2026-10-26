@@ -27,8 +27,25 @@ any of them changes, sync clears the candidate.
 `R/canon.research/<locale>.json`, one file per target locale, holds the usage research and its
 verification for that locale's canon entries, keyed by entry id. Only `packets.py accept` of a
 `research` or `research_verify` run writes it, and only the run's own locale file. A new
-research result for an entry replaces its record and clears the verification; a verification
-attaches only to the exact research it was built from (`research_sha256`).
+research result for an entry clears the verification; a verification attaches only to the
+exact research it was built from (`research_sha256`). New packets also bind acceptance to the
+entry's full stored checkpoint, so a stale packet cannot overwrite later progress.
+
+Each answer may carry `progress: {"status": "complete" | "resource_limited", "remaining": [...]}`.
+A complete bounded search can have no findings and low confidence. Resource-limited work must
+list its unperformed queries or checks; default selection includes it for continuation rather
+than treating it as a finished source gap. Verification waits for completed research, retains
+checked indexes across partial replies and counts as verified only when complete. Saved legacy
+answers without `progress` retain their former complete interpretation; arbitrary notes are
+never parsed to guess a disposition.
+
+The entry's `attempts` retains each accepted raw answer and its packet path (a legacy record is
+snapshotted before its first replacement). Research continuation unions findings without
+changing earlier quotes; verification continuation retains earlier checks by index. New
+research packets use unused directories, preserving original packets, prompts and saved outputs.
+`researched.packet` and `verification.packet` locate the latest checkpoints. The report lists
+resource-limited work separately, and approval history includes explicit progress when present.
+See [ordinary-turn continuation](research-continuation.md) before running the next packets.
 
 Nothing hashes it: it is not part of `canon.lock.json`, a candidate's snapshot or any check, so
 adding or redoing research never makes a translation stale. It is durable evidence that belongs
