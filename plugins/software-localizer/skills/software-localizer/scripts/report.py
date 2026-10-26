@@ -185,6 +185,13 @@ def _row_research(entry_id, record, translation, locale):
         out.append(f"  - better: {summary['better']}")
     out.append(f"  - check: {'; '.join(canon_mod.research_flags(record))}")
     out.append(f"  - note: {(record.get('research') or {}).get('note', '')}")
+    for phase in ("research", "verification"):
+        result = record.get(phase) or {}
+        progress = result.get("progress")
+        if progress:
+            out.append(f"  - {phase} progress: {progress['status']}")
+            for task in progress["remaining"]:
+                out.append(f"    - remaining: {task}")
     return out
 
 
@@ -264,11 +271,13 @@ def build_report(root: Path, locale: str) -> str:
 
     records = canon_mod.load_research(root, locale)["entries"]
     canon_translations = {e["id"]: e.get("translations") or {} for e in canon_mod.load(root)["entries"]}
-    verified = sum(1 for r in records.values() if r.get("verification"))
+    completed = sum(1 for r in records.values() if not canon_mod.resource_limited(r.get("research")))
+    verified = sum(1 for r in records.values() if r.get("verification")
+                   and not canon_mod.resource_limited(r["verification"]))
     flagged = [(eid, r) for eid, r in sorted(records.items()) if canon_mod.research_flags(r)]
     lines.append("## Canon usage research")
     lines.append("")
-    lines.append(f"- researched: {len(records)}, verified: {verified}, flagged for a native speaker: {len(flagged)}")
+    lines.append(f"- researched: {completed}, verified: {verified}, flagged for a native speaker: {len(flagged)}")
     lines.append("")
     if flagged:
         for eid, record in flagged:
@@ -276,6 +285,18 @@ def build_report(root: Path, locale: str) -> str:
             lines.extend(_row_research(eid, record, translation, locale))
     else:
         lines.append("_none_")
+    lines.append("")
+
+    lines.extend(["## Canon work awaiting another turn", ""])
+    pending = []
+    for eid, record in sorted(records.items()):
+        for phase in ("research", "verification"):
+            result = record.get(phase)
+            if canon_mod.resource_limited(result):
+                packet = (record.get("researched") if phase == "research" else result) or {}
+                pending.append(f"- `{eid}` / {phase}: resource_limited; packet: {packet.get('packet', 'legacy')}")
+                pending.extend(f"  - remaining: {task}" for task in result["progress"]["remaining"])
+    lines.extend(pending or ["_none_"])
     lines.append("")
 
     return "\n".join(lines) + "\n"

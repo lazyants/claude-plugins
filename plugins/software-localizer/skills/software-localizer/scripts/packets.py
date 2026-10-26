@@ -494,8 +494,8 @@ def _research_examples(entry: dict, by_id: dict, locale: str) -> list:
 def _select_research(by_entry: dict, research: dict, locale: str, entry_ids) -> list:
     """Canon entry ids for a `research` build. Default: every `term` or
     `ui_label` whose translation for the locale is not yet approved and
-    that has no research record -- the entries a person is about to decide
-    on. Explicit `--entry` ids are taken as given (re-research of an
+    that has no research record, plus resource-limited records (even if
+    approved). Explicit `--entry` ids are taken as given (re-research of an
     approved or already-researched entry included), but each must be a
     researchable canon entry."""
     if entry_ids:
@@ -508,6 +508,10 @@ def _select_research(by_entry: dict, research: dict, locale: str, entry_ids) -> 
     selected = []
     for entry in by_entry.values():
         if entry["kind"] not in RESEARCH_TERM_KINDS:
+            continue
+        record = research["entries"].get(entry["id"])
+        if record and canon_mod.resource_limited(record.get("research")):
+            selected.append(entry["id"])
             continue
         translation = entry["translations"].get(locale)
         if translation is not None and translation.get("status") == "approved":
@@ -524,8 +528,13 @@ def _select_research_verify(research: dict, entry_ids) -> list:
         for entry_id in entry_ids:
             if entry_id not in records:
                 lz_common.fail(f"no research record for entry: {entry_id}", lz_common.EXIT_CANNOT, entry=entry_id)
+            if canon_mod.resource_limited(records[entry_id].get("research")):
+                lz_common.fail(f"finish resource-limited research before verification: {entry_id}",
+                                lz_common.EXIT_CANNOT, entry=entry_id)
         return list(dict.fromkeys(entry_ids))
-    return [i for i, record in records.items() if record.get("verification") is None]
+    return [i for i, record in records.items()
+            if not canon_mod.resource_limited(record.get("research"))
+            and (record.get("verification") is None or canon_mod.resource_limited(record["verification"]))]
 
 
 def build_research_item(entry: dict, locale: str, by_id: dict) -> dict:
@@ -575,6 +584,13 @@ def _build_research(root: Path, cfg: dict, kind: str, locale: str, entry_ids, te
         else:
             items = [build_research_verify_item(i, research["entries"][i], by_entry.get(i) or {}, locale, by_id)
                      for i in ids]
+        for item in items:
+            record = research["entries"].get(item["id"])
+            item["checkpoint_sha256"] = lz_common.sha256_json(record)
+            phase = "research" if kind == "research" else "verification"
+            if record and canon_mod.resource_limited(record.get(phase)):
+                item["resume"] = {"previous": record[phase], "packet": record[
+                    "researched" if kind == "research" else "verification"].get("packet")}
         packet = {"kind": kind, "locale": locale, "batch": name, "field": field, "style": style, "items": items}
         if kind == "research":
             packet["sites"] = sites
@@ -638,6 +654,13 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
 def _write_batch(run_locale_dir: Path, name: str, kind: str, packet: dict, templates_dir: Path) -> dict:
     # Legacy batch names strip leading underscores, so this namespace cannot be an old batch.
     batch_dir = run_locale_dir / "_packets" / kind / name
+    if kind in RESEARCH_KINDS:
+        base, n = name, 2
+        while batch_dir.exists():
+            name = f"{base}-{n}"
+            batch_dir = run_locale_dir / "_packets" / kind / name
+            n += 1
+        packet = {**packet, "batch": name}
     try:
         prompt = render_prompt(templates_dir, kind, packet)
     except LookupError as exc:
@@ -1202,6 +1225,33 @@ def _valid_http_url(url) -> bool:
         return False
 
 
+def _progress_problem(result: dict):
+    if "progress" not in result:
+        return None  # Backward compatibility for saved pre-checkpoint answers.
+    progress = result["progress"]
+    if not isinstance(progress, dict) or progress.get("status") not in ("complete", "resource_limited"):
+        return "progress.status must be complete or resource_limited"
+    remaining = progress.get("remaining")
+    if not isinstance(remaining, list) or not all(_non_empty_str(task) for task in remaining):
+        return "progress.remaining must be a list of non-empty strings"
+    if bool(remaining) != (progress["status"] == "resource_limited"):
+        return "resource_limited needs remaining work; complete needs an empty remaining list"
+    return None
+
+
+def _checkpoint_matches(item: dict, record) -> bool:
+    return ("checkpoint_sha256" not in item
+            or item["checkpoint_sha256"] == lz_common.sha256_json(record))
+
+
+def _attempt(record, kind: str, result: dict, run_dir: Path, at: str) -> list:
+    history = list((record or {}).get("attempts") or [])
+    if record and not history:
+        history.append({"kind": "legacy_snapshot", "record": json.loads(json.dumps(record))})
+    return history + [
+        {"kind": kind, "packet": str(run_dir / "packet.json"), "at": at, "answer": result}]
+
+
 def _research_problem(term):
     """`None` for a well-formed research reply for one term, else the reason
     it is refused. A finding carries what a person can follow up: a source
@@ -1209,6 +1259,8 @@ def _research_problem(term):
     no findings is honest only at `low` confidence."""
     if not isinstance(term, dict):
         return "not an object"
+    if problem := _progress_problem(term):
+        return problem
     for field in ("recommendation", "note"):
         if not _non_empty_str(term.get(field)):
             return f"{field} must be a non-empty string"
@@ -1234,8 +1286,9 @@ def accept_research(root: Path, packet: dict, run_dir: Path, output: dict) -> di
     """Store each valid research reply as a new record in the packet
     locale's research file and report the rest. A new record replaces the
     entry's old one and resets its verification: the old verdict was cast
-    on different research. Only the locale's own file is written, and only
-    once."""
+    on different research. A checkpoint continuation retains old findings;
+    every accepted raw answer is archived. Only the locale's own file is
+    written, and only once."""
     terms = output.get("terms") if isinstance(output, dict) else None
     if not isinstance(terms, dict):
         lz_common.fail("research output is missing a 'terms' object", lz_common.EXIT_FAIL)
@@ -1245,9 +1298,13 @@ def accept_research(root: Path, packet: dict, run_dir: Path, output: dict) -> di
     extra = sorted(set(terms) - {item["id"] for item in items})
     data = canon_mod.load_research(root, locale)
     at = lz_common.now_iso()
-    stored, invalid, missing = [], [], []
+    stored, invalid, missing, stale, limited = [], [], [], [], []
     for item in items:
         entry_id = item["id"]
+        previous = data["entries"].get(entry_id)
+        if not _checkpoint_matches(item, previous):
+            stale.append(entry_id)
+            continue
         if entry_id not in terms:
             missing.append(entry_id)
             continue
@@ -1260,23 +1317,34 @@ def accept_research(root: Path, packet: dict, run_dir: Path, output: dict) -> di
             "recommendation": term["recommendation"], "confidence": term["confidence"], "note": term["note"],
             "findings": [{k: f[k] for k in ("site", "url", "rendering", "quote")} for f in term["findings"]],
         }
+        if "progress" in term:
+            research["progress"] = term["progress"]
+        if item.get("resume"):
+            findings = list(previous["research"]["findings"])
+            findings.extend(f for f in research["findings"] if f not in findings)
+            research["findings"] = findings
         data["entries"][entry_id] = {
             "kind": item["kind"], "source": item["source"],
             "research": research, "research_sha256": canon_mod.research_sha256(research),
-            "researched": {"run": run_dir.name, "at": at},
+            "researched": {"run": run_dir.name, "at": at, "packet": str(run_dir / "packet.json")},
             "verification": None,
+            "attempts": _attempt(previous, "research", term, run_dir, at),
         }
         stored.append(entry_id)
+        if canon_mod.resource_limited(research):
+            limited.append(entry_id)
     if stored:
         canon_mod.save_research(root, locale, data)
     return {"ok": True, "kind": "research", "locale": locale, "run": run_dir.name, "stored": stored,
-            "invalid": invalid, "missing": missing, "extra": extra}
+            "invalid": invalid, "missing": missing, "extra": extra, "stale": stale, "resource_limited": limited}
 
 
-def _verdict_problem(verdict: dict, finding_count: int):
+def _verdict_problem(verdict: dict, finding_count: int, allow_partial: bool = False):
     """`None` for a well-formed verdict, else the reason it is refused:
-    exactly one verdict object per stored finding index, an enum verdict and
-    string `problems`/`better`."""
+    one verdict object per stored finding index (a subset for a partial
+    reply or continuation), an enum verdict and string `problems`/`better`."""
+    if problem := _progress_problem(verdict):
+        return problem
     findings = verdict.get("findings")
     if not isinstance(findings, list):
         return "findings must be a list"
@@ -1292,7 +1360,10 @@ def _verdict_problem(verdict: dict, finding_count: int):
         if not isinstance(finding.get("detail"), str):
             return f"findings[{n}]: detail must be a string"
         indexes.append(index)
-    if sorted(indexes) != list(range(finding_count)):
+    if allow_partial or canon_mod.resource_limited(verdict):
+        if len(set(indexes)) != len(indexes) or any(i < 0 or i >= finding_count for i in indexes):
+            return "partial findings must use unique in-range source indexes"
+    elif sorted(indexes) != list(range(finding_count)):
         return f"findings must hold exactly one entry for each of the {finding_count} source indexes"
     if verdict.get("verdict") not in canon_mod.RESEARCH_VERDICTS:
         return "verdict must be one of: " + ", ".join(canon_mod.RESEARCH_VERDICTS)
@@ -1317,7 +1388,7 @@ def accept_research_verify(root: Path, packet: dict, run_dir: Path, output: dict
     extra = sorted(set(verdicts) - {item["id"] for item in items})
     data = canon_mod.load_research(root, locale)
     at = lz_common.now_iso()
-    verified, invalid, missing = [], [], []
+    verified, invalid, missing, limited = [], [], [], []
     for item in items:
         entry_id = item["id"]
         verdict = verdicts.get(entry_id)
@@ -1328,28 +1399,42 @@ def accept_research_verify(root: Path, packet: dict, run_dir: Path, output: dict
             invalid.append({"id": entry_id, "reason": "not an object"})
             continue
         record = data["entries"].get(entry_id)
-        if (verdict.get("research_sha256") != item["research_sha256"]
+        if (not _checkpoint_matches(item, record)
+                or verdict.get("research_sha256") != item["research_sha256"]
                 or record is None or record.get("research_sha256") != item["research_sha256"]):
             missing.append(entry_id)
             continue
-        reason = _verdict_problem(verdict, len(item["research"]["findings"]))
+        combined = dict(verdict)
+        if item.get("resume"):
+            findings = {f["index"]: f for f in record["verification"]["findings"]}
+            # A continuation answers only the unperformed checks; prior checks win.
+            for finding in verdict.get("findings", []) if isinstance(verdict.get("findings"), list) else []:
+                if isinstance(finding, dict) and isinstance(finding.get("index"), int):
+                    findings.setdefault(finding["index"], finding)
+            combined["findings"] = list(findings.values())
+        reason = _verdict_problem(verdict, len(item["research"]["findings"]), allow_partial=bool(item.get("resume")))
+        reason = reason or _verdict_problem(combined, len(item["research"]["findings"]))
         if reason is not None:
             invalid.append({"id": entry_id, "reason": reason})
             continue
+        attempts = _attempt(record, "research_verify", verdict, run_dir, at)
         record["verification"] = {
             "research_sha256": item["research_sha256"],
             "findings": [
                 {"index": f["index"], "confirmed": f["confirmed"], "detail": f["detail"]}
-                for f in sorted(verdict["findings"], key=lambda f: f["index"])
+                for f in sorted(combined["findings"], key=lambda f: f["index"])
             ],
             "verdict": verdict["verdict"], "problems": verdict["problems"], "better": verdict["better"],
-            "run": run_dir.name, "at": at,
+            "run": run_dir.name, "at": at, "packet": str(run_dir / "packet.json"),
         }
-        verified.append(entry_id)
-    if verified:
+        if "progress" in verdict:
+            record["verification"]["progress"] = verdict["progress"]
+        record["attempts"] = attempts
+        (limited if canon_mod.resource_limited(verdict) else verified).append(entry_id)
+    if verified or limited:
         canon_mod.save_research(root, locale, data)
     return {"ok": True, "kind": "research_verify", "locale": locale, "run": run_dir.name, "verified": verified,
-            "invalid": invalid, "missing": missing, "extra": extra}
+            "invalid": invalid, "missing": missing, "extra": extra, "resource_limited": limited}
 
 
 # ---------------------------------------------------------------------------

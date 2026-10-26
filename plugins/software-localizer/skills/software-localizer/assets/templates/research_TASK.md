@@ -33,9 +33,18 @@ For each item:
   confused with, and what you could not check.
 - A concept that exists only in this product may have no outside evidence. Then give an empty
   `findings` list, `confidence: "low"`, and say so in the note; recommend the plainest rendering
-  that fits the examples.
-- If your search budget runs out, stop adding sources, set the confidence the evidence you have
-  supports, and say so in the note.
+  that fits the examples. A completed bounded search has `progress.status: "complete"` and an
+  empty `remaining` list, even when it found no sources.
+- If a search or fetch budget runs out, obey the tool's instruction to stop using it for this
+  turn. The cap is shared by the coordinator and its nested agents; another subagent does not
+  provide a new allowance. Keep the confidence your actual evidence supports and describe the
+  limitation in the note. For each affected item set `progress.status: "resource_limited"` and
+  list the exact unperformed queries, sites or checks in `remaining`. Do this for untouched
+  items too; do not label unperformed work a source gap. Completed siblings stay `complete`.
+- When an item has `resume`, read `resume.previous` and perform only its `progress.remaining`
+  work. Retain its findings; do not claim to have fetched them again. Your new recommendation,
+  confidence and note assess the combined evidence. Include the retained findings alongside
+  any new findings, without changing their quotes. The coordinator retains each raw answer.
 
 Answer every item in the packet, keyed by its `id`. Reply with ONE JSON object and nothing else:
 
@@ -44,6 +53,7 @@ Answer every item in the packet, keyed by its `id`. Reply with ONE JSON object a
   "recommendation": "…",
   "confidence": "high|medium|low",
   "note": "…",
+  "progress": {"status": "complete|resource_limited", "remaining": []},
   "findings": [{"site": "…", "url": "https://…", "rendering": "…", "quote": "…"}]
 }}}
 ```

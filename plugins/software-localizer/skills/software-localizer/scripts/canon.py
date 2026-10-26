@@ -40,13 +40,17 @@ write the same file):
 
     {"schema": 1, "locale": "de", "entries": {"t-cart": {
         "kind": "term", "source": "Cart",
-        "research": {"recommendation", "confidence", "note",
+        "research": {"recommendation", "confidence", "note", "progress"?,
                      "findings": [{"site", "url", "rendering", "quote"}]},
         "research_sha256": "...", "researched": {"run", "at"},
         "verification": None | {"research_sha256", "findings":
             [{"index", "confirmed", "detail"}], "verdict", "problems",
-            "better", "run", "at"}}}}
+            "better", "run", "at", "packet", "progress"?},
+        "attempts": [{"kind", "packet", "at", "answer"}]}}}
 
+`progress` distinguishes a complete bounded search (even with no findings)
+from resource-limited work with exact remaining checks. `attempts` retains
+the accepted answers; new packets carry checkpoints for safe continuation.
 Only `packets.py accept` of a research or research_verify run writes it.
 Nothing hashes it and `freeze` never reads it: evidence for a person's
 decision, never an input to a candidate, a check or the lock. `approve`
@@ -115,6 +119,11 @@ RESEARCH_CONFIDENCE = ("high", "medium", "low")
 RESEARCH_VERDICTS = ("holds", "weak", "refuted")
 
 
+def resource_limited(result: dict | None) -> bool:
+    """Legacy answers have no typed progress; never infer it from prose."""
+    return bool(result and (result.get("progress") or {}).get("status") == "resource_limited")
+
+
 def research_path(root, locale: str) -> Path:
     return Path(root) / RESEARCH_DIR_NAME / f"{locale}.json"
 
@@ -148,10 +157,13 @@ def research_summary(record: dict) -> dict:
         "findings": len(research.get("findings") or []),
         "confirmed": None, "verdict": None, "better": None,
     }
-    if verification:
+    if verification and not resource_limited(verification):
         summary["confirmed"] = sum(1 for f in verification.get("findings") or [] if f.get("confirmed") is True)
         summary["verdict"] = verification.get("verdict")
         summary["better"] = verification.get("better") or None
+    for phase, result in (("research", research), ("verification", verification)):
+        if result and "progress" in result:
+            summary[f"{phase}_progress"] = result["progress"]
     return summary
 
 
@@ -160,6 +172,9 @@ def research_flags(record: dict) -> list:
     was verified, holds, is not low-confidence and has a confirmed source."""
     summary = research_summary(record)
     flags = []
+    for phase in ("research", "verification"):
+        if resource_limited(record.get(phase)):
+            flags.append(f"{phase} resource limited")
     if summary["verdict"] is None:
         flags.append("not verified")
     elif summary["verdict"] != "holds":
