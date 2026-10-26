@@ -221,8 +221,6 @@ def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock
         if counts.get("existing", 0) or counts.get("translated", 0) or counts.get("human_locked", 0):
             return f"packets.py build --root {root_display} --kind audit --locale {locale} (optional: audit review)"
 
-    if audit_counts and any(cov is not None for cov in audit_counts.values()):
-        return f"report.py --root {root_display} --locale <locale> (inspect audit coverage and findings)"
     return f"export_values.py --root {root_display} --locale <locale>, then report.py --root {root_display} --locale <locale>"
 
 

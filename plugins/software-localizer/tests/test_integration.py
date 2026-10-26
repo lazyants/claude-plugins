@@ -241,14 +241,14 @@ def do_audit_and_report(root: Path) -> None:
         for item in packet["items"]:
             if not fail_done and item["id"] == "user.greeting":
                 verdicts[item["id"]] = {
-                    "value_sha256": item["value_sha256"], "verdict": "fail",
+                    "value_sha256": item["value_sha256"], "audit_sha256": item["audit_sha256"], "verdict": "fail",
                     "issues": [{"kind": "style", "text": "could be warmer"}],
                     "proposed": "Hallo {name}!", "new_canon_candidates": [],
                 }
                 fail_done = True
             else:
                 verdicts[item["id"]] = {
-                    "value_sha256": item["value_sha256"], "verdict": "pass",
+                    "value_sha256": item["value_sha256"], "audit_sha256": item["audit_sha256"], "verdict": "pass",
                     "issues": [], "proposed": None, "new_canon_candidates": [],
                 }
         output_path = batch_dir / "audit.out.json"
@@ -357,7 +357,7 @@ def test_seam_batch_canon_order_preserves_reviewed_candidates(work_root, kind):
         output = {"translations": values}
     else:
         output = {"verdicts": {item["id"]: {
-            "value_sha256": item["value_sha256"], "verdict": "fail",
+            "value_sha256": item["value_sha256"], "audit_sha256": item["audit_sha256"], "verdict": "fail",
             "issues": [{"kind": "style", "text": "use the new wording"}],
             "proposed": values[item["id"]], "new_canon_candidates": [],
         } for item in packet["items"] if item["id"] in sources}}
