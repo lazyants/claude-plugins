@@ -52,10 +52,10 @@ reviewed; audit builds keep their existing eligibility rules (`existing`, `trans
 Partial or malformed answers do not earn coverage for their missing IDs. Unknown inputs in
 status mean coverage is unavailable, never that the audit is complete.
 
-Audit items carry an `audit_sha256` token binding the snapshot and audit scope. The answer must
-echo it alongside `value_sha256`; an answer from before a rebuild cannot review a changed
-snapshot merely because the target text stayed the same. Rebuild pending audit packets from
-older plugin versions and rerun their model turns; unbound legacy answers do not earn coverage.
+The existing [native handoff receipt](packet-handoff.md) binds the complete packet, original
+instructions and actual returned JSON before acceptance. An old answer cannot review changed
+inputs after a rebuild merely because its target hash still matches. The handoff archive
+retains the exact input/output evidence; audit records identify their packet digest and run.
 
 Ordinary audit builds select the remaining eligible messages; `--fresh` requests a new full
 audit. The prior verdict remains evidence until a new valid verdict replaces it. A newly

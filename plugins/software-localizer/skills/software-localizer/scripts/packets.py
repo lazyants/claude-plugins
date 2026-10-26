@@ -397,21 +397,6 @@ def _audit_item_snapshot(packet: dict, item: dict) -> dict:
     )
 
 
-def _audit_item_sha256(packet: dict, item: dict) -> str:
-    """Bind the reply to every input this item was audited against.
-
-    A batch directory can be rebuilt while an old answer still exists beside
-    it. The target hash alone cannot distinguish two audits of the same text
-    under different instructions or scopes.
-    """
-    return lz_common.sha256_json({
-        "locale": packet["locale"],
-        "id": item["id"],
-        "scope": packet.get("canon_entry"),
-        "snapshot": _audit_item_snapshot(packet, item),
-    })
-
-
 def build_canon_item(message: dict, target_locales: list) -> dict:
     targets = {}
     for locale in target_locales:
@@ -767,9 +752,6 @@ def _write_batch(run_locale_dir: Path, name: str, kind: str, packet: dict, templ
         revisions[restricted["entry"]] = restricted["note_revision"]
     if revisions:
         packet["note_revisions"] = revisions
-    if kind == "audit":
-        for item in packet["items"]:
-            item["audit_sha256"] = _audit_item_sha256(packet, item)
     try:
         prefix, suffix = prompt_instructions(templates_dir, kind)
     except LookupError as exc:
@@ -1046,15 +1028,6 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         if not isinstance(verdict, dict) or verdict.get("value_sha256") != item["value_sha256"]:
             missing.append(msg_id)
             continue
-        if kind == "audit":
-            audit_sha = item.get("audit_sha256")
-            if (not isinstance(audit_sha, str) or not audit_sha
-                    or audit_sha != _audit_item_sha256(packet, item)
-                    or verdict.get("audit_sha256") != audit_sha):
-                # Old packets must be rebuilt; old answers cannot attach to
-                # a rebuilt packet with the same target but different inputs.
-                missing.append(msg_id)
-                continue
         is_plural = item.get("target_labels") is not None
         if not _valid_verdict_shape(verdict, is_plural):
             # A malformed verdict (an unrecognized `verdict` string, a
@@ -1098,7 +1071,6 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         if kind == "audit":
             snapshot = _audit_item_snapshot(packet, item)
             record = {
-                "audit_sha256": item["audit_sha256"],
                 "snapshot": snapshot,
                 "verdict": verdict["verdict"],
                 "issues": verdict.get("issues", []),

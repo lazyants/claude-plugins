@@ -345,9 +345,9 @@ missing or invalid verdicts remain unreviewed. Changed source, target, context, 
 canon makes the saved verdict stale. Run collect and sync after project edits before resuming.
 Approved informational canon context is part of that snapshot, including linked group and
 scope notes; it does not change mechanical candidate/export hashes.
-Audit replies must echo each item's `audit_sha256` as well as `value_sha256`, so a late answer
-cannot claim changed inputs after a rebuild. For pending packets from an older plugin version,
-rebuild the packet and rerun the audit turn before accepting its answer.
+The existing [native handoff receipt](references/packet-handoff.md) binds each answer to the
+complete original packet and instructions, so a late answer cannot claim changed inputs after
+a rebuild. Audit replies keep the existing `value_sha256` verdict format.
 
 For each batch run a Claude subagent on its `prompt.md` (JSON only), save the answer, and
 `packets.py accept --root R --run <batch dir> --output <answer.json>`. Every accepted failure

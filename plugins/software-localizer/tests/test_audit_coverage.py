@@ -3,6 +3,8 @@
 These tests feed real packet builds and accepts into reloaded state, the status
 subprocess and the Markdown report. They exercise bookkeeping, not translation
 quality: verdicts are explicit fixture inputs and the toy parser checks syntax.
+The shipped synthetic native-session helper captures every canned guarded turn;
+replay tests retain A's original receipt when a later build replaces the packet.
 """
 
 from __future__ import annotations
@@ -19,8 +21,10 @@ import adapter_client
 import canon
 import ledger
 import lz_common
+import packet_handoff
 import packets
 import report
+from handoff_fixture import record_agent_turn
 from test_packets import (
     SCRIPTS_DIR,
     TEMPLATES_DIR,
@@ -68,7 +72,6 @@ def _packet(batch):
 def _verdict(item, verdict="pass", proposed=None):
     return {
         "value_sha256": item["value_sha256"],
-        "audit_sha256": item["audit_sha256"],
         "verdict": verdict,
         "issues": [] if verdict == "pass" else [{"kind": "meaning", "text": "Check the greeting's intended meaning."}],
         "proposed": proposed,
@@ -76,13 +79,27 @@ def _verdict(item, verdict="pass", proposed=None):
     }
 
 
-def _accept(root, batch, verdicts=None):
+def _record_answer(batch, verdicts=None):
     run_dir, packet = _packet(batch)
     if verdicts is None:
         verdicts = {item["id"]: _verdict(item) for item in packet["items"]}
     output_path = run_dir / "answer.json"
     lz_common.atomic_write_json(output_path, {"verdicts": verdicts})
+    record_agent_turn(run_dir, output_path)
+    return run_dir, output_path
+
+
+def _accept(root, batch, verdicts=None):
+    run_dir, output_path = _record_answer(batch, verdicts)
     return packets.do_accept(root, run_dir, output_path)
+
+
+def _assert_handoff_refusal(root, run_dir, output_path, capsys, expected="submitted packet differs"):
+    with pytest.raises(SystemExit) as refusal:
+        packets.do_accept(root, run_dir, output_path)
+    assert refusal.value.code == lz_common.EXIT_CANNOT
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["ok"] is False and expected in payload["error"]
 
 
 def _coverage(root, cfg=None, messages=None, canon_lock=None):
@@ -194,13 +211,15 @@ def test_partial_and_refused_verdicts_remain_unreviewed_and_resume(work_root):
 
 
 @pytest.mark.parametrize("changed", ["source", "context", "style", "canon"])
-def test_old_answer_cannot_cover_rebuilt_packet_with_same_target(work_root, changed):
+def test_old_answer_cannot_cover_rebuilt_packet_with_same_target(work_root, changed, capsys):
     canon_lock = {"schema": 1, "entries": [_canon_entry()]}
     cfg, messages = _workspace(work_root, canon_lock=canon_lock)
     first = _build(work_root)["batches"][0]
     first_dir, first_packet = _packet(first)
     first_item = first_packet["items"][0]
     retained_answer = _verdict(first_item)
+    _, original_output = _record_answer(first, {"a": retained_answer})
+    assert packet_handoff.verify(first_dir, original_output)[0] == first_packet
     if changed == "source":
         messages["messages"][0]["source"] = "Hello again"
     elif changed == "context":
@@ -217,10 +236,10 @@ def test_old_answer_cannot_cover_rebuilt_packet_with_same_target(work_root, chan
     rebuilt_item = rebuilt_packet["items"][0]
     assert rebuilt_dir == first_dir  # The ordinary rebuild reuses its existing run path.
     assert rebuilt_item["value_sha256"] == first_item["value_sha256"]
-    assert rebuilt_item["audit_sha256"] != first_item["audit_sha256"]
+    assert rebuilt_packet != first_packet
     before = ledger.load(work_root)
-    refused = _accept(work_root, rebuilt, {"a": retained_answer})
-    assert refused["passed"] == [] and refused["missing"] == ["a"]
+    # Reuse A's output AND original native receipt; never capture B's request for A.
+    _assert_handoff_refusal(work_root, rebuilt_dir, original_output, capsys)
     assert ledger.load(work_root) == before
     assert _coverage(work_root)["reviewed"] == 0
     accepted = _accept(work_root, rebuilt, {"a": _verdict(rebuilt_item)})
@@ -228,58 +247,26 @@ def test_old_answer_cannot_cover_rebuilt_packet_with_same_target(work_root, chan
     assert _coverage(work_root)["reviewed"] == 1
 
 
-@pytest.mark.parametrize("binding", ["missing", "wrong"])
-def test_invalid_reply_binding_preserves_previous_verdict_and_proposal(work_root, binding):
-    _workspace(work_root)
-    first = _build(work_root)["batches"][0]
-    _accept(work_root, first, {"a": _verdict(_packet(first)[1]["items"][0], "fail", "Hallo!")})
-    fresh = _build(work_root, fresh=True)["batches"][0]
-    answer = _verdict(_packet(fresh)[1]["items"][0])
-    if binding == "missing":
-        answer.pop("audit_sha256")
-    else:
-        answer["audit_sha256"] = "0" * 64
-    before = ledger.load(work_root)
-    result = _accept(work_root, fresh, {"a": answer})
-    assert result["passed"] == [] and result["missing"] == ["a"]
-    assert ledger.load(work_root) == before
-    assert _coverage(work_root)["fail"] == 1
-
-
 @pytest.mark.parametrize("old_scope,new_scope", [("full", "restricted"), ("restricted", "full")])
-def test_audit_response_binding_cannot_cross_full_and_restricted_scopes(work_root, old_scope, new_scope):
+def test_audit_response_binding_cannot_cross_full_and_restricted_scopes(work_root, old_scope, new_scope, capsys):
     _workspace(work_root)
     _restricted_request(work_root)
     first = _build(work_root, **({"entry_ids": ["t-hello"]} if old_scope == "restricted" else {}))["batches"][0]
-    first_item = _packet(first)[1]["items"][0]
+    first_dir, first_packet = _packet(first)
+    first_item = first_packet["items"][0]
+    _, original_output = _record_answer(first, {"a": _verdict(first_item)})
+    assert packet_handoff.verify(first_dir, original_output)[0] == first_packet
     current = _build(work_root, **({"entry_ids": ["t-hello"]} if new_scope == "restricted" else {}))["batches"][0]
-    current_item = _packet(current)[1]["items"][0]
+    current_dir, current_packet = _packet(current)
+    current_item = current_packet["items"][0]
     assert first_item["value_sha256"] == current_item["value_sha256"]
-    assert first_item["audit_sha256"] != current_item["audit_sha256"]
+    assert first_packet["canon_entry"] != current_packet["canon_entry"]
     before = ledger.load(work_root)
-    result = _accept(work_root, current, {"a": _verdict(first_item)})
-    assert result["missing"] == ["a"] and result["passed"] == []
+    _assert_handoff_refusal(work_root, current_dir, original_output, capsys, expected="handoff receipt required")
     assert ledger.load(work_root) == before
     accepted = _accept(work_root, current, {"a": _verdict(current_item)})
     assert accepted["passed"] == ["a"]
     assert _coverage(work_root)["reviewed"] == (1 if new_scope == "full" else 0)
-
-
-def test_legacy_packet_without_binding_requires_rebuild_and_cannot_gain_coverage(work_root):
-    _workspace(work_root)
-    batch = _build(work_root)["batches"][0]
-    run_dir, packet = _packet(batch)
-    answer = _verdict(packet["items"][0])
-    packet["items"][0].pop("audit_sha256")
-    lz_common.atomic_write_json(run_dir / "packet.json", packet)
-    before = ledger.load(work_root)
-    result = _accept(work_root, batch, {"a": answer})
-    assert result["passed"] == [] and result["missing"] == ["a"]
-    assert ledger.load(work_root) == before
-    assert _coverage(work_root)["reviewed"] == 0
-    rebuilt = _build(work_root)["batches"][0]
-    assert _accept(work_root, rebuilt)["passed"] == ["a"]
-    assert _coverage(work_root)["reviewed"] == 1
 
 
 def test_completed_audit_resumes_empty_and_fresh_rebuilds_all(work_root):
@@ -376,7 +363,7 @@ def _approved_context_workspace(root, fixture):
 
 
 @pytest.mark.parametrize("changed", ["group_note", "group_scope", "linked_note", "linked_translation"])
-def test_approved_audit_context_change_invalidates_coverage_and_old_rebuilt_answer(work_root, approved_context, changed):
+def test_approved_audit_context_change_invalidates_coverage_and_old_rebuilt_answer(work_root, approved_context, changed, capsys):
     cfg, messages, initial_lock = _approved_context_workspace(work_root, approved_context)
     message = messages["messages"][0]
     msg_id = message["id"]
@@ -386,6 +373,8 @@ def test_approved_audit_context_change_invalidates_coverage_and_old_rebuilt_answ
     old_answer = _verdict(first_item)
     assert first_packet["canon_context"][msg_id]["groups"]
     _accept(work_root, first, {msg_id: old_answer})
+    original_output = first_dir / "answer.json"
+    assert packet_handoff.verify(first_dir, original_output)[0] == first_packet
     old_record = copy.deepcopy(ledger.load(work_root)["locales"]["de"][msg_id]["audit"])
     if changed.startswith("group_"):
         field = "note" if changed == "group_note" else "scope"
@@ -405,9 +394,8 @@ def test_approved_audit_context_change_invalidates_coverage_and_old_rebuilt_answ
     rebuilt_item = rebuilt_packet["items"][0]
     assert rebuilt_dir == first_dir
     assert rebuilt_item["value_sha256"] == first_item["value_sha256"]
-    assert rebuilt_item["audit_sha256"] != first_item["audit_sha256"]
-    refused = _accept(work_root, rebuilt, {msg_id: old_answer})
-    assert refused["missing"] == [msg_id] and refused["passed"] == []
+    assert rebuilt_packet["canon_context"] != first_packet["canon_context"]
+    _assert_handoff_refusal(work_root, rebuilt_dir, original_output, capsys)
     assert ledger.load(work_root)["locales"]["de"][msg_id]["audit"] == old_record
     assert _accept(work_root, rebuilt)["passed"] == [msg_id]
     new_snapshot = ledger.load(work_root)["locales"]["de"][msg_id]["audit"]["snapshot"]
@@ -645,6 +633,7 @@ def test_legacy_unknown_scope_survives_candidate_and_review_counterproposal(work
         "issues": [{"kind": "style", "text": "Review counterproposal with an unknown original scope."}],
         "proposed": "Hallo!", "new_canon_candidates": [],
     }}})
+    record_agent_turn(run_dir, output_path)
     assert packets.do_accept(work_root, run_dir, output_path)["audit_proposals"] == ["a"]
     proposal = ledger.load(work_root)["locales"]["de"]["a"]["audit_proposal"]
     assert proposal["value"] == "Hallo!" and proposal.get("audit_scope") is None

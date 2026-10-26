@@ -156,8 +156,7 @@ def test_audit_context_does_not_waive_checks_or_change_candidate_hash(work_root,
     for proposal, expected_checks in [("evidenzbasierte Analysen", "fail"),
                                        ("evidenzbasierte Analysen {count}", "pass")]:
         output = write_output(run_dir, {"verdicts": {msg["id"]: {
-            "value_sha256": packet["items"][0]["value_sha256"],
-            "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "fail",
+            "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
             "issues": [{"kind": "grammar", "text": "Example proposal for mechanical checks"}],
             "proposed": proposal, "new_canon_candidates": [],
         }}})
@@ -1109,7 +1108,7 @@ def test_accept_audit_invalid_verdict_enum_treated_as_missing(work_root):
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     value_sha = packet["items"][0]["value_sha256"]
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": value_sha, "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "nope",
+        "value_sha256": value_sha, "verdict": "nope",
         "issues": [], "proposed": "Hallo!", "new_canon_candidates": [],
     }}})
 
@@ -1330,10 +1329,8 @@ def test_accept_new_canon_candidates_written_beside_packet(work_root, kind, lega
         legacy_dir = work_root / "runs" / "de" / "a"
         run_dir.rename(legacy_dir)
         run_dir = legacy_dir
-    packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     output_path = write_output(run_dir, {"verdicts": {"a": {
         "value_sha256": candidate["value_sha256"], "verdict": "pass", "issues": [], "proposed": None,
-        **({"audit_sha256": packet["items"][0]["audit_sha256"]} if kind == "audit" else {}),
         "new_canon_candidates": [{"kind": "term", "source": "Cart", "proposed": "Warenkorb", "note": "seen twice"}],
     }}})
 
@@ -1437,7 +1434,7 @@ def test_accept_audit_fail_with_proposed_stores_audit_proposal(work_root):
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     value_sha = packet["items"][0]["value_sha256"]
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": value_sha, "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "fail",
+        "value_sha256": value_sha, "verdict": "fail",
         "issues": [{"kind": "meaning", "text": "wrong"}], "proposed": "Hallo!",
         "new_canon_candidates": [],
     }}})
@@ -1470,8 +1467,7 @@ def test_accept_audit_without_replacement_survives_save_load_and_report(work_roo
     item = packet["items"][0]
     issues = [{"kind": "meaning", "text": "Needs domain clarification before a safe replacement."}]
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": item["value_sha256"], "audit_sha256": item["audit_sha256"],
-        "verdict": "fail", "issues": issues,
+        "value_sha256": item["value_sha256"], "verdict": "fail", "issues": issues,
         "proposed": None, "new_canon_candidates": [],
     }}})
 
@@ -1518,8 +1514,7 @@ def test_accept_audit_retains_packet_style_provenance(work_root, proposed):
     run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": make_entry("existing")}}, "audit", "de")
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": packet["items"][0]["value_sha256"],
-        "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "fail",
+        "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
         "issues": [{"kind": "style", "text": "Needs follow-up."}], "proposed": proposed,
     }}})
     changed_cfg = {**cfg, "style": {"de": {"formality": "du", "notes": "Changed since build."}}}
@@ -1539,8 +1534,7 @@ def test_accept_audit_without_replacement_replaces_known_full_scope_proposal(wor
     run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": entry}}, "audit", "de")
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": packet["items"][0]["value_sha256"],
-        "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "fail",
+        "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
         "issues": [{"kind": "meaning", "text": "The earlier correction is unsafe."}], "proposed": None,
     }}})
 
@@ -1557,7 +1551,7 @@ def test_accept_audit_pass_persists_provenance_without_changing_translation_stat
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     value_sha = packet["items"][0]["value_sha256"]
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": value_sha, "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "pass",
+        "value_sha256": value_sha, "verdict": "pass",
         "issues": [], "proposed": None, "new_canon_candidates": [],
     }}})
 
