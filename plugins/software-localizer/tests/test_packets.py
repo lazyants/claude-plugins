@@ -156,7 +156,8 @@ def test_audit_context_does_not_waive_checks_or_change_candidate_hash(work_root,
     for proposal, expected_checks in [("evidenzbasierte Analysen", "fail"),
                                        ("evidenzbasierte Analysen {count}", "pass")]:
         output = write_output(run_dir, {"verdicts": {msg["id"]: {
-            "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
+            "value_sha256": packet["items"][0]["value_sha256"],
+            "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "fail",
             "issues": [{"kind": "grammar", "text": "Example proposal for mechanical checks"}],
             "proposed": proposal, "new_canon_candidates": [],
         }}})
@@ -1530,11 +1531,11 @@ def test_accept_audit_retains_packet_style_provenance(work_root, proposed):
     assert finding["style_sha256"] != ledger_mod.style_sha256(changed_cfg, "de")
 
 
-def test_accept_audit_without_replacement_replaces_old_proposal(work_root):
+def test_accept_audit_without_replacement_replaces_known_full_scope_proposal(work_root):
     cfg = make_cfg()
     message = make_message("a", "Hello", targets={"de": "Hallo"})
     entry = make_entry("existing")
-    entry["audit_proposal"] = {"value": "Old correction", "checks": "pass", "issues": []}
+    entry["audit_proposal"] = {"audit_scope": "full", "value": "Old correction", "checks": "pass", "issues": []}
     run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": entry}}, "audit", "de")
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     output_path = write_output(run_dir, {"verdicts": {"a": {

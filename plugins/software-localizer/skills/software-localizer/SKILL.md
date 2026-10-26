@@ -343,6 +343,8 @@ again, add `--fresh` (unrestricted audit only). A canon-entry audit never substi
 message audit. Accepted passes and failures are saved with their snapshot and run provenance;
 missing or invalid verdicts remain unreviewed. Changed source, target, context, style or relevant
 canon makes the saved verdict stale. Run collect and sync after project edits before resuming.
+Approved informational canon context is part of that snapshot, including linked group and
+scope notes; it does not change mechanical candidate/export hashes.
 Audit replies must echo each item's `audit_sha256` as well as `value_sha256`, so a late answer
 cannot claim changed inputs after a rebuild. For pending packets from an older plugin version,
 rebuild the packet and rerun the audit turn before accepting its answer.
@@ -375,6 +377,9 @@ Each message has one active replacement proposal. A failure from another audit s
 that pending replacement; any new replacement remains visible as saved evidence and is listed
 in `audit_proposal_conflicts`. Resolve the pending proposal, then rerun the other audit scope
 (`--fresh` for a full audit) before asking to approve its replacement.
+Older proposals without scope metadata remain **unknown**, not assumed to be full audits.
+They stay visible for operator review and can still be approved through `accept-audit` when
+checked; a new verdict cannot silently retire their unproven scope.
 
 An accepted proposal still gets its own review verdict (step 6's review loop) before export.
 Changed proposals, including review counter-proposals, need a fresh project check before any

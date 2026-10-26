@@ -391,7 +391,10 @@ def _audit_item_snapshot(packet: dict, item: dict) -> dict:
     locale = packet["locale"]
     message = {**item_to_message(item, locale), "targets": {locale: item["value"]}}
     cfg = {"style": {locale: packet.get("style")}}
-    return ledger_mod.audit_snapshot(message, locale, cfg, packet.get("canon", {"entries": []}))
+    return ledger_mod.audit_snapshot(
+        message, locale, cfg, packet.get("canon", {"entries": []}),
+        canon_context=packet.get("canon_context", {}).get(item["id"], {}),
+    )
 
 
 def _audit_item_sha256(packet: dict, item: dict) -> str:
@@ -1112,7 +1115,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             else:
                 entry.setdefault("canon_audits", {})[audit_scope] = record
             previous = entry.get("audit_proposal")
-            if previous and previous.get("audit_scope", "full") == audit_scope:
+            if previous and previous.get("audit_scope") == audit_scope:
                 entry["audit_proposal"] = None
 
         raw_candidates = verdict.get("new_canon_candidates")
@@ -1179,7 +1182,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                     # cleared when this candidate was accepted) -- it could
                     # never be exported.
                     entry["audit_proposal"] = {
-                        "audit_scope": old_candidate.get("audit_scope", "full"),
+                        "audit_scope": old_candidate.get("audit_scope"),
                         "value": proposed,
                         "value_sha256": lz_common.value_sha256(proposed),
                         "audited_target_sha256": old_candidate.get("audited_target_sha256"),
@@ -1224,10 +1227,11 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                 )
             entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
             pending = entry.get("audit_proposal")
-            pending_scope = pending.get("audit_scope", "full") if pending else None
-            # Another scope's outstanding replacement was not judged here.
-            # Keep this verdict's alternative in its independent audit record.
-            if pending and pending.get("value") is not None and pending_scope != audit_scope:
+            pending_scope = pending.get("audit_scope") if pending else None
+            # Unknown legacy scope cannot be retired: even a null finding may
+            # have no other durable record. Other scopes retain replacements.
+            if pending and (pending_scope is None
+                            or (pending.get("value") is not None and pending_scope != audit_scope)):
                 if proposed is not None:
                     audit_proposal_conflicts.append({
                         "id": msg_id, "scope": audit_scope, "pending_scope": pending_scope,
@@ -1674,7 +1678,7 @@ def do_accept_audit(root: Path, locale: str, ids: list, by: str) -> dict:
             "value": proposal["value"],
             "value_sha256": proposal["value_sha256"],
             "origin": "audit",
-            "audit_scope": proposal.get("audit_scope", "full"),
+            "audit_scope": proposal.get("audit_scope"),
             "source_sha256": proposal["source_sha256"],
             "context_sha256": proposal["context_sha256"],
             "style_sha256": proposal["style_sha256"],

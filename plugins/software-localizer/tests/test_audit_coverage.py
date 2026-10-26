@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import adapter_client
+import canon
 import ledger
 import lz_common
 import packets
@@ -23,6 +24,7 @@ import report
 from test_packets import (
     SCRIPTS_DIR,
     TEMPLATES_DIR,
+    approved_context,
     fake_parse,
     make_cfg,
     make_entry,
@@ -357,11 +359,128 @@ def test_snapshot_changes_invalidate_coverage_without_ledger_sync(work_root, cha
 def test_unrelated_canon_change_does_not_invalidate_audit(work_root):
     _workspace(work_root)
     _accept(work_root, _build(work_root)["batches"][0])
+    unrelated_entry = _canon_entry("t-save", "Save", "Speichern")
+    unrelated_entry["occurrences"] = []
     lz_common.atomic_write_json(work_root / "canon.lock.json", {
-        "schema": 1, "entries": [_canon_entry("t-save", "Save", "Speichern")],
+        "schema": 1, "entries": [unrelated_entry],
     })
     assert _coverage(work_root)["reviewed"] == 1
     assert _build(work_root)["selected"] == 0
+
+
+def _approved_context_workspace(root, fixture):
+    lock = canon.freeze(root, fixture["canon"])
+    sample = fixture["messages"][0]
+    cfg, messages = _workspace(root, [make_message(sample["id"], sample["source"], targets=sample["targets"])], lock)
+    return cfg, messages, lock
+
+
+@pytest.mark.parametrize("changed", ["group_note", "group_scope", "linked_note", "linked_translation"])
+def test_approved_audit_context_change_invalidates_coverage_and_old_rebuilt_answer(work_root, approved_context, changed):
+    cfg, messages, initial_lock = _approved_context_workspace(work_root, approved_context)
+    message = messages["messages"][0]
+    msg_id = message["id"]
+    first = _build(work_root)["batches"][0]
+    first_dir, first_packet = _packet(first)
+    first_item = first_packet["items"][0]
+    old_answer = _verdict(first_item)
+    assert first_packet["canon_context"][msg_id]["groups"]
+    _accept(work_root, first, {msg_id: old_answer})
+    old_record = copy.deepcopy(ledger.load(work_root)["locales"]["de"][msg_id]["audit"])
+    if changed.startswith("group_"):
+        field = "note" if changed == "group_note" else "scope"
+        approved_context["canon"]["groups"][0][field] += " Refined approved context."
+    elif changed == "linked_note":
+        approved_context["canon"]["entries"][1]["note"] += " Refined approved note."
+    else:
+        approved_context["canon"]["entries"][1]["translations"]["de"]["value"] = "Evidenzbasierte Familienforschung"
+    changed_lock = canon.freeze(work_root, approved_context["canon"])
+    assert ledger.canon_sha256(message, initial_lock) == ledger.canon_sha256(message, changed_lock)
+    coverage = _coverage(work_root, cfg, messages, changed_lock)
+    assert coverage["reviewed"] == 0 and coverage["ids"]["stale"] == [msg_id]
+    assert _status(work_root)[0]["audit"]["de"] == coverage
+
+    rebuilt = _build(work_root)["batches"][0]
+    rebuilt_dir, rebuilt_packet = _packet(rebuilt)
+    rebuilt_item = rebuilt_packet["items"][0]
+    assert rebuilt_dir == first_dir
+    assert rebuilt_item["value_sha256"] == first_item["value_sha256"]
+    assert rebuilt_item["audit_sha256"] != first_item["audit_sha256"]
+    refused = _accept(work_root, rebuilt, {msg_id: old_answer})
+    assert refused["missing"] == [msg_id] and refused["passed"] == []
+    assert ledger.load(work_root)["locales"]["de"][msg_id]["audit"] == old_record
+    assert _accept(work_root, rebuilt)["passed"] == [msg_id]
+    new_snapshot = ledger.load(work_root)["locales"]["de"][msg_id]["audit"]["snapshot"]
+    assert new_snapshot["canon_sha256"] == old_record["snapshot"]["canon_sha256"]
+    assert new_snapshot["canon_context_sha256"] != old_record["snapshot"]["canon_context_sha256"]
+    assert _coverage(work_root)["reviewed"] == 1
+
+
+@pytest.mark.parametrize("changed", ["unrelated_group", "unrelated_entry", "unapproved_group", "unapproved_entry"])
+def test_unrelated_or_unapproved_audit_context_does_not_invalidate(work_root, approved_context, changed):
+    _, messages, initial_lock = _approved_context_workspace(work_root, approved_context)
+    message = messages["messages"][0]
+    first = _build(work_root)["batches"][0]
+    first_context = _packet(first)[1]["canon_context"]
+    _accept(work_root, first)
+    source_canon = approved_context["canon"]
+    if changed == "unrelated_group":
+        source_canon["groups"][1]["note"] += " A revised save-button note."
+    elif changed == "unrelated_entry":
+        source_canon["entries"][3]["translations"]["de"]["value"] = "Sichern"
+    elif changed == "unapproved_group":
+        source_canon["groups"].append({
+            **source_canon["groups"][0], "id": "unapproved-context", "approved_by": None,
+            "note": "An unapproved interpretation must not enter the audit snapshot.",
+        })
+    else:
+        source_canon["entries"].append({
+            "id": "t-unapproved", "kind": "term", "source": "Unapproved guidance", "occurrences": [],
+            "note": "A proposed addition", "translations": {"de": {"status": "proposed", "value": "Vorschlag"}},
+        })
+    changed_lock = canon.freeze(work_root, source_canon)
+    assert ledger.canon_sha256(message, initial_lock) == ledger.canon_sha256(message, changed_lock)
+    assert ledger.audit_canon_context(changed_lock, messages["messages"], "de") == first_context
+    assert _coverage(work_root)["reviewed"] == 1
+    assert _build(work_root)["selected"] == 0
+
+
+def test_accept_keeps_frozen_approved_context_when_live_lock_changed_without_rebuild(work_root, approved_context):
+    _, messages, _ = _approved_context_workspace(work_root, approved_context)
+    msg_id = messages["messages"][0]["id"]
+    batch = _build(work_root)["batches"][0]
+    frozen_packet = _packet(batch)[1]
+    frozen_context = frozen_packet["canon_context"][msg_id]
+    approved_context["canon"]["groups"][0]["scope"] += " A later approved scope clarification."
+    current_lock = canon.freeze(work_root, approved_context["canon"])
+    assert ledger.audit_canon_context(current_lock, messages["messages"], "de")[msg_id] != frozen_context
+    result = _accept(work_root, batch)
+    assert result["passed"] == [msg_id]
+    record = ledger.load(work_root)["locales"]["de"][msg_id]["audit"]
+    assert record["snapshot"]["canon_context_sha256"] == lz_common.sha256_json(frozen_context)
+    assert _packet(batch)[1] == frozen_packet  # No build has replaced the reviewed packet.
+    assert _coverage(work_root)["ids"]["stale"] == [msg_id]
+
+
+def test_audit_context_hash_stays_separate_from_proposal_and_candidate_canon_hash(work_root, approved_context):
+    lock = canon.freeze(work_root, approved_context["canon"])
+    message = make_message("app:analysis", "evidence-based analysis {count}",
+                           targets={"de": "evidenzbasierte Analysen {count}"})
+    _workspace(work_root, [message], lock)
+    batch = _build(work_root)["batches"][0]
+    packet = _packet(batch)[1]
+    assert packet["canon_context"][message["id"]]["groups"]
+    proposed = "evidenzbasierte Auswertung {count}"
+    result = _accept(work_root, batch, {message["id"]: _verdict(packet["items"][0], "fail", proposed)})
+    assert result["audit_proposals"] == [message["id"]]
+    entry = ledger.load(work_root)["locales"]["de"][message["id"]]
+    mechanical_hash = ledger.canon_sha256(message, lock)
+    assert entry["audit_proposal"]["checks"] == "pass"
+    assert entry["audit_proposal"]["canon_sha256"] == mechanical_hash
+    assert entry["audit"]["snapshot"]["canon_context_sha256"] == lz_common.sha256_json(packet["canon_context"][message["id"]])
+    assert packets.do_accept_audit(work_root, "de", [message["id"]], "operator")["accepted"] == [message["id"]]
+    candidate = ledger.load(work_root)["locales"]["de"][message["id"]]["candidate"]
+    assert candidate["value"] == proposed and candidate["canon_sha256"] == mechanical_hash
 
 
 @pytest.mark.parametrize("verdict,proposed", [("pass", None), ("fail", "Hallo!")])
@@ -418,20 +537,117 @@ def test_new_same_scope_verdict_retires_unaccepted_old_proposal(work_root, next_
     fresh = _build(work_root, fresh=True)["batches"][0]
     _accept(work_root, fresh, {"a": _verdict(_packet(fresh)[1]["items"][0], next_verdict)})
     entry = ledger.load(work_root)["locales"]["de"]["a"]
-    if next_verdict == "fail":
+    if legacy_scope:
+        assert entry["audit_proposal"] == proposal
+    elif next_verdict == "fail":
         assert entry["audit_proposal"]["value"] is None
         assert entry["audit_proposal"]["audit_scope"] == "full"
     else:
         assert not entry.get("audit_proposal")
     assert entry["candidate"] is None
-    assert "Hallo!" not in report.build_report(work_root, "de")
+    markdown = report.build_report(work_root, "de")
+    assert ("Hallo!" in markdown) is legacy_scope
+    if legacy_scope:
+        assert "proposal scope: unknown (legacy record)" in markdown
     result = packets.do_accept_audit(work_root, "de", ["a"], "operator")
-    assert result["accepted"] == []
-    expected_reason = "audit finding has no proposed replacement" if next_verdict == "fail" else "no stored audit proposal"
-    assert result["failed"][0]["reason"] == expected_reason
+    if legacy_scope:
+        assert result["accepted"] == ["a"]
+        candidate = ledger.load(work_root)["locales"]["de"]["a"]["candidate"]
+        assert candidate["value"] == "Hallo!" and candidate.get("audit_scope") is None
+    else:
+        assert result["accepted"] == []
+        expected_reason = "audit finding has no proposed replacement" if next_verdict == "fail" else "no stored audit proposal"
+        assert result["failed"][0]["reason"] == expected_reason
     coverage = _coverage(work_root)
     assert coverage["reviewed"] == 1
     assert coverage["unresolved"] == (1 if next_verdict == "fail" else 0)
+
+
+def _legacy_finding(root, run, value, explicit_unknown=False):
+    cfg, messages = _workspace(root)
+    message = messages["messages"][0]
+    proposal = {
+        "value": value,
+        "value_sha256": lz_common.value_sha256(value) if value is not None else None,
+        "checks": "pass" if value is not None else None,
+        "problems": [],
+        "issues": [{"kind": "meaning", "text": "Legacy finding requiring operator follow-up."}],
+        "audited_target_sha256": lz_common.value_sha256(message["targets"]["de"]),
+        "source_sha256": ledger.source_sha256(message),
+        "context_sha256": ledger.context_sha256(message, "de"),
+        "style_sha256": ledger.style_sha256(cfg, "de"),
+        "canon_sha256": ledger.canon_sha256(message, {"entries": []}),
+        "run": run,
+    }
+    if explicit_unknown:
+        proposal["audit_scope"] = None
+    data = ledger.load(root)
+    data["locales"]["de"]["a"]["audit_proposal"] = copy.deepcopy(proposal)
+    ledger.save(root, data, locales=["de"])
+    return proposal
+
+
+@pytest.mark.parametrize("run,explicit_unknown", [
+    ("legacy-full-batch", False), ("canon-audit-t-hello", False), ("legacy-null-scope", True),
+])
+@pytest.mark.parametrize("old_value", [None, "Guten Tag!"])
+@pytest.mark.parametrize("verdict,proposed", [("pass", None), ("fail", None), ("fail", "Hallo!")])
+def test_full_audit_preserves_real_legacy_findings_without_scope_or_verdict_record(
+    work_root, run, explicit_unknown, old_value, verdict, proposed,
+):
+    original = _legacy_finding(work_root, run, old_value, explicit_unknown)
+    initial = ledger.load(work_root)["locales"]["de"]["a"]
+    assert not initial.get("audit") and not initial.get("canon_audits")
+    batch = _build(work_root)["batches"][0]
+    result = _accept(work_root, batch, {"a": _verdict(_packet(batch)[1]["items"][0], verdict, proposed)})
+    saved = ledger.load(work_root)
+    entry = saved["locales"]["de"]["a"]
+    assert entry["audit_proposal"] == original
+    assert entry["audit"]["verdict"] == verdict
+    assert result["audit_proposals"] == []
+    assert result["audit_proposal_conflicts"] == (
+        [{"id": "a", "scope": "full", "pending_scope": None}] if proposed is not None else []
+    )
+    markdown = report.build_report(work_root, "de")
+    assert f"proposal scope: unknown (legacy record); run: {run}" in markdown
+    assert "Legacy finding requiring operator follow-up." in markdown
+    accepted = packets.do_accept_audit(work_root, "de", ["a"], "operator")
+    if old_value is None:
+        assert accepted["accepted"] == []
+        assert accepted["failed"][0]["reason"] == "audit finding has no proposed replacement"
+        assert ledger.load(work_root) == saved
+    else:
+        assert accepted["accepted"] == ["a"]
+        candidate = ledger.load(work_root)["locales"]["de"]["a"]["candidate"]
+        assert candidate["value"] == old_value and candidate.get("audit_scope") is None
+
+
+def test_restricted_pass_preserves_unknown_legacy_null_finding(work_root):
+    original = _legacy_finding(work_root, "legacy-full-batch", None)
+    _restricted_request(work_root)
+    _accept(work_root, _build(work_root, entry_ids=["t-hello"])["batches"][0])
+    saved = ledger.load(work_root)["locales"]["de"]["a"]
+    assert saved["audit_proposal"] == original
+    assert saved["canon_audits"]["t-hello"]["verdict"] == "pass"
+    assert "Legacy finding requiring operator follow-up." in report.build_report(work_root, "de")
+
+
+def test_legacy_unknown_scope_survives_candidate_and_review_counterproposal(work_root):
+    _legacy_finding(work_root, "canon-audit-t-hello", "Guten Tag!")
+    assert packets.do_accept_audit(work_root, "de", ["a"], "operator")["accepted"] == ["a"]
+    candidate = ledger.load(work_root)["locales"]["de"]["a"]["candidate"]
+    assert candidate.get("audit_scope") is None
+    build = packets.do_build(work_root, "review", "de", TEMPLATES_DIR)
+    run_dir, packet = _packet(build["batches"][0])
+    output_path = run_dir / "review-answer.json"
+    lz_common.atomic_write_json(output_path, {"verdicts": {"a": {
+        "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
+        "issues": [{"kind": "style", "text": "Review counterproposal with an unknown original scope."}],
+        "proposed": "Hallo!", "new_canon_candidates": [],
+    }}})
+    assert packets.do_accept(work_root, run_dir, output_path)["audit_proposals"] == ["a"]
+    proposal = ledger.load(work_root)["locales"]["de"]["a"]["audit_proposal"]
+    assert proposal["value"] == "Hallo!" and proposal.get("audit_scope") is None
 
 
 def test_restricted_pass_does_not_retire_full_audit_proposal(work_root):

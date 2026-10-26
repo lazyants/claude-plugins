@@ -2,6 +2,25 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.6.0] — 2026-10-26
+
+### Added
+
+- Accepted audit verdicts, including passes, persist with snapshot and run provenance (#1013).
+  Restricted canon audits retain their own scope and do not count as full-message reviews.
+- Status and reports show current reviewed/total coverage, pass/fail and unresolved counts,
+  and stale/unreviewed IDs. Snapshot changes invalidate coverage without discarding the saved
+  verdict; a completed audit is distinguishable from one that never ran.
+- Full audit builds resume remaining messages; `--fresh` explicitly reruns all eligible
+  messages. A newly accepted verdict retires an older unaccepted proposal from the same known
+  scope. Missing or invalid answers remain unreviewed, and verdict acceptance grants no export
+  permission. The existing native handoff receipt binds answers to their complete frozen input.
+- Pending replacements from other audit scopes are preserved. Competing replacements remain
+  in saved verdicts and reports, with an explicit conflict instead of replacing active work.
+  Legacy proposals without scope metadata remain unknown and are retained for operator review.
+- Audit snapshots include approved informational canon context and follow the existing
+  locale-specific canon dependency rules for corrected notes.
+
 ## [software-localizer 0.5.3] — 2026-10-26
 
 ### Fixed
@@ -54,27 +73,6 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   retain their original snapshots, actual request/result and rejected receipt independently
   of later repaired attempts. The guard establishes transport, not linguistic or source
   correctness; older runs need a fresh verified turn before acceptance.
-
-## [software-localizer 0.5.0] — 2026-10-26
-
-### Added
-
-- Accepted audit verdicts, including passes and findings without replacements, persist with
-  source/target/context/style/canon hashes and run provenance (#1013). Restricted canon audits
-  retain their own scope and do not count as full-message reviews.
-- Status and reports show current reviewed/total coverage, pass/fail and unresolved counts,
-  and stale/unreviewed IDs. Snapshot changes invalidate coverage without discarding the saved
-  verdict; a completed audit is distinguishable from one that never ran.
-- Full audit builds resume the remaining messages; `--fresh` explicitly reruns all eligible
-  messages. A newly accepted verdict retires an older unaccepted proposal from the same scope.
-  Missing or invalid answers remain unreviewed, and accepting a verdict never grants export
-  permission.
-- Audit replies echo a snapshot token as well as the target hash, so a late answer cannot earn
-  coverage for a rebuilt packet with changed inputs. Pending audit packets from earlier versions
-  must be rebuilt and their audit turns rerun.
-- Pending replacements from other audit scopes are preserved. A competing replacement remains
-  in the saved verdict and report, with an explicit conflict instead of silently replacing the
-  active proposal.
 
 ## [software-localizer 0.5.0] — 2026-10-26
 

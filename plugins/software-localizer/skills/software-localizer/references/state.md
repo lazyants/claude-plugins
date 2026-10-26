@@ -30,6 +30,11 @@ the source/target/context/style/relevant-canon hashes. Restricted canon-entry au
 kept separately and never count as a full-message audit. Verdict acceptance does not adopt a
 translation or approve a replacement for export.
 
+The snapshot also hashes the message's approved informational `canon_context`, including
+linked entries and group/scope notes. It uses the same selector as audit packet construction;
+acceptance binds the frozen packet's context and coverage compares the current one. This
+additional audit hash does not alter a candidate's mechanical canon hash or export rules.
+
 Status and report compare these records with the current `messages.json`, configuration and
 canon lock, even before another sync. Changed inputs make a record stale; the record remains
 available as earlier evidence. Recollect after project edits: changes not yet collected cannot
@@ -63,6 +68,13 @@ its proposed value still persist; a competing replacement is reported in
 `audit_proposal_conflicts` and shown as saved evidence, not an active proposal. Resolve the
 outstanding proposal, then rerun the other scope (`--fresh` for full audits) to check and queue
 its replacement through the existing approval route.
+
+Legacy proposals without `audit_scope` have unknown provenance: earlier versions used the
+same record shape for full and restricted audits. They remain visible for operator review,
+including unresolved findings with no replacement, and do not earn full-audit coverage.
+Neither a full nor a restricted verdict can automatically retire or overwrite this unknown
+work. Checked legacy replacements still use the existing `accept-audit` route; their unknown
+scope is preserved through candidate review rather than guessed from a batch name.
 
 ## Canon research evidence
 

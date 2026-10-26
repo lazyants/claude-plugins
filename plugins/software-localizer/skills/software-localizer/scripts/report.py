@@ -141,6 +141,8 @@ def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, 
         for field, digest in sorted(record.get("snapshot", {}).items()):
             out.append(f"  - audited {field}: {digest}")
     if proposal:
+        if proposal.get("audit_scope") is None:
+            out.append(f"  - proposal scope: unknown (legacy record); run: {proposal.get('run', '?')}")
         if proposal.get("value") is None:
             out.append("  - unresolved: no proposed replacement; needs follow-up")
         else:
@@ -178,7 +180,7 @@ def _audit_rows(msg_id, entry, message, cfg, canon_lock, locale):
         return []
     snapshot = ledger_mod.audit_snapshot(message, locale, cfg, canon_lock) if message else None
     proposal = entry.get("audit_proposal")
-    proposal_scope = proposal.get("audit_scope", "full") if proposal else None
+    proposal_scope = proposal.get("audit_scope") if proposal else None
     records = [("full", entry.get("audit")), *sorted((entry.get("canon_audits") or {}).items())]
     rows = []
     used_proposal = False
