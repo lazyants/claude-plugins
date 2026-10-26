@@ -180,7 +180,11 @@ def test_run_passes_on_the_unmodified_fixture(work_root):
     }
     inventory_path = root / "runs" / "_coverage" / "inventory.txt"
     inventory = inventory_path.read_text(encoding="utf-8").splitlines()
-    assert packet["inventory"] == {"path": str(inventory_path), "line_count": len(inventory)}
+    assert packet["inventory"] == {
+        "path": str(inventory_path),
+        "line_count": len(inventory),
+        "sha256": lz_common.sha256_file(inventory_path),
+    }
     assert "locales/en.json" in inventory
     assert "locales/de.json" in inventory
 
@@ -622,6 +626,7 @@ def test_coverage_prompt_stays_small_and_preserves_the_complete_inventory(
     inventory_path = Path(packet["inventory"]["path"])
     assert inventory_path == coverage_dir / "inventory.txt"
     assert packet["inventory"]["line_count"] == path_count
+    assert packet["inventory"]["sha256"] == lz_common.sha256_file(inventory_path)
     assert inventory_path.read_text(encoding="utf-8") == "".join(path + "\n" for path in inventory)
     prompt = (coverage_dir / "prompt.md").read_text(encoding="utf-8")
     assert str(inventory_path) in prompt
@@ -630,6 +635,121 @@ def test_coverage_prompt_stays_small_and_preserves_the_complete_inventory(
     if inventory:
         assert inventory[0] not in prompt
         assert inventory[-1] not in prompt
+
+
+def _coverage_recipe():
+    procedure = SCRIPTS_DIR.parent / "references" / "coverage-inventory.md"
+    code = procedure.read_text(encoding="utf-8").split("```python\n", 1)[1].split("\n```", 1)[0]
+    namespace = {"__name__": "coverage_recipe"}
+    exec(compile(code, str(procedure), "exec"), namespace)
+    return namespace
+
+
+def test_documented_classification_preserves_prose_and_unexpected_hidden_catalogs(work_root, capsys):
+    root, project_dir, cfg = _make_workspace(work_root, project_git=True)
+    prose = {f"docs/corpus/document-{i:05d}.md" for i in range(2000)}
+    hidden = {".extra-ui/locales/en.json", ".extra-ui/locales/fr.json"}
+    for relative in sorted(prose | hidden):
+        path = project_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"secondary": "Unexpected catalog"}\n' if relative in hidden else "Fixture prose\n",
+            encoding="utf-8",
+        )
+    assert adapter_check.cmd_run(argparse.Namespace(root=str(root))) == 0
+    capsys.readouterr()
+    coverage_dir = root / "runs" / "_coverage"
+    packet_path = coverage_dir / "packet.json"
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    inventory_path = Path(packet["inventory"]["path"])
+    inventory_before = inventory_path.read_bytes()
+    inventory = inventory_before.decode("utf-8").split("\n")[:-1]
+    assert prose | hidden <= set(inventory)
+
+    recipe = _coverage_recipe()
+    evidence_dir = coverage_dir / "classification-evidence"
+    recipe["main"]([str(packet_path), str(evidence_dir)])
+    index = json.loads((evidence_dir / "groups.json").read_text(encoding="utf-8"))
+    assert index["unresolved_count"] == len(inventory)  # no automatic exclusions
+    assert index["run_id"] == packet["run_id"]
+    assert index["inventory"] == packet["inventory"]
+
+    def reviewed_fixture_scope(path):
+        # This decision applies only to the exact homogeneous fixture files.
+        if path in prose:
+            return "fixture prose", "out_of_scope", "Fixture scope: these exact prose files are excluded"
+        return recipe_default(path)
+
+    recipe_default = recipe["classify"]
+    recipe["classify"] = reviewed_fixture_scope
+    recipe["main"]([str(packet_path), str(evidence_dir)])
+    mapping = [json.loads(line) for line in (evidence_dir / "classification.jsonl").read_text(
+        encoding="utf-8").splitlines()]
+    candidates = [json.loads(line) for line in (evidence_dir / "candidates.jsonl").read_text(
+        encoding="utf-8").splitlines()]
+    index = json.loads((evidence_dir / "groups.json").read_text(encoding="utf-8"))
+    assert [row["path"] for row in mapping] == inventory
+    assert len({row["path"] for row in mapping}) == len(inventory)
+    assert all(row["group"] and row["evidence"] for row in mapping)
+    assert index["classified_count"] == sum(group["count"] for group in index["groups"]) == len(inventory)
+    assert {row["path"] for row in candidates} == set(inventory) - prose
+    assert hidden <= {row["path"] for row in candidates}
+    assert index["unresolved_count"] == len(candidates)
+    assert inventory_path.read_bytes() == inventory_before
+
+    prompt = (coverage_dir / "prompt.md").read_text(encoding="utf-8")
+    assert str(SCRIPTS_DIR.parent / "references" / "coverage-inventory.md") in prompt
+    assert "{{INVENTORY_PROCEDURE_PATH}}" not in prompt
+    assert "read it in portions until you have examined the full list" not in prompt
+    assert "include it in `missing`" in prompt
+    # A reported uncertain candidate still blocks the existing acceptance path.
+    output_path = coverage_dir / "output.json"
+    _write_coverage(root, output_path, [
+        {"file": path, "key": None, "why_user_visible": "Unexpected catalog; scope is unresolved"}
+        for path in sorted(hidden)
+    ])
+    code, result = _run(ADAPTER_CHECK, [
+        "accept", "--root", str(root), "--coverage", str(output_path), "--by", "tester"
+    ])
+    assert code == 1
+    assert {entry["file"] for entry in result["unaccepted"]} == hidden
+    assert not (root / "adapter.lock.json").exists()
+
+
+@pytest.mark.parametrize("problem", ["hash", "count", "duplicate", "blank"])
+def test_documented_classification_refuses_incomplete_or_changed_inventory(work_root, problem):
+    inventory_path = work_root / "inventory.txt"
+    raw = {"duplicate": "a.json\na.json\n", "blank": "a.json\n\n"}.get(problem, "a.json\n")
+    inventory_path.write_text(raw, encoding="utf-8")
+    packet_path = work_root / "packet.json"
+    lz_common.atomic_write_json(packet_path, {
+        "run_id": "current-run",
+        "inventory": {
+            "path": str(inventory_path),
+            "line_count": len(raw.splitlines()) + (1 if problem == "count" else 0),
+            "sha256": "stale" if problem == "hash" else lz_common.sha256_file(inventory_path),
+        },
+    })
+    evidence_dir = work_root / "evidence"
+    with pytest.raises(ValueError):
+        _coverage_recipe()["main"]([str(packet_path), str(evidence_dir)])
+    assert not evidence_dir.exists()
+
+
+def test_documented_classification_preserves_non_lf_path_characters(work_root, monkeypatch):
+    root, project_dir, cfg = _make_workspace(work_root)
+    paths = ["assets/Icon\r", "locales/catalog\u2028name.json"]
+    monkeypatch.setattr(adapter_check, "_project_inventory", lambda project, exclude=None: paths)
+    coverage_dir = root / "runs" / "_coverage"
+    packet = adapter_check._build_coverage_packet(root, project_dir, {"messages": []}, "current", coverage_dir)
+    packet_path = coverage_dir / "packet.json"
+    lz_common.atomic_write_json(packet_path, packet)
+    evidence_dir = coverage_dir / "evidence"
+    _coverage_recipe()["main"]([str(packet_path), str(evidence_dir)])
+    for name in ("classification.jsonl", "candidates.jsonl"):
+        rows = [json.loads(line) for line in (evidence_dir / name).read_text(
+            encoding="utf-8").split("\n") if line]
+        assert [row["path"] for row in rows] == paths
 
 
 def test_inventory_includes_untracked_and_excludes_gitignored(work_root):

@@ -2,6 +2,18 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.4.1] — 2026-10-26
+
+### Added
+
+- An exhaustive classification procedure for the coverage turn (#1015). Standard-library Python
+  reads every inventory path, retains its classification and evidence, and produces a group
+  index plus every unresolved candidate without loading the raw inventory into model context.
+  The packet now records the inventory's SHA-256 alongside its path and count. No directory or
+  extension is automatically excluded; unexpected catalogs remain candidates. Uninspected or
+  uncertain candidates must be reported as coverage gaps under the existing run-ID and
+  missing-file acceptance contract.
+
 ## [software-localizer 0.4.0] — 2026-10-26
 
 ### Added
