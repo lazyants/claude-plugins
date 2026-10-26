@@ -114,10 +114,15 @@ python3 S/adapter_check.py run --root R
 #    R/runs/_coverage/prompt.md for the coverage turn
 ```
 
-Run the **coverage turn**: a Claude subagent with file-read tools, given
-`R/runs/_coverage/prompt.md`, asked for the JSON only. It reads the complete inventory from
-`R/runs/_coverage/inventory.txt` (the packet gives its path and line count) and may inspect any
-file under the project root. Save its answer as `R/runs/_coverage/output.json`. Every missing
+Run the **coverage turn**: a Claude subagent with file-read and shell tools, given
+`R/runs/_coverage/prompt.md`, asked for the JSON only. It examines the complete independent
+inventory in `R/runs/_coverage/inventory.txt` (path, count and SHA-256 in the packet). For large
+repositories, use the [exhaustive classification procedure](references/coverage-inventory.md):
+retain every path in a mapping, review the group index, and inspect all unresolved candidates
+without loading the raw list into model context. It needs no optional MCP. Scope decisions
+need evidence; unresolved candidates remain coverage gaps. The turn may read any project file
+and write only its classification evidence beside the inventory.
+Save its answer as `R/runs/_coverage/output.json`. Every missing
 string it names must be collected (fix the adapter, rerun) or declared out of scope with the operator:
 
 ```bash

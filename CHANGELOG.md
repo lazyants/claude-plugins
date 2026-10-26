@@ -16,6 +16,20 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   the noun/adjective group and the initial-capital occurrence example; they prove context transfer,
   not a model's linguistic verdict or a translation-quality improvement.
 
+## [software-localizer 0.4.1] — 2026-10-26
+
+### Added
+
+- An exhaustive classification procedure for the coverage turn (#1015). Standard-library Python
+  reads every inventory path, retains its classification and evidence, and produces a group
+  index plus every unresolved candidate without loading the raw inventory into model context.
+  The packet now records the inventory's SHA-256 alongside its path and count. No directory or
+  extension is automatically excluded; unexpected catalogs remain candidates. Uninspected or
+  uncertain candidates must be reported as coverage gaps under the existing run-ID and
+  missing-file acceptance contract.
+- Git inventory output is decoded without newline normalization, preserving carriage returns
+  in filenames through the inventory producer and the classification procedure.
+
 ## [software-localizer 0.4.0] — 2026-10-26
 
 ### Added

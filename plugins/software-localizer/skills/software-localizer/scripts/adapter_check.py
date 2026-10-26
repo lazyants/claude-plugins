@@ -264,15 +264,16 @@ def _project_inventory(project_dir: Path, exclude: str | None) -> list[str]:
     if in_work_tree:
         try:
             # NUL-separated: in newline mode git C-quotes a non-ASCII path, which is
-            # neither the real file name nor comparable to `exclude`.
+            # neither the real file name nor comparable to `exclude`. Keep bytes until
+            # decoding: text mode's universal-newline conversion also changes CR in names.
             proc = subprocess.run(
                 ["git", "-C", str(project_dir), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                 capture_output=True,
-                text=True,
                 timeout=60,
             )
             if proc.returncode == 0:
-                return sorted({p for p in proc.stdout.split("\0") if p and not lz_common.path_within(p, exclude)})
+                paths = proc.stdout.decode("utf-8").split("\0")
+                return sorted({p for p in paths if p and not lz_common.path_within(p, exclude)})
         except (OSError, subprocess.SubprocessError):
             pass  # fall through to the directory walk
 
@@ -302,7 +303,11 @@ def _build_coverage_packet(root: Path, project_dir: Path, messages: dict, run_id
         "project_root": str(project_dir),
         "workspace_root": str(root),
         "files": files,
-        "inventory": {"path": str(inventory_path), "line_count": len(inventory)},
+        "inventory": {
+            "path": str(inventory_path),
+            "line_count": len(inventory),
+            "sha256": lz_common.sha256_file(inventory_path),
+        },
     }
 
 
@@ -312,7 +317,10 @@ def _write_coverage_prompt(plugin_root: Path, out_dir: Path, packet: dict) -> No
         lz_common.fail(f"packaged coverage prompt template is missing: {template_path}", lz_common.EXIT_CANNOT)
     template_text = template_path.read_text(encoding="utf-8")
     packet_json = json.dumps(packet, indent=2, ensure_ascii=False, sort_keys=True)
-    rendered = template_text.replace(PLACEHOLDER, packet_json)
+    procedure_path = plugin_root / "references" / "coverage-inventory.md"
+    rendered = template_text.replace(PLACEHOLDER, packet_json).replace(
+        "{{INVENTORY_PROCEDURE_PATH}}", str(procedure_path)
+    )
     lz_common.atomic_write_text(out_dir / "prompt.md", rendered)
 
 

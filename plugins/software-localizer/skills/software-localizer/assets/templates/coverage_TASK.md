@@ -3,10 +3,21 @@
 A per-project adapter collects the project's translatable strings. The packet lists the files
 the adapter reads with the ids it collected from each. Its `inventory.path` points to an
 independent inventory of every file in the project: one project-relative path per line,
-`inventory.line_count` lines in total. Read that file with file-read tools; for a large inventory,
-read it in portions until you have examined the full list. Find user-visible, translatable text
-the adapter **missed**. You may read the inventory file and any file under `project_root`; you
-return data only: do not create, edit or delete any file.
+`inventory.line_count` lines in total, bound by `inventory.sha256`. Find user-visible,
+translatable text the adapter **missed**.
+
+Read `{{INVENTORY_PROCEDURE_PATH}}`. You may read a small inventory directly. For a large one,
+use its exhaustive programmatic classification procedure: code reads **every** path, retains
+one classification per path, and gives you a structured group index and all unresolved candidate
+paths. The raw inventory need not enter model context in chunks. Review each group's evidence
+and inspect every unresolved candidate; neither a directory/extension rule nor membership in
+the adapter's file list proves that a path has no missed strings. Keep unexpected and hidden
+catalogs visible. The procedure uses ordinary Python and shell/file tools; no MCP is required.
+
+You may read the inventory and any file under `project_root`. You may create classification
+evidence only in a new directory beside `inventory.txt`, retaining its run ID, inventory hash,
+path count, full mapping, group index and candidate list. Do not change project files, the
+inventory, packet, adapter, canon or acceptance state. Return the JSON answer only.
 
 The packet's `workspace_root` is the localization tool's own directory: its term canon, adapter and
 run files. It may sit under `project_root`. It is not the project's UI text and it is not in the
@@ -30,8 +41,13 @@ Reply with ONE JSON object and nothing else:
  "missing": [{"file": "relative/path", "key": "the key or null for a whole missed file", "why_user_visible": "…"}]}
 ```
 
-An empty list means nothing was missed. Copy `run_id` from the packet exactly: an answer for a
-different run of the adapter check is refused.
+An empty list means nothing was missed, and is allowed only after every path is accounted for
+and every candidate is resolved by inspection or an explicit, evidence-backed scope decision.
+If a candidate cannot be inspected or its scope remains uncertain, include it in `missing`
+with `key: null` and explain the gap in `why_user_visible`; do not certify coverage. A mapping
+or inventory-integrity failure stops the turn: report the failure to the caller instead of
+returning an empty list. Copy `run_id` from the packet exactly: an answer for a different run
+of the adapter check is refused. The existing missing-file/operator scope contract still applies.
 
 ## Packet
 
