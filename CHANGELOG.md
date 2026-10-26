@@ -2,6 +2,26 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.5.1] — 2026-10-26
+
+### Added
+
+- Lossless ASCII JSON handoff for native Claude canon, research, research-verification,
+  audit and review packets (#1019). Generated `request.json` carries the complete Agent
+  arguments; decoded values preserve Unicode typography and fragment boundary spaces.
+- `packet_handoff.py` captures the actual linked native Agent request/result from the
+  parent's session JSONL. Acceptance requires a receipt and rechecks decoded packet values,
+  complete original instructions, request/result identity and the returned JSON before
+  changing state. Schema/value hashes alone no longer admit an altered-input verdict.
+- A direct CLI stdin handoff supports normal profiles whose hooks rewrite Agent prompts.
+  Its separate receipt checks the actual user message, native answer, completed stream
+  result and an exact web-only tool roster. Native Agent instruction additions remain
+  rejected; a later correct CLI attempt does not relabel the failed Agent attempt.
+- The packaged `usage-research` agent allows only WebSearch and WebFetch. Failed handoffs
+  retain their original snapshots, actual request/result and rejected receipt independently
+  of later repaired attempts. The guard establishes transport, not linguistic or source
+  correctness; older runs need a fresh verified turn before acceptance.
+
 ## [software-localizer 0.5.0] — 2026-10-26
 
 ### Added

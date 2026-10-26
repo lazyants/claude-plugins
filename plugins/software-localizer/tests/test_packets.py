@@ -38,6 +38,7 @@ import lz_common  # noqa: E402
 import packets  # noqa: E402
 import report as report_mod  # noqa: E402
 import toy_adapter  # noqa: E402
+from handoff_fixture import record_agent_turn  # noqa: E402
 
 EMPTY_CANON_LOCK = {"schema": 1, "entries": []}
 
@@ -619,6 +620,7 @@ def build_one_batch(work_root, cfg, msgs, ledger_locales, kind, locale, canon_lo
 def write_output(run_dir, output):
     path = run_dir / "output.json"
     lz_common.atomic_write_json(path, output)
+    record_agent_turn(run_dir, path)
     return path
 
 

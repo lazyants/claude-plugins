@@ -30,6 +30,7 @@ FIXTURES_DIR = TESTS_DIR / "fixtures"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import lz_common  # noqa: E402  (read-only: value hashing/atomic writes for the recovery fixture)
+from handoff_fixture import record_agent_turn  # noqa: E402
 
 # Derived empirically from tests/fixtures/toy_project's actual form counts
 # (cart.itemCount: en/de have 2 forms, ru has 3; mail.unreadCount: en/ru have
@@ -49,6 +50,9 @@ TOY_OPTIONS = {
 
 
 def run_cli(script: str, args: list):
+    if script == "packets.py" and args[0] == "accept":
+        # Canned model turns also exercise the production receipt path.
+        record_agent_turn(Path(args[args.index("--run") + 1]), Path(args[args.index("--output") + 1]))
     proc = subprocess.run(
         [sys.executable, str(SCRIPTS_DIR / script), *args],
         capture_output=True, text=True,
@@ -336,6 +340,16 @@ def test_seam_batch_canon_order_preserves_reviewed_candidates(work_root, kind):
     assert [entry["source"] for entry in packet["canon"]["entries"]] == ["Alpha", "Beta"]
     packet["canon"]["entries"].reverse()
     write_json(batch_dir / "packet.json", packet)
+    if kind == "audit":
+        # This fixture simulates the older builder's complete original input,
+        # before dispatch. Its prompt/request must contain that same snapshot;
+        # altering only packet.json is now correctly a transport refusal.
+        parts = read_json(batch_dir / "instructions.json")
+        prompt = parts["prefix"] + json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=True) + parts["suffix"]
+        (batch_dir / "prompt.md").write_text(prompt, encoding="utf-8")
+        request = read_json(batch_dir / "request.json")
+        request["prompt"] = prompt
+        write_json(batch_dir / "request.json", request)
     assert [entry["source"] for entry in packet["canon"]["entries"]] == ["Beta", "Alpha"]
     assert [entry["source"] for entry in read_json(root / "canon.lock.json")["entries"]] == ["Alpha", "Beta"]
     output_path = batch_dir / "output.json"
