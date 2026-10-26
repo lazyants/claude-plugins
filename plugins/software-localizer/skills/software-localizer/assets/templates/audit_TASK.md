@@ -9,6 +9,10 @@ translation (in any correct inflection); a do-not-translate entry changed; wrong
 style (see `style`); text left in the source language; wrong plural forms; inconsistency with
 sibling items; grammar and spelling. If the packet is a **restricted canon audit**
 (`canon_entry` is set), judge only how that one entry is rendered in each item.
+When `canon_entry.scope_change` is set, it records the person's before/after DNT scope.
+Only ids in `after` require that brand under this entry. Removed ids and source-text matches
+outside `after` are context for rechecking the decision's impact: do not insert a brand merely
+to satisfy the former scope. Other active canon constraints still apply.
 
 `canon_context` is informational, keyed by message id. It carries already-approved entries
 linked by an explicit occurrence or an owner-reviewed group. Preserve their IDs and read each

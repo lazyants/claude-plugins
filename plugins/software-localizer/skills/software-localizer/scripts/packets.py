@@ -663,6 +663,8 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
         "before": request.get("before"), "after": request.get("after"),
         "reason": request.get("reason"),
     }
+    if "scope_change" in request:
+        canon_entry_meta["scope_change"] = request["scope_change"]
     skipped, batches_out = [], []
     for n, ids in enumerate(chunks):
         name = f"canon-audit-{entry_id}" if n == 0 else f"canon-audit-{entry_id}-{n + 1}"

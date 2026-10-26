@@ -22,6 +22,9 @@ native speaker.
 - **Approved audit context.** Explicit reviewed concept groups, scope notes and approved term
   occurrences accompany audit messages without expanding mechanical enforcement
   ([format and bounds](skills/software-localizer/references/state.md#approved-audit-context)).
+- **DNT scope decisions.** A person can explicitly add/remove do-not-translate occurrences
+  using an expected entry hash, with durable history and audits across target locales. Imported
+  expansions stay pending until that decision; subset imports never delete scope.
 - **Safety.** A person's translation is never overwritten; nothing is exported without script
   checks and a review verdict bound to the exact value; export re-collects, compares, and writes
   under a journal that rolls back on failure.
