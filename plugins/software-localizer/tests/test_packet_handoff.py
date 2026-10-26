@@ -43,6 +43,7 @@ def test_equivalent_json_escaping_preserves_values_and_instructions(work_root, k
     directory, output, packet = batch(work_root, kind)
     assert (directory / "request.json").read_bytes().isascii()
     request = request_for(directory, packet, ascii)
+    assert request["run_in_background"] is False
     receipt = record_agent_turn(directory, output, request)
     actual_packet, actual_output = packet_handoff.verify(directory, output)
     assert actual_packet == packet

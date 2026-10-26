@@ -61,6 +61,7 @@ def _digest(obj):
 
 def agent_request(kind, batch, prompt):
     return {"description": f"Localizer {kind}: {batch}", "prompt": prompt,
+            "run_in_background": False,
             "subagent_type": RESEARCH_AGENT if kind in ("research", "research_verify") else "general-purpose"}
 
 
