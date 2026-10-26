@@ -16,6 +16,16 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   the noun/adjective group and the initial-capital occurrence example; they prove context transfer,
   not a model's linguistic verdict or a translation-quality improvement.
 
+## [software-localizer 0.3.6] — 2026-10-26
+
+### Added
+
+- Research and research verification builds report unresolved stored canon occurrence IDs
+  in structured `diagnostics`, with the entry ID and declared/resolvable reference counts
+  (#1023). The check covers every declared reference, including IDs after the five-example
+  sample. Real examples, packets, canon approvals and history remain unchanged; these warnings
+  are separate from current-message audit coverage and do not invalidate accepted results.
+
 ## [software-localizer 0.3.5] — 2026-10-26
 
 ### Added

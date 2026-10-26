@@ -166,6 +166,10 @@ python3 S/packets.py build --root R --kind research_verify --locale L
 python3 S/packets.py accept --root R --run <batch dir> --output <answer.json>
 ```
 
+Read each build response's `diagnostics` for unresolved stored occurrence IDs
+([fields and meaning](references/state.md#canon-research-evidence)); show these source-context
+warnings to the operator without changing canon scope, approvals or audit coverage.
+
 By default `research` takes every term and UI label not yet approved in `L` that has no
 research, plus resource-limited entries. Agree the scope with the operator first and narrow it
 to the core list with `--entry` (repeatable; naming a completed entry explicitly re-researches
