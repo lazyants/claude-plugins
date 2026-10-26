@@ -197,9 +197,14 @@ def select_review(ledger_data: dict, locale: str) -> list:
     return [i for i, e in entries.items() if ledger_mod.candidate_needs_review(e)]
 
 
-def select_audit(ledger_data: dict, locale: str) -> list:
+def select_audit(ledger_data: dict, locale: str, messages=None, cfg=None, canon_lock=None, fresh=False) -> list:
     entries = ledger_mod.locale_entries(ledger_data, locale)
-    return [i for i, e in entries.items() if e.get("state") in AUDIT_STATES]
+    reviewed = set()
+    if not fresh and messages is not None:
+        coverage = ledger_mod.audit_coverage(ledger_data, messages, cfg, canon_lock, locale)
+        reviewed.update(coverage["ids"]["pass"])
+        reviewed.update(coverage["ids"]["fail"])
+    return [i for i, e in entries.items() if e.get("state") in AUDIT_STATES and i not in reviewed]
 
 
 # ---------------------------------------------------------------------------
@@ -394,9 +399,11 @@ def build_canon_item(message: dict, target_locales: list) -> dict:
     return item
 
 
-def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None) -> dict:
+def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None, fresh=False) -> dict:
     if kind not in KINDS + RESEARCH_KINDS:
         lz_common.fail(f"unknown packet kind: {kind}", lz_common.EXIT_CANNOT)
+    if fresh and (kind != "audit" or entry_ids):
+        lz_common.fail("--fresh is only valid with an unrestricted --kind audit", lz_common.EXIT_CANNOT)
     if kind == "audit" and entry_ids and len(entry_ids) > 1:
         lz_common.fail("--kind audit takes exactly one --entry", lz_common.EXIT_CANNOT)
     cfg = lz_common.load_config(root)
@@ -446,7 +453,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None)
     elif kind == "review":
         selected_ids = select_review(ledger_data, locale)
     else:
-        selected_ids = select_audit(ledger_data, locale)
+        selected_ids = select_audit(ledger_data, locale, messages, cfg, canon_lock, fresh=fresh)
 
     entries = ledger_mod.locale_entries(ledger_data, locale)
     style = cfg["style"][locale]
@@ -996,6 +1003,12 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         lz_common.fail(f"{kind} output is missing 'verdicts'", lz_common.EXIT_FAIL)
 
     canon_lock = packet.get("canon", {"entries": []})
+    audit_scope = (packet.get("canon_entry") or {}).get("entry", "full")
+    # The verdict was cast on the packet's style, even if localize.json
+    # changed while the turn ran. Do not credit that verdict to the new style.
+    audit_cfg = {**cfg, "style": {locale: packet.get("style")}}
+    audit_at = lz_common.now_iso()
+    packet_sha = lz_common.sha256_json(packet)
     missing, extra_ids = [], sorted(set(verdicts) - set(items))
 
     # Gather every proposed value's forms up front for one batched parse call.
@@ -1043,6 +1056,29 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             "issues": verdict.get("issues", []),
             "run": batch_name,
         }
+
+        if kind == "audit":
+            audited_message = {**message, "targets": {locale: item["value"]}}
+            snapshot = ledger_mod.audit_snapshot(audited_message, locale, audit_cfg, canon_lock)
+            record = {
+                "snapshot": snapshot,
+                "verdict": verdict["verdict"],
+                "issues": verdict.get("issues", []),
+                "proposed": verdict.get("proposed"),
+                "accepted_at": audit_at,
+                "packet_sha256": packet_sha,
+                "run": batch_name,
+                "run_dir": str(run_dir.resolve()),
+                "scope": audit_scope,
+            }
+            entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
+            if packet.get("canon_entry") is None:
+                entry["audit"] = record
+            else:
+                entry.setdefault("canon_audits", {})[audit_scope] = record
+            previous = entry.get("audit_proposal")
+            if previous and previous.get("audit_scope", "full") == audit_scope:
+                entry["audit_proposal"] = None
 
         raw_candidates = verdict.get("new_canon_candidates")
         if raw_candidates is None:
@@ -1108,6 +1144,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                     # cleared when this candidate was accepted) -- it could
                     # never be exported.
                     entry["audit_proposal"] = {
+                        "audit_scope": old_candidate.get("audit_scope", "full"),
                         "value": proposed,
                         "value_sha256": lz_common.value_sha256(proposed),
                         "audited_target_sha256": old_candidate.get("audited_target_sha256"),
@@ -1140,7 +1177,6 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         else:  # audit
             failed_ids.append(msg_id)
             proposed = verdict.get("proposed")
-            audit_cfg = {**cfg, "style": {locale: packet.get("style", cfg.get("style", {}).get(locale))}}
             problems = []
             if proposed is not None:
                 is_plural = item.get("target_labels") is not None
@@ -1154,13 +1190,14 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                 proposals_stored.append(msg_id)
             entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
             entry["audit_proposal"] = {
+                "audit_scope": audit_scope,
                 "value": proposed,
                 "value_sha256": lz_common.value_sha256(proposed) if proposed is not None else None,
                 "audited_target_sha256": item["value_sha256"],
-                "source_sha256": ledger_mod.source_sha256(message),
-                "context_sha256": ledger_mod.context_sha256(message, locale),
-                "style_sha256": ledger_mod.style_sha256(audit_cfg, locale),
-                "canon_sha256": ledger_mod.canon_sha256(message, canon_lock, locale),
+                "source_sha256": snapshot["source_sha256"],
+                "context_sha256": snapshot["context_sha256"],
+                "style_sha256": snapshot["style_sha256"],
+                "canon_sha256": snapshot["canon_sha256"],
                 "checks": ("fail" if problems else "pass") if proposed is not None else None,
                 "problems": problems,
                 "issues": verdict.get("issues", []),
@@ -1588,6 +1625,7 @@ def do_accept_audit(root: Path, locale: str, ids: list, by: str) -> dict:
             "value": proposal["value"],
             "value_sha256": proposal["value_sha256"],
             "origin": "audit",
+            "audit_scope": proposal.get("audit_scope", "full"),
             "source_sha256": proposal["source_sha256"],
             "context_sha256": proposal["context_sha256"],
             "style_sha256": proposal["style_sha256"],
@@ -1623,6 +1661,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--root", required=True)
     p_build.add_argument("--kind", required=True, choices=KINDS + RESEARCH_KINDS)
     p_build.add_argument("--locale", default=None)
+    p_build.add_argument("--fresh", action="store_true",
+                         help="with unrestricted --kind audit: include already reviewed messages")
     p_build.add_argument("--entry", action="append", default=None,
                          help="with --kind audit: a restricted audit of one canon entry (after canon.py change); "
                               "with --kind research or research_verify: limit to this canon entry (repeatable)")
@@ -1650,7 +1690,7 @@ def main() -> int:
     if args.command == "build":
         root = lz_common.resolve_root(args.root)
         templates_dir = Path(args.templates_dir) if args.templates_dir else default_templates_dir()
-        result = do_build(root, args.kind, args.locale, templates_dir, entry_ids=args.entry)
+        result = do_build(root, args.kind, args.locale, templates_dir, entry_ids=args.entry, fresh=args.fresh)
         lz_common.emit(result)
         return lz_common.EXIT_OK
 

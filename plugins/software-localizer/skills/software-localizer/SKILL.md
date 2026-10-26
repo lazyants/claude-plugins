@@ -338,6 +338,12 @@ as its prompt directs. See [state and evidence](references/state.md#shared-note-
 python3 S/packets.py build --root R --kind audit --locale L
 ```
 
+Builds resume messages without a current full-audit verdict. To audit every eligible message
+again, add `--fresh` (unrestricted audit only). A canon-entry audit never substitutes for a full
+message audit. Accepted passes and failures are saved with their snapshot and run provenance;
+missing or invalid verdicts remain unreviewed. Changed source, target, context, style or relevant
+canon makes the saved verdict stale. Run collect and sync after project edits before resuming.
+
 For each batch run a Claude subagent on its `prompt.md` (JSON only), save the answer, and
 `packets.py accept --root R --run <batch dir> --output <answer.json>`. Every accepted failure
 is stored with its issues and snapshot hashes. Findings without a proposed replacement appear
@@ -354,6 +360,13 @@ the proposals that passed:
 python3 S/report.py --root R --locale L
 python3 S/packets.py accept-audit --root R --locale L --id ID [--id ID …] --by "<operator>"
 ```
+
+`status.py` and the report show current **reviewed / total**, pass/fail, unresolved, stale and
+unreviewed counts, with remaining IDs. Total includes every collected message, including those
+without a target; reviewed means a current accepted full-audit pass or fail, while unresolved
+includes failures and messages still needing a current verdict. Findings without a replacement
+remain visible. A fresh same-scope verdict supersedes its older unaccepted proposal. These are
+audit records, not approval to modify the project ([details](references/state.md#audit-evidence-and-coverage)).
 
 An accepted proposal still gets its own review verdict (step 6's review loop) before export.
 Changed proposals, including review counter-proposals, need a fresh project check before any

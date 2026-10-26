@@ -1,8 +1,9 @@
 """Write `R/reports/<locale>.md`, a native-speaker-readable report:
 exported and pending candidates with source and context,
 adopted entries (translated with no candidate — `ledger.adopt` took the
-project's own value) shown with that current value, audit findings with
-or without proposed replacements, escalated ids with their problems, canon candidates raised by
+project's own value) shown with that current value, audit coverage and saved
+findings with or without proposed replacements, escalated ids with their problems,
+canon candidates raised by
 reviews, usage-research records a native speaker should check, and notes on
 `existing`/`human_locked` messages.
 
@@ -124,19 +125,95 @@ def _row_escalated(msg_id, entry, message):
     return out
 
 
-def _row_audit(msg_id, entry, message, current_value):
+def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, proposal=None):
     out = [f"- `{msg_id}` — {_context_or_missing(message)}"]
     if message is not None:
-        out.append(f"  - source: {_value_text(message.get('source'))}")
+        source_label = "current source" if stale else "source"
+        out.append(f"  - {source_label}: {_value_text(message.get('source'))}")
     out.append(f"  - current: {_value_text(current_value)}")
-    proposal = entry["audit_proposal"]
-    if proposal.get("value") is None:
+    if record:
+        scope = record.get("scope", "full")
+        scope_label = "full audit" if scope == "full" else f"restricted canon audit {scope}"
+        out.append(f"  - verdict: {record.get('verdict')} ({'stale' if stale else 'current'} {scope_label})")
+        out.append(f"  - accepted: {record.get('accepted_at', '?')}; run: {record.get('run', '?')}")
+        out.append(f"  - run directory: {record.get('run_dir', '?')}")
+        out.append(f"  - packet sha256: {record.get('packet_sha256', '?')}")
+        for field, digest in sorted(record.get("snapshot", {}).items()):
+            out.append(f"  - audited {field}: {digest}")
+    if proposal:
+        if proposal.get("value") is None:
+            out.append("  - unresolved: no proposed replacement; needs follow-up")
+        else:
+            out.append(f"  - proposed: {_value_text(proposal.get('value'))} (checks {proposal.get('checks')})")
+        if stale:
+            out.append("  - proposal snapshot: stale; audit again before approval")
+    elif record and record.get("verdict") == "fail" and record.get("proposed") is None:
         out.append("  - unresolved: no proposed replacement; needs follow-up")
-    else:
-        out.append(f"  - proposed: {_value_text(proposal.get('value'))} (checks {proposal.get('checks')})")
-    for issue in proposal.get("issues", []):
-        out.append(f"  - issue: {issue.get('kind', '?')}: {issue.get('text', '')}")
+    issues = record.get("issues", []) if record else (proposal or {}).get("issues", [])
+    for issue in issues:
+        label = "saved issue" if stale else "issue"
+        out.append(f"  - {label}: {issue.get('kind', '?')}: {issue.get('text', '')}")
+    for issue in (proposal or {}).get("issues", []):
+        if issue not in issues:
+            out.append(f"  - proposal issue: {issue.get('kind', '?')}: {issue.get('text', '')}")
     return out
+
+
+def _audit_rows(msg_id, entry, message, cfg, canon_lock, locale):
+    """Keep full and restricted verdicts visible without duplicating their proposal.
+
+    Compare to current inputs rather than sync's cached hashes. The saved
+    hashes and run provenance identify what an obsolete finding judged.
+    """
+    current_value = message.get("targets", {}).get(locale) if message else None
+    if not (entry.get("audit") or entry.get("canon_audits") or entry.get("audit_proposal")):
+        return []
+    snapshot = ledger_mod.audit_snapshot(message, locale, cfg, canon_lock) if message else None
+    proposal = entry.get("audit_proposal")
+    proposal_scope = proposal.get("audit_scope", "full") if proposal else None
+    records = [("full", entry.get("audit")), *sorted((entry.get("canon_audits") or {}).items())]
+    rows = []
+    used_proposal = False
+    for scope, record in records:
+        if not record:
+            continue
+        stale = current_value is None or record.get("snapshot") != snapshot
+        scoped_proposal = proposal if proposal_scope == scope else None
+        if record.get("verdict") == "fail" or record.get("issues") or stale or scoped_proposal:
+            rows.append((msg_id, entry, message, current_value, record, stale, scoped_proposal))
+            used_proposal = used_proposal or scoped_proposal is not None
+    if proposal and not used_proposal:
+        # Older ledgers have a proposal but no complete audit verdict.
+        # Preserve it while checking every snapshot field it actually kept.
+        proposal_hashes = {
+            "source_sha256": proposal.get("source_sha256"),
+            "value_sha256": proposal.get("audited_target_sha256"),
+            "context_sha256": proposal.get("context_sha256"),
+            "style_sha256": proposal.get("style_sha256"),
+            "canon_sha256": proposal.get("canon_sha256"),
+        }
+        stale = current_value is None or snapshot is None or any(
+            digest is not None and snapshot.get(field) != digest
+            for field, digest in proposal_hashes.items()
+        )
+        rows.append((msg_id, entry, message, current_value, None, stale, proposal))
+    return rows
+
+
+def _audit_summary(lines, coverage):
+    lines.extend(["## Audit coverage", "", f"- reviewed: {coverage['reviewed']} / {coverage['total']}"])
+    for key in ("pass", "fail", "unresolved", "stale", "unreviewed"):
+        lines.append(f"- {key}: {coverage[key]}")
+    lines.extend([
+        "",
+        "Total includes every currently collected message, including messages without a target value. "
+        "Reviewed means a full verdict for the current snapshot; unresolved includes failed, stale and unreviewed messages.",
+        "",
+    ])
+    for key in ("stale", "unreviewed"):
+        ids = ", ".join(f"`{msg_id}`" for msg_id in coverage["ids"][key]) or "_none_"
+        lines.extend([f"- {key} IDs: {ids}"])
+    lines.append("")
 
 
 def _row_notes(msg_id, entry, message):
@@ -204,6 +281,8 @@ def build_report(root: Path, locale: str) -> str:
     by_id = {m["id"]: m for m in messages["messages"]}
     ledger_data = ledger_mod.load(root)
     entries = ledger_mod.locale_entries(ledger_data, locale)
+    canon_lock = canon_mod.load_lock(root)
+    audit_coverage = ledger_mod.audit_coverage(ledger_data, messages, cfg, canon_lock, locale)
 
     exported, adopted, ready, needs_translation = [], [], [], []
     escalated, audit_findings, existing_notes = [], [], []
@@ -214,9 +293,8 @@ def build_report(root: Path, locale: str) -> str:
         counts[state] = counts.get(state, 0) + 1
         message = by_id.get(msg_id)
 
-        if entry.get("audit_proposal"):
-            current_value = message.get("targets", {}).get(locale) if message else None
-            audit_findings.append((msg_id, entry, message, current_value))
+        message_findings = _audit_rows(msg_id, entry, message, cfg, canon_lock, locale)
+        audit_findings.extend(message_findings)
 
         if state == "translated":
             if entry.get("candidate"):
@@ -241,7 +319,7 @@ def build_report(root: Path, locale: str) -> str:
             # still show up as actionable, not as a plain note.
             if candidate and candidate.get("accepted_by") and ledger_mod.candidate_ready(entry):
                 ready.append((msg_id, entry, message))
-            elif not entry.get("audit_proposal"):
+            elif not message_findings:
                 existing_notes.append((msg_id, entry, message))
 
     canon_candidates = _collect_canon_candidates(root, locale)
@@ -251,6 +329,7 @@ def build_report(root: Path, locale: str) -> str:
     for state in sorted(counts):
         lines.append(f"- {state}: {counts[state]}")
     lines.append("")
+    _audit_summary(lines, audit_coverage)
 
     _section(lines, "Exported", exported, _row_exported)
     _section(lines, "Adopted", adopted, _row_adopted)

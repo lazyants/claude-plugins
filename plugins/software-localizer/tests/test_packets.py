@@ -1542,10 +1542,11 @@ def test_accept_audit_without_replacement_replaces_old_proposal(work_root):
     assert packets.do_accept_audit(work_root, "de", ["a"], "alice")["accepted"] == []
 
 
-def test_accept_audit_pass_does_not_mutate_ledger(work_root):
+def test_accept_audit_pass_persists_provenance_without_changing_translation_state(work_root):
     cfg = make_cfg()
     msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo"})])
     run_dir = build_one_batch(work_root, cfg, msgs, {"de": {"a": make_entry("existing")}}, "audit", "de")
+    before = ledger_mod.load(work_root)["locales"]["de"]["a"]
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     value_sha = packet["items"][0]["value_sha256"]
     output_path = write_output(run_dir, {"verdicts": {"a": {
@@ -1555,8 +1556,11 @@ def test_accept_audit_pass_does_not_mutate_ledger(work_root):
     packets.do_accept(work_root, run_dir, output_path)
     ledger_data = ledger_mod.load(work_root)
     entry = ledger_data["locales"]["de"]["a"]
-    assert entry["candidate"] is None
+    assert {key: entry[key] for key in before} == before
     assert entry.get("audit_proposal") is None
+    assert entry["audit"]["verdict"] == "pass"
+    assert entry["audit"]["snapshot"] == ledger_mod.audit_snapshot(msgs["messages"][0], "de", cfg, EMPTY_CANON_LOCK)
+    assert entry["audit"]["run"] == packet["batch"]
 
 
 # --- accept-audit -----------------------------------------------------------

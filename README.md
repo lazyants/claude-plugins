@@ -93,6 +93,8 @@ Ask: “Translate this app into German,” or “Audit our German translation.�
 
 Translates new or changed UI strings, or proposes fixes to existing translations for approval. Uses a shared terminology canon with auditable corrections, checked against how the project's field names each term, with explicit person-reviewed DNT scope changes, plus review, project checks, and export safeguards that preserve human edits. Audits carry explicit approved concept groups and scope notes as context. Native Claude packet turns require receipts for their actual input and returned answer. Requires Codex for translation and a project-specific adapter; no message-format adapter ships with the plugin.
 
+Audits retain verdicts and snapshot provenance, report current reviewed/total coverage, and resume remaining messages.
+
 [Setup and supported scope](plugins/software-localizer/README.md)
 
 ## Release notes and license

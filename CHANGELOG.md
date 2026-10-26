@@ -87,6 +87,21 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 
 ### Added
 
+- Accepted audit verdicts, including passes and findings without replacements, persist with
+  source/target/context/style/canon hashes and run provenance (#1013). Restricted canon audits
+  retain their own scope and do not count as full-message reviews.
+- Status and reports show current reviewed/total coverage, pass/fail and unresolved counts,
+  and stale/unreviewed IDs. Snapshot changes invalidate coverage without discarding the saved
+  verdict; a completed audit is distinguishable from one that never ran.
+- Full audit builds resume the remaining messages; `--fresh` explicitly reruns all eligible
+  messages. A newly accepted verdict retires an older unaccepted proposal from the same scope.
+  Missing or invalid answers remain unreviewed, and accepting a verdict never grants export
+  permission.
+
+## [software-localizer 0.4.0] — 2026-10-26
+
+### Added
+
 - Reviewed DNT occurrence-scope decisions (#1022): `canon.py scope` exposes active/pending ids
   and the current entry hash; `change-scope` requires that hash, exact additions/removals,
   a person and a reason. History retains before/after scopes and decisions; affected messages

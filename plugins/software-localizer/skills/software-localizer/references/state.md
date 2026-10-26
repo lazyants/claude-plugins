@@ -22,6 +22,37 @@ translated it meanwhile) becomes `existing`.
 Every candidate records the source, context and style it was made and reviewed against; when
 any of them changes, sync clears the candidate.
 
+## Audit evidence and coverage
+
+Each ledger entry can retain its last accepted full-audit verdict independently of translation
+state: pass/fail, issues, optional replacement, acceptance time, packet digest, run location and
+the source/target/context/style/relevant-canon hashes. Restricted canon-entry audit records are
+kept separately and never count as a full-message audit. Verdict acceptance does not adopt a
+translation or approve a replacement for export.
+
+Status and report compare these records with the current `messages.json`, configuration and
+canon lock, even before another sync. Changed inputs make a record stale; the record remains
+available as earlier evidence. Recollect after project edits: changes not yet collected cannot
+be reflected in coverage. A legacy ledger without records starts unreviewed.
+
+- **Total:** every currently collected message for the locale, including missing targets.
+- **Reviewed:** current full-audit passes plus failures.
+- **Stale:** messages with an obsolete full-audit record.
+- **Unreviewed:** messages without a full-audit record.
+- **Unresolved:** failures plus stale and unreviewed messages. A reviewed failure is not a pass.
+
+Thus `total = reviewed + stale + unreviewed`. Messages without a target cannot count as
+reviewed; audit builds keep their existing eligibility rules (`existing`, `translated`,
+`human_locked` with a target), so missing translations require the translation workflow.
+Partial or malformed answers do not earn coverage for their missing IDs. Unknown inputs in
+status mean coverage is unavailable, never that the audit is complete.
+
+Ordinary audit builds select the remaining eligible messages; `--fresh` requests a new full
+audit. The prior verdict remains evidence until a new valid verdict replaces it. A newly
+accepted verdict retires an older unaccepted proposal from the same scope before optionally
+storing a new one, including when the new verdict passes or has no replacement. Findings with
+no replacement still appear in the report and need human attention.
+
 ## Canon research evidence
 
 `R/canon.research/<locale>.json`, one file per target locale, holds the usage research and its
