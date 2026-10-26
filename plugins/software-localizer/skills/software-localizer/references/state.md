@@ -61,6 +61,8 @@ the approval metadata before refreezing. `canon.py freeze` retains approved grou
 from entries. Every group needs a unique ID, a locale, distinct member IDs, a note, a scope and
 approval metadata; every member must be a frozen DNT entry or have an approved translation in
 that locale. An incomplete approved group refuses the freeze without replacing the old lock.
+If `canon.py change` encounters such a group, it also leaves the canonical file and history
+unchanged and creates no restricted-audit request.
 Groups without both approval fields are omitted. Entry-level decision scopes remain in `note`.
 
 Ordinary and restricted audit packets carry `canon_context` keyed by message ID. For each message,

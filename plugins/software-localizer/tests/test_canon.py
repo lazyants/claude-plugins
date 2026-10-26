@@ -521,6 +521,43 @@ def test_freeze_output_is_byte_identical_with_and_without_a_research_file(work_r
 # --- change ------------------------------------------------------------
 
 
+@pytest.mark.parametrize("invalid", ["missing_scope", "unapproved_member"])
+def test_change_cli_invalid_group_preserves_canon_lock_and_history(work_root, invalid):
+    canon_data = {"schema": 1, "entries": [
+        make_entry(occurrences=["m1"], translations={"de": approved("Warenkorb")}),
+        make_entry("t-save", source="Save", translations={"de": approved("Speichern")}),
+    ], "groups": [{
+        "id": "checkout", "locale": "de", "entry_ids": ["t-cart", "t-save"],
+        "note": "Checkout terminology", "scope": "Cart and save button",
+        "approved_by": "alice", "approved_at": "2026-01-01T00:00:00Z",
+    }]}
+    canon.save(work_root, canon_data)
+    canon.freeze(work_root)
+    lz_common.atomic_write_json(work_root / "canon.history.json", {"schema": 1, "events": [{
+        "action": "approve", "entry": "t-cart", "locale": "de", "before": None,
+        "after": "Warenkorb", "by": "alice", "at": "2026-01-01T00:00:00Z",
+    }]})
+    # A hand-maintained group can become incomplete between freeze and change.
+    if invalid == "missing_scope":
+        del canon_data["groups"][0]["scope"]
+    else:
+        canon_data["entries"][1]["translations"]["de"]["status"] = "proposed"
+    canon.save(work_root, canon_data)
+    paths = [work_root / name for name in ("canon.json", "canon.lock.json", "canon.history.json")]
+    before = {path: path.read_bytes() for path in paths}
+
+    code, result = run_cli([
+        "change", "--root", str(work_root), "--entry", "t-cart", "--locale", "de",
+        "--expect", "Warenkorb", "--value", "Einkaufskorb", "--reason", "owner correction", "--by", "bob",
+    ])
+
+    assert code == lz_common.EXIT_CANNOT
+    assert not result["ok"]
+    assert ("scope" if invalid == "missing_scope" else "not approved") in result["error"]
+    assert {path: path.read_bytes() for path in paths} == before
+    assert not (work_root / "runs/de/canon-audit-t-cart.json").exists()
+
+
 def test_change_refuses_a_wrong_expect(work_root):
     canon_data = {"schema": 1, "entries": [make_entry(occurrences=["m1"], translations={"de": approved("Warenkorb")})]}
     canon.save(work_root, canon_data)

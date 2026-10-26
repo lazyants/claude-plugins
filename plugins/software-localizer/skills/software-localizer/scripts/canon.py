@@ -508,8 +508,9 @@ def change(
         "at": at, "by": by, "action": "change", "entry": entry_id, "locale": locale,
         "before": before, "after": value, "reason": reason,
     }
-    _append_history(root, event)
+    # Validate groups before recording a replacement that might be refused.
     freeze(root, canon)
+    _append_history(root, event)
 
     audit_request = {
         "entry": entry_id, "kind": entry["kind"], "source": entry["source"], "locale": locale,
