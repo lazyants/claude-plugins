@@ -197,13 +197,19 @@ def select_review(ledger_data: dict, locale: str) -> list:
     return [i for i, e in entries.items() if ledger_mod.candidate_needs_review(e)]
 
 
-def select_audit(ledger_data: dict, locale: str, messages=None, cfg=None, canon_lock=None, fresh=False) -> list:
+def select_audit(ledger_data: dict, locale: str, messages=None, cfg=None, canon_lock=None, fresh=False,
+                 check_inputs=None) -> list:
     entries = ledger_mod.locale_entries(ledger_data, locale)
     reviewed = set()
     if not fresh and messages is not None:
         coverage = ledger_mod.audit_coverage(ledger_data, messages, cfg, canon_lock, locale)
         reviewed.update(coverage["ids"]["pass"])
         reviewed.update(coverage["ids"]["fail"])
+        if check_inputs is not None:
+            reviewed = {msg_id for msg_id in reviewed
+                        if entries[msg_id].get("audit", {}).get("check_inputs") == check_inputs
+                        and entries[msg_id].get("audit", {}).get("current_checks", {}).get("status")
+                        in ("pass", "observations")}
     return [i for i, e in entries.items() if e.get("state") in AUDIT_STATES and i not in reviewed]
 
 
@@ -463,7 +469,8 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None,
     elif kind == "review":
         selected_ids = select_review(ledger_data, locale)
     else:
-        selected_ids = select_audit(ledger_data, locale, messages, cfg, canon_lock, fresh=fresh)
+        selected_ids = select_audit(ledger_data, locale, messages, cfg, canon_lock, fresh=fresh,
+                                   check_inputs=ledger_mod.audit_check_inputs(root, cfg))
 
     entries = ledger_mod.locale_entries(ledger_data, locale)
     style = cfg["style"][locale]
@@ -502,6 +509,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None,
         if kind == "audit":
             packet["canon_entry"] = None
             packet["canon_context"] = audit_canon_context(canon_lock, item_messages, locale)
+            _check_audit_packet(root, cfg, packet)
         batches_out.append(_write_batch(run_locale_dir, name, kind, packet, templates_dir))
 
     return {"ok": True, "kind": kind, "locale": locale, "selected": len(selected_ids),
@@ -726,6 +734,7 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
             "canon_context": audit_canon_context(canon_lock, item_messages, locale),
             "items": items,
         }
+        _check_audit_packet(root, cfg, packet)
         batches_out.append(_write_batch(run_locale_dir, name, "audit", packet, templates_dir))
 
     return {"ok": True, "kind": "audit", "locale": locale, "selected": len(occurrences),
@@ -816,6 +825,56 @@ def _single_or_list(parses: list, is_plural: bool):
     its keys, not its forms, and the first `.get()` call on one of those
     keys (a string) raised `AttributeError`."""
     return parses if is_plural else parses[0]
+
+
+def _audit_value_checks(item, locale, value, prefix, results, canon_lock, cfg, adapter_error=None):
+    """Use real parser results; unavailable syntax coverage is never a pass.
+
+    Source parse failures cannot establish argument/structure parity. Keep
+    the independent checks, but omit comparisons against an unparsed source.
+    """
+    source_forms = checks_mod.forms_of(item["source"])
+    value_forms = checks_mod.forms_of(value)
+    unavailable = []
+    if adapter_error is not None:
+        problems = checks_mod.check_candidate(
+            item_to_message(item, locale), locale, value, None, None, canon_lock, cfg,
+        )
+        return {"status": "unavailable", "problems": problems, "unavailable": [adapter_error]}
+    source_parses = _parse_list(results, item["id"], "source", source_forms)
+    value_parses = _parse_list(results, item["id"], prefix, value_forms)
+    for role, parses in (("source", source_parses), (prefix, value_parses)):
+        unavailable.extend(f"{role} form {i}: {parsed['error']}"
+                           for i, parsed in enumerate(parses) if not parsed["ok"])
+    is_plural = item.get("target_labels") is not None
+    problems = checks_mod.check_candidate(
+        item_to_message(item, locale), locale, value,
+        _single_or_list(source_parses, is_plural), _single_or_list(value_parses, is_plural),
+        canon_lock, cfg,
+    )
+    if any(not parsed["ok"] for parsed in source_parses):
+        problems = [problem for problem in problems if problem["check"] not in ("arguments", "structure")]
+    return {
+        "status": "unavailable" if unavailable else ("observations" if problems else "pass"),
+        "problems": problems,
+        "unavailable": unavailable,
+    }
+
+
+def _check_audit_packet(root, cfg, packet):
+    """Expose current-value observations before the model makes any verdict."""
+    packet["check_inputs"] = ledger_mod.audit_check_inputs(root, cfg)
+    extra = [parse_item for item in packet["items"]
+             for parse_item in _parse_items(item["id"], "current", checks_mod.forms_of(item["value"]))]
+    error = None
+    try:
+        results = _parse_batch(root, cfg, packet["items"], extra)
+    except adapter_client.AdapterError as exc:
+        results, error = {}, str(exc)
+    for item in packet["items"]:
+        item["current_checks"] = _audit_value_checks(
+            item, packet["locale"], item["value"], "current", results, packet["canon"], cfg, error,
+        )
 
 
 _CANDIDATE_SNAPSHOT_FIELDS = ("value_sha256", "source_sha256", "context_sha256", "style_sha256", "canon_sha256")
@@ -1023,6 +1082,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
     if kind == "audit":
         current_by_id = message_by_id(lz_common.load_messages(root / "messages.json"))
         current_canon_lock = canon_mod.load_lock(root)
+        check_inputs = ledger_mod.audit_check_inputs(root, cfg)
 
     # Gather every proposed value's forms up front for one batched parse call.
     valid_verdicts = {}
@@ -1042,7 +1102,8 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         if kind == "audit":
             current_message = current_by_id.get(msg_id)
             if (current_message is None or _audit_item_snapshot(packet, item)
-                    != ledger_mod.audit_snapshot(current_message, locale, cfg, current_canon_lock)):
+                    != ledger_mod.audit_snapshot(current_message, locale, cfg, current_canon_lock)
+                    or ("check_inputs" in packet and packet["check_inputs"] != check_inputs)):
                 # A retained run can still have a valid handoff receipt after
                 # a different batch audited newer inputs. Do not let replay
                 # replace that newer record or retire its correction.
@@ -1060,11 +1121,19 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
 
     extra_parse_items = []
     for msg_id, verdict in valid_verdicts.items():
+        if kind == "audit":
+            extra_parse_items.extend(_parse_items(msg_id, "current", checks_mod.forms_of(items[msg_id]["value"])))
         proposed = verdict.get("proposed")
-        if verdict.get("verdict") == "fail" and proposed is not None:
+        if (kind == "audit" or verdict.get("verdict") == "fail") and proposed is not None:
             extra_parse_items.extend(_parse_items(msg_id, "proposed", checks_mod.forms_of(proposed)))
     parse_items = [items[msg_id] for msg_id in valid_verdicts] if kind == "audit" else list(items.values())
-    parse_results = _parse_batch(root, cfg, parse_items, extra_parse_items)
+    parse_error = None
+    try:
+        parse_results = _parse_batch(root, cfg, parse_items, extra_parse_items)
+    except adapter_client.AdapterError as exc:
+        if kind != "audit":
+            raise
+        parse_results, parse_error = {}, str(exc)
 
     passed, failed_ids, escalated, proposals_stored = [], [], [], []
     audit_proposal_conflicts = []
@@ -1093,7 +1162,16 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                 "run": batch_name,
                 "run_dir": str(run_dir.resolve()),
                 "scope": audit_scope,
+                "check_inputs": check_inputs,
+                "audited_value": item["value"],
+                "current_checks": _audit_value_checks(
+                    item, locale, item["value"], "current", parse_results, canon_lock, audit_cfg, parse_error,
+                ),
             }
+            if verdict.get("proposed") is not None:
+                record["proposal_checks"] = _audit_value_checks(
+                    item, locale, verdict["proposed"], "proposed", parse_results, canon_lock, audit_cfg, parse_error,
+                )
             entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
             if packet.get("canon_entry") is None:
                 entry["audit"] = record
@@ -1208,14 +1286,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             proposed = verdict.get("proposed")
             problems = []
             if proposed is not None:
-                is_plural = item.get("target_labels") is not None
-                source_forms = checks_mod.forms_of(item["source"])
-                proposed_forms = checks_mod.forms_of(proposed)
-                source_parse = _single_or_list(_parse_list(parse_results, msg_id, "source", source_forms), is_plural)
-                proposed_parse = _single_or_list(_parse_list(parse_results, msg_id, "proposed", proposed_forms), is_plural)
-                problems = checks_mod.check_candidate(
-                    message, locale, proposed, source_parse, proposed_parse, canon_lock, audit_cfg,
-                )
+                problems = record["proposal_checks"]["problems"]
             entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
             pending = entry.get("audit_proposal")
             pending_scope = pending.get("audit_scope") if pending else None
@@ -1236,7 +1307,8 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                     "context_sha256": snapshot["context_sha256"],
                     "style_sha256": snapshot["style_sha256"],
                     "canon_sha256": snapshot["canon_sha256"],
-                    "checks": ("fail" if problems else "pass") if proposed is not None else None,
+                    "checks": ("unavailable" if record["proposal_checks"]["status"] == "unavailable"
+                               else ("fail" if problems else "pass")) if proposed is not None else None,
                     "problems": problems,
                     "issues": verdict.get("issues", []),
                     "run": batch_name,

@@ -23,6 +23,14 @@ question rather than treating the decision as absent. Related phrases are not ma
 replacements outside their scope. This context never expands `canon`'s mechanical rules,
 waives a failed check, or widens a restricted audit beyond `canon_entry`.
 
+Each item's `current_checks` contains independent mechanical observations about
+its current value. They remain visible regardless of your verdict or a proposed
+replacement. `unavailable` means parser coverage is incomplete, not clean. An
+identical technical label, a fragment's boundaries or a legacy DNT occurrence/source
+conflict needs owner adjudication in context: preserve the hold and explain it in
+`issues` when relevant. Do not insert an absent brand, waive a check, change
+occurrence scopes or rewrite valid text merely to clear an observation.
+
 When `canon_entry.field` is `note`, `before` and `after` are shared semantic notes, not
 replacement translations. Reassess the current wording against the corrected meaning; the
 approved locale wording and do-not-translate spelling have not been changed by this correction.

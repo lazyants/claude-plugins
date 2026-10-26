@@ -30,6 +30,28 @@ the source/target/context/style/relevant-canon hashes. Restricted canon-entry au
 kept separately and never count as a full-message audit. Verdict acceptance does not adopt a
 translation or approve a replacement for export.
 
+Audit packets include `current_checks` for every existing value, computed through
+the accepted project adapter before the model turn. Acceptance checks the current
+value again independently of the raw model verdict, including `pass` and `fail`
+with no replacement. The durable audit record retains `current_checks`,
+`audited_value`, and separate `proposal_checks` when a replacement is supplied.
+A clean replacement does not clear an observation about the original.
+
+Reports show separate current-value mechanical coverage: `pass`, `observations`,
+`unavailable`, `stale` and `unreviewed`. Parser or adapter failures are unavailable,
+never clean; independent checks still run when the adapter cannot parse. Invalid
+collected form shapes block packet construction. The model reviewed/total counts
+below continue to describe model verdicts only. Observations are owner holds for
+adjudication, not accepted translation errors or permission to insert a brand,
+waive fragment boundaries, change DNT scopes or overwrite project values.
+
+Mechanical records bind the same message snapshot as the verdict plus
+`check_inputs`: the adapter's files, interpreter, argv and options, and
+`allow_identical`. Changed inputs make saved diagnostics visibly stale without
+erasing them. Old records without mechanical checks remain unreviewed for this
+coverage. Ordinary builds also select eligible values with missing, stale or
+unavailable mechanical coverage; reaccept the adapter after changing code/options.
+
 The snapshot also hashes the message's approved informational `canon_context`, including
 linked entries and group/scope notes. It uses the same selector as audit packet construction;
 acceptance binds the frozen packet's context and coverage compares the current one. This

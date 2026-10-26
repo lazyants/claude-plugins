@@ -125,7 +125,7 @@ def _row_escalated(msg_id, entry, message):
     return out
 
 
-def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, proposal=None):
+def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, proposal=None, checks_stale=False):
     out = [f"- `{msg_id}` — {_context_or_missing(message)}"]
     if message is not None:
         source_label = "current source" if stale else "source"
@@ -140,6 +140,26 @@ def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, 
         out.append(f"  - packet sha256: {record.get('packet_sha256', '?')}")
         for field, digest in sorted(record.get("snapshot", {}).items()):
             out.append(f"  - audited {field}: {digest}")
+        current_checks = record.get("current_checks")
+        if current_checks:
+            out.append(f"  - audited value: {_value_text(record.get('audited_value'))}")
+            out.append(f"  - current-value checks: {current_checks['status']} ({'stale' if checks_stale else 'current'})")
+            for problem in current_checks.get("problems", []):
+                out.append(f"  - current-value observation: {_problem_text(problem)}")
+            for gap in current_checks.get("unavailable", []):
+                out.append(f"  - current-value coverage unavailable: {gap}")
+            if current_checks["problems"]:
+                out.append("  - owner hold: adjudicate these observations in context; they authorize no rewrite, "
+                           "brand insertion, whitespace waiver or occurrence-scope change.")
+        else:
+            out.append("  - current-value checks: unreviewed (legacy audit)")
+        if record.get("proposal_checks"):
+            replacement = record["proposal_checks"]
+            out.append(f"  - replacement checks: {replacement['status']} ({'stale' if checks_stale else 'current'})")
+            for problem in replacement.get("problems", []):
+                out.append(f"  - replacement observation: {_problem_text(problem)}")
+            for gap in replacement.get("unavailable", []):
+                out.append(f"  - replacement coverage unavailable: {gap}")
     if proposal:
         if proposal.get("audit_scope") is None:
             out.append(f"  - proposal scope: unknown (legacy record); run: {proposal.get('run', '?')}")
@@ -147,7 +167,7 @@ def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, 
             out.append("  - unresolved: no proposed replacement; needs follow-up")
         else:
             out.append(f"  - proposed: {_value_text(proposal.get('value'))} (checks {proposal.get('checks')})")
-        if stale:
+        if stale or checks_stale:
             out.append("  - proposal snapshot: stale; audit again before approval")
     elif record and record.get("verdict") == "fail" and record.get("proposed") is None:
         out.append("  - unresolved: no proposed replacement; needs follow-up")
@@ -169,7 +189,7 @@ def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, 
     return out
 
 
-def _audit_rows(msg_id, entry, message, cfg, canon_lock, locale):
+def _audit_rows(msg_id, entry, message, cfg, canon_lock, locale, check_inputs):
     """Keep full and restricted verdicts visible without duplicating their proposal.
 
     Compare to current inputs rather than sync's cached hashes. The saved
@@ -187,11 +207,13 @@ def _audit_rows(msg_id, entry, message, cfg, canon_lock, locale):
     for scope, record in records:
         if not record:
             continue
+        checks_status = ledger_mod.audit_checks_status(record, snapshot, check_inputs)
         stale = current_value is None or record.get("snapshot") != snapshot
         scoped_proposal = proposal if proposal_scope == scope else None
         if (record.get("verdict") == "fail" or record.get("issues") or stale or scoped_proposal
-                or record.get("proposed") is not None):
-            rows.append((msg_id, entry, message, current_value, record, stale, scoped_proposal))
+                or record.get("proposed") is not None or checks_status != "pass"):
+            rows.append((msg_id, entry, message, current_value, record, stale, scoped_proposal,
+                         checks_status == "stale"))
             used_proposal = used_proposal or scoped_proposal is not None
     if proposal and not used_proposal:
         # Older ledgers have a proposal but no complete audit verdict.
@@ -319,6 +341,12 @@ def build_report(root: Path, locale: str) -> str:
     entries = ledger_mod.locale_entries(ledger_data, locale)
     canon_lock = canon_mod.load_lock(root)
     audit_coverage = ledger_mod.audit_coverage(ledger_data, messages, cfg, canon_lock, locale)
+    check_inputs = ledger_mod.audit_check_inputs(root, cfg)
+    mechanical_counts = dict.fromkeys(("pass", "observations", "unavailable", "stale", "unreviewed"), 0)
+    for message in messages["messages"]:
+        snapshot = ledger_mod.audit_snapshot(message, locale, cfg, canon_lock)
+        record = entries.get(message["id"], {}).get("audit")
+        mechanical_counts[ledger_mod.audit_checks_status(record, snapshot, check_inputs)] += 1
 
     exported, adopted, ready, needs_translation = [], [], [], []
     escalated, audit_findings, existing_notes = [], [], []
@@ -330,7 +358,7 @@ def build_report(root: Path, locale: str) -> str:
         counts[state] = counts.get(state, 0) + 1
         message = by_id.get(msg_id)
 
-        message_findings = _audit_rows(msg_id, entry, message, cfg, canon_lock, locale)
+        message_findings = _audit_rows(msg_id, entry, message, cfg, canon_lock, locale, check_inputs)
         audit_findings.extend(message_findings)
         retained_audit_findings.extend(
             (msg_id, finding) for finding in entry.get("legacy_audit_findings", [])
@@ -370,6 +398,11 @@ def build_report(root: Path, locale: str) -> str:
         lines.append(f"- {state}: {counts[state]}")
     lines.append("")
     _audit_summary(lines, audit_coverage)
+    lines.extend(["## Current-value mechanical coverage", ""])
+    lines.extend(f"- {key}: {count}" for key, count in mechanical_counts.items())
+    lines.extend(["", "Independent of the model verdict and replacement checks. Observations need owner "
+                  "adjudication; unavailable, stale and unreviewed values have no clean mechanical result. "
+                  "Counts cover full audits; restricted canon audits retain separate observations below.", ""])
 
     _section(lines, "Exported", exported, _row_exported)
     _section(lines, "Adopted", adopted, _row_adopted)
