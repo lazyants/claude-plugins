@@ -232,6 +232,17 @@ python3 S/canon.py approve --root R --entry ID --by "<operator>"   # a do-not-tr
 python3 S/canon.py freeze --root R
 ```
 
+Freeze checks approved whole UI labels against approved do-not-translate rules at
+their collected message occurrences. When labels and active DNT occurrences coexist, keep `messages.json`
+current with `collect` first. A conflict blocks freeze and loading that lock for a new
+packet, ledger sync or export; the diagnostic names the locale, both entries, occurrence,
+approved value and failed rule. Use `canon.py change` for owner-approved wording repairs.
+Valid repairs can be recorded one at a time: while other conflicts remain, `change`
+returns `frozen: false` with their diagnostics and leaves the lock unchanged. The final
+coherent repair refreshes the lock. Use `scope` and `change-scope` below for an explicit
+owner-reviewed scope correction; commands do not narrow scope or waive DNT automatically.
+The check does not infer a conflict from a label fragment inside a longer message.
+
 Review turns later propose new candidates (each review batch writes
 `<batch dir>/new_canon_candidates.json`); import them the same way and approve as they come.
 Nothing a model proposes takes effect until a person approves it — an unapproved entry,
@@ -286,10 +297,21 @@ pending proposals leaves the active lock unchanged and requests no new audit. Sp
 locale wording, sibling entries and prior research/history are retained. See
 [scope state and recovery](references/state.md#reviewed-dnt-scope-decisions).
 
+A scope delta that introduces a whole-label/DNT conflict refuses before any decision is
+written. Valid scope repairs can be recorded one at a time: remaining pre-existing conflicts
+return `frozen: false` and keep the previous lock until the final coherent repair.
+Final scope audits retain affected IDs from that prior frozen scope across sequential repairs.
+
 To correct the **shared note** of an approved term, UI label or do-not-translate entry, first
 show the person the exact old/new notes, reason and affected locales/messages. Execute only
 the correction they confirm; model output is not approval. Stop locale workers while changing
-the canon. With a validated config and current `messages.json`:
+the canon.
+
+Shared-note corrections require a coherent canon first. Resolve any whole-label/DNT
+diagnostics through owner-reviewed wording or scope decisions before retrying; refusal
+leaves notes, history and prior evidence unchanged.
+
+With a validated config and current `messages.json`:
 
 ```bash
 python3 S/canon.py change-note --root R --entry ID --expect "exact current note" \

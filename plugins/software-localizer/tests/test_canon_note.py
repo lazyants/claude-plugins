@@ -542,3 +542,64 @@ def test_nonliteral_ordinary_packets_and_following_review_keep_corrected_meaning
     with pytest.raises(SystemExit):
         packets.do_accept(work_root, review_dir, review_output)
     assert snapshot(work_root) == before
+
+
+@pytest.mark.parametrize("legacy_lock", [True, False])
+def test_cli_note_correction_waits_for_a_coherent_canon(work_root, legacy_lock):
+    label = make_canon_entry("u-add", "Add to BrowserX", kind="ui_label", note=OLD_NOTE,
+                             occurrences=["m1"], locales={"de": ("Installieren", "approved")})
+    dnt = make_canon_entry("d-brand", "BrowserX", kind="dnt", occurrences=["m1"])
+    dnt.update(approved_by="original owner", approved_at="2026-01-01")
+    setup_research_workspace(work_root, [label, dnt], cfg=make_cfg(target_locales=("de",)),
+                             messages=make_messages([make_message("m1", "Add to BrowserX",
+                                                                  targets={"de": "Installieren"})]))
+    evidence = {"kind": "ui_label", "source": "Add to BrowserX", "research": research_term(),
+                "research_sha256": canon.research_sha256(research_term()),
+                "researched": {"run": "old-research", "at": "2026-01-01"}, "verification": None}
+    canon.save_research(work_root, "de", {"schema": 1, "locale": "de", "entries": {"u-add": evidence}})
+    ledger.save(work_root, {"schema": 1, "locales": {"de": {"m1": {
+        "state": "existing", "candidate": {"value": "old reviewed candidate"}}}}})
+    lock_path = work_root / "canon.lock.json"
+    if legacy_lock:
+        # A lock written before the coherence check existed.
+        lz_common.atomic_write_json(lock_path, canon._build_lock(canon.load(work_root)))
+    else:
+        # A coherent old lock; the conflicting pair is approved in canon.json afterwards.
+        coherent = canon.load(work_root)
+        coherent["entries"][0]["translations"]["de"]["value"] = "In BrowserX installieren"
+        canon.freeze(work_root, coherent)
+    before = snapshot(work_root)
+    note_args = ["change-note", "--root", str(work_root), "--entry", "u-add",
+                 "--expect", OLD_NOTE, "--note", NEW_NOTE,
+                 "--reason", "Owner confirmed the definition", "--by", "alice"]
+
+    code, refused = run_cli(note_args)
+
+    assert code != 0 and refused["ok"] is False
+    assert [(c["ui_label"], c["locale"], c["dnt"], c["occurrence"]) for c in refused["conflicts"]] == [
+        ("u-add", "de", "d-brand", "m1")]
+    for fragment in ("change-note refused", "u-add/de", "d-brand", "m1"):
+        assert fragment in refused["error"]
+    assert snapshot(work_root) == before
+    entry = canon.load(work_root)["entries"][0]
+    assert entry["note"] == OLD_NOTE and entry.get("note_revision") is None
+
+    code, repaired = run_cli(["change", "--root", str(work_root), "--entry", "u-add", "--locale", "de",
+                              "--expect", "Installieren", "--value", "In BrowserX installieren",
+                              "--reason", "Keep the brand", "--by", "bob"])
+    assert code == 0 and repaired["frozen"] is True and repaired["conflicts"] == []
+
+    code, done = run_cli(note_args)
+
+    assert code == 0 and done["ok"] and "frozen" not in done
+    revision = done["note_revision"]
+    entry = canon.load(work_root)["entries"][0]
+    assert entry["note"] == NEW_NOTE and entry["note_revision"] == revision
+    locked = canon.load_lock(work_root)["entries"][0]
+    assert locked["note"] == NEW_NOTE and locked["note_revision"] == revision
+    assert canon.load_history(work_root)["events"][-1]["note_revision"] == revision
+    assert canon.load_research(work_root, "de")["entries"]["u-add"]["stale_note"]["note_revision"] == revision
+    assert ledger.load(work_root)["locales"]["de"]["m1"]["candidate"] is None
+    request = lz_common.read_json(work_root / "runs" / "de" / "canon-audit-u-add.json", "audit")
+    assert request["field"] == "note" and request["note_revision"] == revision
+    assert request["before"] == OLD_NOTE and request["after"] == NEW_NOTE

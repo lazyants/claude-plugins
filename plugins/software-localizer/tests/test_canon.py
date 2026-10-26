@@ -17,6 +17,7 @@ SCRIPTS_DIR = TESTS_DIR.parent / "skills" / "software-localizer" / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import canon  # noqa: E402
+import checks  # noqa: E402
 import lz_common  # noqa: E402
 
 
@@ -684,3 +685,306 @@ def test_cli_import_approve_freeze_change_roundtrip(work_root):
         "--expect", "WRONG", "--value", "Nope", "--reason", "x", "--by", "carol",
     ])
     assert code == 1 and result["ok"] is False
+
+
+# --- ui_label / dnt coherence (#1016) ---------------------------------------
+
+
+def make_message(msg_id, source):
+    return {
+        "id": msg_id, "source": source, "targets": {"ru": None},
+        "context": {"file": "app.json", "key": msg_id},
+    }
+
+
+def write_messages(root, messages):
+    (Path(root) / "messages.json").write_text(
+        json.dumps({"schema": 1, "files": ["app.json"], "messages": messages}), encoding="utf-8",
+    )
+
+
+def coherence_canon(value="Установить расширение", approve_label=True, approve_dnt=True, locale="ru"):
+    label = make_entry(
+        "u-add", kind="ui_label", source="Add to BrowserX",
+        translations={locale: approved(value) if approve_label else proposed(value)},
+    )
+    dnt = make_entry("d-brand", kind="dnt", source="BrowserX", occurrences=["app:install"])
+    if approve_dnt:
+        dnt["approved_by"] = "alice"
+        dnt["approved_at"] = "2026-01-01T00:00:00Z"
+    return {"schema": 1, "entries": [label, dnt]}
+
+
+def test_freeze_refuses_a_ui_label_that_drops_an_approved_dnt(work_root, capsys):
+    write_messages(work_root, [make_message("app:install", "Add to BrowserX")])
+    canon.save(work_root, coherence_canon())
+    lock_path = work_root / "canon.lock.json"
+    lock_path.write_text('{"schema": 1, "entries": []}\n', encoding="utf-8")
+    before = lock_path.read_bytes()
+
+    with pytest.raises(SystemExit) as exc:
+        canon.freeze(work_root)
+
+    assert exc.value.code == lz_common.EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["ok"] is False
+    conflict = payload["conflicts"][0]
+    assert conflict["locale"] == "ru" and conflict["ui_label"] == "u-add"
+    assert conflict["dnt"] == "d-brand" and conflict["occurrence"] == "app:install"
+    assert conflict["value"] == "Установить расширение"
+    assert "'BrowserX'" in conflict["detail"] and "d-brand" in conflict["detail"]
+    assert lock_path.read_bytes() == before
+
+
+def test_cli_freeze_refuses_the_conflict_and_writes_no_lock(work_root):
+    write_messages(work_root, [make_message("app:install", "Add to BrowserX")])
+    canon.save(work_root, coherence_canon())
+
+    code, result = run_cli(["freeze", "--root", str(work_root)])
+
+    assert code == 1 and result["ok"] is False and result["conflicts"][0]["dnt"] == "d-brand"
+    assert not (work_root / "canon.lock.json").exists()
+
+
+def test_freeze_accepts_a_translation_that_contains_the_brand(work_root):
+    write_messages(work_root, [make_message("app:install", "Add to BrowserX")])
+    canon.save(work_root, coherence_canon(value="Добавить в BrowserX"))
+
+    lock = canon.freeze(work_root)
+
+    assert {e["id"] for e in lock["entries"]} == {"u-add", "d-brand"}
+    assert canon.load_lock(work_root) == lock
+    # Producer/consumer: the frozen lock feeds the real candidate checks.
+    message = make_message("app:install", "Add to BrowserX")
+    problems = checks.check_candidate(
+        message, "ru", "Добавить в BrowserX", {"ok": True, "tokens": []}, {"ok": True, "tokens": []},
+        lock, {"allow_identical": []},
+    )
+    assert problems == []
+
+
+def test_freeze_does_not_treat_a_longer_message_mentioning_the_label_as_the_label(work_root):
+    source = "Click Add to BrowserX to continue"
+    write_messages(work_root, [make_message("app:install", source)])
+    canon.save(work_root, coherence_canon())
+
+    lock = canon.freeze(work_root)
+
+    assert len(lock["entries"]) == 2
+    # The full translation keeps the brand outside the translated label.
+    problems = checks.check_candidate(
+        make_message("app:install", source), "ru", "Нажмите «Установить расширение» в BrowserX, чтобы продолжить",
+        {"ok": True, "tokens": []}, {"ok": True, "tokens": []}, lock, {"allow_identical": []},
+    )
+    assert problems == []
+
+
+def test_freeze_refuses_a_malformed_snapshot_and_keeps_the_lock(work_root, capsys):
+    (work_root / "messages.json").write_text('{"schema": 1, "files": [], "messages": "nope"}', encoding="utf-8")
+    canon.save(work_root, coherence_canon())
+    lock_path = work_root / "canon.lock.json"
+    lock_path.write_text('{"schema": 1, "entries": []}\n', encoding="utf-8")
+    before = lock_path.read_bytes()
+
+    with pytest.raises(SystemExit) as exc:
+        canon.freeze(work_root)
+
+    assert exc.value.code == lz_common.EXIT_CANNOT
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["ok"] is False
+    assert payload["error"] == "messages.json is invalid: messages must be a list"
+    assert lock_path.read_bytes() == before
+
+
+def test_freeze_skips_a_plural_message_with_the_label_source(work_root):
+    message = {
+        "id": "app:install", "source": {"forms": ["Add to BrowserX", "Add to BrowserX"]},
+        "plural": {
+            "source_labels": [{"label": "one", "exact": False}, {"label": "other", "exact": False}],
+            "general_index": 1, "count_arguments": ["n"],
+            "target_labels": {"ru": [{"label": "other", "exact": False}]},
+        },
+        "targets": {"ru": None}, "context": {"file": "app.json", "key": "app:install"},
+    }
+    write_messages(work_root, [message])
+    canon.save(work_root, coherence_canon())
+
+    assert len(canon.freeze(work_root)["entries"]) == 2
+
+
+@pytest.mark.parametrize("kwargs", [{"approve_label": False}, {"approve_dnt": False}])
+def test_freeze_ignores_an_unapproved_label_or_dnt(work_root, kwargs):
+    write_messages(work_root, [make_message("app:install", "Add to BrowserX")])
+    canon.save(work_root, coherence_canon(**kwargs))
+
+    canon.freeze(work_root)
+
+
+def test_freeze_checks_a_label_locale_independently_of_other_locales(work_root):
+    write_messages(work_root, [make_message("app:install", "Add to BrowserX")])
+    canon_data = coherence_canon(value="Добавить в BrowserX")
+    canon_data["entries"][0]["translations"]["de"] = approved("Erweiterung installieren")
+    canon.save(work_root, canon_data)
+
+    with pytest.raises(SystemExit):
+        canon.freeze(work_root)
+
+
+def test_freeze_ignores_a_dnt_occurrence_absent_from_the_snapshot(work_root):
+    write_messages(work_root, [make_message("app:other", "Add to BrowserX")])
+    canon.save(work_root, coherence_canon())
+
+    assert len(canon.freeze(work_root)["entries"]) == 2
+
+
+def test_freeze_needs_the_snapshot_when_a_label_and_a_dnt_both_lock(work_root):
+    canon.save(work_root, coherence_canon())
+
+    with pytest.raises(SystemExit) as exc:
+        canon.freeze(work_root)
+
+    assert exc.value.code == lz_common.EXIT_CANNOT
+    assert not (work_root / "canon.lock.json").exists()
+
+
+def test_freeze_and_load_lock_need_no_snapshot_for_an_empty_scope_dnt(work_root):
+    canon_data = coherence_canon()
+    canon_data["entries"][1]["occurrences"] = []
+    canon.save(work_root, canon_data)
+
+    lock = canon.freeze(work_root)
+
+    assert {e["id"] for e in lock["entries"]} == {"u-add", "d-brand"}
+    assert not (work_root / "messages.json").exists()
+    assert canon.load_lock(work_root) == lock
+
+
+def test_freeze_without_both_kinds_does_not_read_the_snapshot(work_root):
+    dnt_only = coherence_canon()
+    dnt_only["entries"] = dnt_only["entries"][1:]
+    canon.save(work_root, dnt_only)
+
+    assert len(canon.freeze(work_root)["entries"]) == 1
+
+
+def test_load_lock_refuses_an_already_frozen_conflict(work_root, capsys):
+    write_messages(work_root, [make_message("app:install", "Add to BrowserX")])
+    lock = canon._build_lock(coherence_canon())
+    (work_root / "canon.lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        canon.load_lock(work_root)
+
+    assert exc.value.code == lz_common.EXIT_FAIL
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["conflicts"][0]["occurrence"] == "app:install"
+
+
+def test_change_refusal_leaves_object_canon_lock_and_history_unchanged(work_root):
+    write_messages(work_root, [make_message("app:install", "Add to BrowserX")])
+    canon_data = coherence_canon(value="Добавить в BrowserX")
+    canon.save(work_root, canon_data)
+    canon.freeze(work_root)
+    canon_bytes = (work_root / "canon.json").read_bytes()
+    lock_bytes = (work_root / "canon.lock.json").read_bytes()
+    snapshot = json.loads(json.dumps(canon_data))
+
+    with pytest.raises(SystemExit) as exc:
+        canon.change(
+            work_root, canon_data, "u-add", "ru", "Добавить в BrowserX",
+            "Установить расширение", "reword", "bob",
+        )
+
+    assert exc.value.code == lz_common.EXIT_FAIL
+    assert canon_data == snapshot
+    assert (work_root / "canon.json").read_bytes() == canon_bytes
+    assert (work_root / "canon.lock.json").read_bytes() == lock_bytes
+    assert canon.load_history(work_root) == {"schema": 1, "events": []}
+    assert not (work_root / "runs").exists()
+
+
+def conflicted_two_locale_root(root):
+    write_messages(root, [make_message("app:install", "Add to BrowserX")])
+    canon_data = coherence_canon()
+    canon_data["entries"][0]["translations"]["de"] = approved("Erweiterung installieren")
+    canon.save(root, canon_data)
+    # A legacy lock written before the coherence check existed.
+    (root / "canon.lock.json").write_text(json.dumps(canon._build_lock(canon_data)), encoding="utf-8")
+
+
+def change_args(root, locale, expect, value, reason, entry="u-add"):
+    return [
+        "change", "--root", str(root), "--entry", entry, "--locale", locale,
+        "--expect", expect, "--value", value, "--reason", reason, "--by", "bob",
+    ]
+
+
+def test_cli_change_repairs_two_conflicting_locales_one_at_a_time(work_root):
+    conflicted_two_locale_root(work_root)
+    old_lock = (work_root / "canon.lock.json").read_bytes()
+
+    code, first = run_cli(change_args(
+        work_root, "ru", "Установить расширение", "Добавить в BrowserX", "keep the brand",
+    ))
+
+    assert code == 0 and first["ok"] is True and first["frozen"] is False
+    assert [(c["ui_label"], c["locale"], c["dnt"]) for c in first["conflicts"]] == [("u-add", "de", "d-brand")]
+    assert canon.load(work_root)["entries"][0]["translations"]["ru"]["value"] == "Добавить в BrowserX"
+    events = canon.load_history(work_root)["events"]
+    assert [(e["action"], e["locale"], e["by"], e["reason"]) for e in events] == [
+        ("change", "ru", "bob", "keep the brand"),
+    ]
+    assert (work_root / "canon.lock.json").read_bytes() == old_lock
+    with pytest.raises(SystemExit):
+        canon.load_lock(work_root)
+    assert (work_root / "runs" / "ru" / "canon-audit-u-add.json").is_file()
+
+    code, second = run_cli(change_args(
+        work_root, "de", "Erweiterung installieren", "BrowserX-Erweiterung installieren", "keep the brand",
+    ))
+
+    assert code == 0 and second["frozen"] is True and second["conflicts"] == []
+    lock = canon.load_lock(work_root)
+    values = {loc: t["value"] for loc, t in lock["entries"][0]["translations"].items()}
+    assert values == {"ru": "Добавить в BrowserX", "de": "BrowserX-Erweiterung installieren"}
+    assert [e["locale"] for e in canon.load_history(work_root)["events"]] == ["ru", "de"]
+    assert (work_root / "runs" / "ru" / "canon-audit-u-add.json").is_file()
+    assert (work_root / "runs" / "de" / "canon-audit-u-add.json").is_file()
+
+
+def test_cli_change_still_refuses_an_invalid_value_while_others_conflict(work_root):
+    conflicted_two_locale_root(work_root)
+    old_lock = (work_root / "canon.lock.json").read_bytes()
+    old_canon = (work_root / "canon.json").read_bytes()
+
+    code, result = run_cli(change_args(work_root, "ru", "Установить расширение", "Установить", "still bad"))
+
+    assert code == 1 and result["ok"] is False
+    assert [(c["locale"], c["ui_label"]) for c in result["conflicts"]] == [("ru", "u-add")]
+    assert (work_root / "canon.json").read_bytes() == old_canon
+    assert (work_root / "canon.lock.json").read_bytes() == old_lock
+    assert canon.load_history(work_root) == {"schema": 1, "events": []}
+    assert not (work_root / "runs").exists()
+
+
+def test_cli_change_repairs_two_distinct_conflicting_labels(work_root):
+    write_messages(work_root, [
+        make_message("app:install", "Add to BrowserX"), make_message("app:open", "Open BrowserX"),
+    ])
+    canon_data = coherence_canon()
+    canon_data["entries"][1]["occurrences"] = ["app:install", "app:open"]
+    canon_data["entries"].append(make_entry(
+        "u-open", kind="ui_label", source="Open BrowserX", translations={"ru": approved("Открыть")},
+    ))
+    canon.save(work_root, canon_data)
+    (work_root / "canon.lock.json").write_text(json.dumps(canon._build_lock(canon_data)), encoding="utf-8")
+
+    code, first = run_cli(change_args(work_root, "ru", "Установить расширение", "Добавить в BrowserX", "r1"))
+
+    assert code == 0 and first["frozen"] is False
+    assert [(c["ui_label"], c["occurrence"]) for c in first["conflicts"]] == [("u-open", "app:open")]
+
+    code, second = run_cli(change_args(work_root, "ru", "Открыть", "Открыть BrowserX", "r2", entry="u-open"))
+
+    assert code == 0 and second["frozen"] is True
+    assert len(canon.load_lock(work_root)["entries"]) == 3

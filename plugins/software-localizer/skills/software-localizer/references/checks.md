@@ -78,6 +78,37 @@ misclassify a non-plural message as plural, or edit the ledger/check results to 
 `allow_identical` only covers the `identical` check. A future adapter/per-message exception
 would require an explicitly reviewed core contract change; none is enabled by this procedure.
 
+## Canon coherence before freeze and packet construction
+
+For a non-plural collected message whose complete source equals an approved UI-label
+source, the approved label value must satisfy every approved DNT entry explicitly naming
+that occurrence. `canon.py freeze` refuses before replacing the lock if it does not;
+loading an existing contradictory lock also refuses. The diagnostic identifies the
+locale, UI-label entry, DNT entry, occurrence, approved value and failed DNT constraint.
+Approved UI labels and nonempty active DNT scopes require a collected `messages.json` snapshot.
+Recollect after source changes; occurrences absent from that snapshot are no longer
+current messages.
+
+The owner reconciles wording with `canon.py change`, or reviews an exact `change-scope`
+delta bound to the entry hash returned by `scope`. Pending DNT occurrences are not active
+constraints. A proposed wording or scope delta that introduces a conflict is refused
+without changing canon, history or lock. Valid repairs can be recorded sequentially:
+if other conflicts remain,
+`change` records the approved wording and audit request but returns `frozen: false` with
+the remaining conflicts and leaves the lock unchanged. The final coherent repair
+refreshes the lock. A conflicting lock still blocks packet builds, ledger sync and
+export until reconciled. Scope repairs follow the same rule: a valid partial repair is
+recorded with its audit requests, remaining conflicts keep the old lock, and the final
+coherent repair refreezes. Scripts do not append a brand or waive DNT.
+
+Shared-note corrections require a coherent canon and refuse before changing notes,
+history or evidence when a whole-label/DNT conflict remains.
+
+A label mentioned inside a longer message is not compared as if
+it were the complete translation: the surrounding translation may supply the brand.
+Plural messages remain subject to the per-candidate checks above, without this
+whole-label inference. Meaning, inflection and other canon usage remain review work.
+
 ## The review turn (Claude) — what scripts cannot see
 
 Meaning in context; whether approved canon terms and UI labels are used (in any correct
