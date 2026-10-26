@@ -117,6 +117,13 @@ def _append_history(root, event: dict) -> None:
     lz_common.atomic_write_json(Path(root) / "canon.history.json", history)
 
 
+def _audit_requests(root, locales: list, entry_id: str) -> dict:
+    return {
+        locale: lz_common.read_json(path, "previous canon audit request") for locale in locales
+        if (path := Path(root) / "runs" / locale / f"canon-audit-{entry_id}.json").exists()
+    }
+
+
 # ---------------------------------------------------------------------------
 # usage-research evidence (see the module docstring)
 # ---------------------------------------------------------------------------
@@ -624,6 +631,7 @@ def change_scope(root, canon: dict, entry_id: str, expect_sha256: str,
         lz_common.fail("--add is already active or --remove is not in the stored scope", lz_common.EXIT_FAIL)
 
     cfg = lz_common.load_config(root)
+    previous_requests = _audit_requests(root, cfg["target_locales"], entry_id)
     messages = lz_common.load_messages(Path(root) / "messages.json")["messages"]
     known_ids = {m["id"] for m in messages}
     if any(i not in known_ids for i in additions):
@@ -661,6 +669,8 @@ def change_scope(root, canon: dict, entry_id: str, expect_sha256: str,
         "affected_occurrences": affected, "target_locales": list(cfg["target_locales"]),
     }
     lock = _build_lock(canon)
+    if any(request.get("field") == "note" for request in previous_requests.values()):
+        event["audit_requests_before"] = previous_requests
     _append_history(root, event)
     lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
     for locale in cfg["target_locales"]:
@@ -670,6 +680,14 @@ def change_scope(root, canon: dict, entry_id: str, expect_sha256: str,
             **event, "kind": "dnt", "source": entry["source"], "locale": locale,
             "occurrences": affected, "scope_change": {"before": before, "after": after},
         }
+        previous = previous_requests.get(locale, {})
+        if previous.get("field") == "note":
+            audit_request = {
+                **previous,
+                "occurrences": list(dict.fromkeys(previous.get("occurrences", []) + affected)),
+                "scope_change": {"before": previous.get("scope_change", {}).get("before", before), "after": after},
+                "scope_decision": {"before": before, "after": after, "reason": reason, "by": by, "at": at},
+            }
         lz_common.atomic_write_json(
             Path(root) / "runs" / locale / f"canon-audit-{entry_id}.json", audit_request,
         )
@@ -716,10 +734,13 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
     if any(not lz_common._locale_ok(locale) for locale in locales):
         lz_common.fail("invalid locale in canon/research/ledger", lz_common.EXIT_CANNOT)
     records = {locale: load_research(root, locale) for locale in locales}
-    occurrences = list(dict.fromkeys(list(entry.get("occurrences", [])) + [
+    previous_requests = _audit_requests(root, cfg["target_locales"], entry_id)
+    active = _active_dnt_scope(entry) if entry["kind"] == "dnt" else list(entry.get("occurrences", []))
+    impact_entry = {**entry, "occurrences": active}
+    occurrences = list(dict.fromkeys(active + [
         m["id"] for m in messages["messages"]
-        if ledger_mod.relevant_canon(m, {"entries": [entry]})
-    ]))
+        if ledger_mod.relevant_canon(m, {"entries": [impact_entry]})
+    ] + [i for request in previous_requests.values() for i in request.get("occurrences", [])]))
     at = lz_common.now_iso()
     event = {
         "action": "change-note", "entry": entry_id, "locale": None, "field": "note",
@@ -729,10 +750,7 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
                             if entry_id in data["entries"]},
         "ledger_before": {loc: {i: deepcopy(e) for i, e in entries.items() if i in occurrences}
                           for loc, entries in ledger_data["locales"].items()},
-        "audit_requests_before": {
-            loc: lz_common.read_json(path, "previous canon audit request") for loc in cfg["target_locales"]
-            if (path := root / "runs" / loc / f"canon-audit-{entry_id}.json").exists()
-        },
+        "audit_requests_before": previous_requests,
         "affected": {"research_locales": [loc for loc, data in records.items() if entry_id in data["entries"]],
                      "audit_locales": cfg["target_locales"], "occurrences": occurrences},
     }
@@ -758,6 +776,12 @@ def change_note(root, canon: dict, entry_id: str, expect: str, note: str, reason
             "field": "note", "impact": "semantic", "before": before, "after": note,
             "note_revision": revision, "reason": reason, "by": by, "at": at, "occurrences": occurrences,
         }
+        previous = previous_requests.get(locale, {})
+        for field in ("scope_change", "scope_decision", "translation_change"):
+            if field in previous:
+                request[field] = previous[field]
+        if entry["kind"] == "dnt" and "scope_change" not in request:
+            request["scope_change"] = {"before": active, "after": active}
         lz_common.atomic_write_json(root / "runs" / locale / f"canon-audit-{entry_id}.json", request)
     entry["note"] = note
     entry["note_revision"] = revision

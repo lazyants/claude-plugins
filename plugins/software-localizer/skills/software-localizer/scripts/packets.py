@@ -681,6 +681,8 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
     }
     if "scope_change" in request:
         canon_entry_meta["scope_change"] = request["scope_change"]
+    if "scope_decision" in request:
+        canon_entry_meta["scope_decision"] = request["scope_decision"]
     if request.get("field") == "note":
         canon_entry_meta.update(field="note", impact="semantic", note_revision=request["note_revision"])
         if request.get("translation_change"):

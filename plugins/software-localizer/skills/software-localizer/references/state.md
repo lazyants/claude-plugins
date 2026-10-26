@@ -151,6 +151,9 @@ entries and unrelated ledger entries stay unchanged.
 An explicitly cleared note stays empty on later imports; untouched empty notes retain the
 existing fill-on-import behavior. A later locale-wording `change` preserves the semantic audit's
 scope and records its own wording change alongside it, archiving the replaced request in history.
+Note and DNT-scope decisions also retain each other's pending audit context and affected IDs.
+For a DNT, the correction uses its active approved scope; pending import proposals stay pending.
+An unchanged before/after scope snapshot keeps literal matches outside active scope informational.
 
 The history event records exact before/after notes, actor/reason/time, a chained `note_revision`,
 affected locales/messages, and snapshots of prior research/verification, affected ledger entries

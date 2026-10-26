@@ -287,6 +287,63 @@ def test_note_correction_never_resumes_partial_research_for_the_old_meaning(work
     assert event["research_before"]["de"]["research"]["findings"] == old_findings
 
 
+def test_note_correction_preserves_active_and_pending_dnt_scope(work_root):
+    setup(work_root, "dnt")
+    data = canon.load(work_root)
+    entry = data["entries"][0]
+    entry["approved_occurrences"] = ["named"]
+    entry["occurrences"].append("unrelated")  # an unapproved, nonliteral import proposal
+    canon.save(work_root, data)
+    canon.freeze(work_root)
+    original_scope = canon.scope(data, "t-poi")
+    before = deepcopy(ledger.load(work_root))
+    event = correct(work_root)
+    current = canon.scope(canon.load(work_root), "t-poi")
+    assert current["active"] == original_scope["active"] == ["named"]
+    assert current["pending"] == original_scope["pending"] == ["unrelated"]
+    assert event["affected"]["occurrences"] == ["named", "substring"]
+    assert ledger.load(work_root)["locales"]["de"]["unrelated"] == before["locales"]["de"]["unrelated"]
+    request = lz_common.read_json(work_root / "runs" / "de" / "canon-audit-t-poi.json", "audit")
+    assert request["scope_change"] == {"before": ["named"], "after": ["named"]}
+    assert canon.load_lock(work_root)["entries"][0]["occurrences"] == ["named"]
+    with pytest.raises(SystemExit):
+        canon.change_scope(work_root, canon.load(work_root), "t-poi", original_scope["entry_sha256"],
+                           ["unrelated"], [], "A stale scope decision", "bob")
+
+
+@pytest.mark.parametrize("first", ["note", "scope"])
+def test_note_and_scope_decisions_preserve_each_others_pending_audits(work_root, first):
+    setup(work_root, "dnt")
+    request_path = work_root / "runs" / "de" / "canon-audit-t-poi.json"
+
+    def decide_scope():
+        data = canon.load(work_root)
+        event = canon.change_scope(work_root, data, "t-poi", canon.scope(data, "t-poi")["entry_sha256"],
+                                   ["unrelated"], ["named"], "Owner changed scope", "bob")
+        canon.save(work_root, data)
+        return event
+
+    if first == "note":
+        correct(work_root)
+        prior = lz_common.read_json(request_path, "audit")
+        event = decide_scope()
+    else:
+        decide_scope()
+        prior = lz_common.read_json(request_path, "audit")
+        event = correct(work_root)
+    request = lz_common.read_json(request_path, "audit")
+    assert request["field"] == "note" and request["before"] == OLD_NOTE and request["after"] == NEW_NOTE
+    assert request["scope_change"] == {"before": ["named"], "after": ["unrelated"]}
+    assert set(request["occurrences"]) == {"named", "unrelated", "substring"}
+    assert event["audit_requests_before"]["de"] == prior
+    assert canon.load_history(work_root)["events"][-1]["audit_requests_before"]["de"] == prior
+    assert canon.load_lock(work_root)["entries"][0]["occurrences"] == ["unrelated"]
+    built = packets.do_build(work_root, "audit", "de", TEMPLATES_DIR, entry_ids=["t-poi"])
+    metadata = packet_of(built["batches"][0])["canon_entry"]
+    assert metadata["field"] == "note" and metadata["after"] == NEW_NOTE
+    assert metadata["scope_change"]["after"] == ["unrelated"]
+
+
 def test_rebuilt_packet_refuses_an_old_answer_without_the_revision_echo(work_root):
     setup(work_root)
     correct(work_root)
