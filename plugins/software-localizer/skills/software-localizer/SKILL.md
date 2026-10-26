@@ -214,8 +214,10 @@ python3 S/packets.py build --root R --kind audit --locale L
 ```
 
 For each batch run a Claude subagent on its `prompt.md` (JSON only), save the answer, and
-`packets.py accept --root R --run <batch dir> --output <answer.json>`. Findings with a proposed
-replacement are stored, not applied. **Before asking the operator to approve them**, overlay
+`packets.py accept --root R --run <batch dir> --output <answer.json>`. Every accepted failure
+is stored with its issues and snapshot hashes. Findings without a proposed replacement appear
+in the report as unresolved; they cannot be accepted or exported. Proposed replacements are
+stored, not applied. **Before asking the operator to approve them**, overlay
 the current proposals in a scratch project and run its i18n checks
 ([procedure](references/project-checks.md)). Attach failures to the ids they name, with the
 exact proposed values and test output, alongside the audit report; a rejected value is a

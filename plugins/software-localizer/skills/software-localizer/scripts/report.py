@@ -2,7 +2,7 @@
 exported and pending candidates with source and context,
 adopted entries (translated with no candidate — `ledger.adopt` took the
 project's own value) shown with that current value, audit findings with
-proposals, escalated ids with their problems, canon candidates raised by
+or without proposed replacements, escalated ids with their problems, canon candidates raised by
 reviews, usage-research records a native speaker should check, and notes on
 `existing`/`human_locked` messages.
 
@@ -130,7 +130,10 @@ def _row_audit(msg_id, entry, message, current_value):
         out.append(f"  - source: {_value_text(message.get('source'))}")
     out.append(f"  - current: {_value_text(current_value)}")
     proposal = entry["audit_proposal"]
-    out.append(f"  - proposed: {_value_text(proposal.get('value'))} (checks {proposal.get('checks')})")
+    if proposal.get("value") is None:
+        out.append("  - unresolved: no proposed replacement; needs follow-up")
+    else:
+        out.append(f"  - proposed: {_value_text(proposal.get('value'))} (checks {proposal.get('checks')})")
     for issue in proposal.get("issues", []):
         out.append(f"  - issue: {issue.get('kind', '?')}: {issue.get('text', '')}")
     return out
