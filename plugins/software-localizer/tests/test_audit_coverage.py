@@ -445,6 +445,45 @@ def test_restricted_pass_does_not_retire_full_audit_proposal(work_root):
     assert _coverage(work_root)["fail"] == 1
 
 
+@pytest.mark.parametrize("old_scope,new_scope", [("full", "t-hello"), ("t-hello", "full")])
+@pytest.mark.parametrize("new_proposed", [None, "Hallo!"])
+def test_failure_preserves_actionable_proposal_from_other_scope(work_root, old_scope, new_scope, new_proposed):
+    _workspace(work_root)
+    _restricted_request(work_root)
+    first = _build(work_root, **({"entry_ids": [old_scope]} if old_scope != "full" else {}))["batches"][0]
+    _accept(work_root, first, {"a": _verdict(_packet(first)[1]["items"][0], "fail", "Guten Tag!")})
+    entry = ledger.load(work_root)["locales"]["de"]["a"]
+    original_proposal = copy.deepcopy(entry["audit_proposal"])
+    original_record = copy.deepcopy(entry["audit"] if old_scope == "full" else entry["canon_audits"][old_scope])
+    assert original_proposal["audit_scope"] == old_scope
+    assert original_proposal["checks"] == "pass"
+
+    next_build = _build(work_root, **({"fresh": True} if new_scope == "full" else {"entry_ids": [new_scope]}))
+    next_batch = next_build["batches"][0]
+    result = _accept(work_root, next_batch, {"a": _verdict(_packet(next_batch)[1]["items"][0], "fail", new_proposed)})
+    assert result["failed"] == ["a"] and result["audit_proposals"] == []
+    expected_conflicts = [{"id": "a", "scope": new_scope, "pending_scope": old_scope}] if new_proposed is not None else []
+    assert result["audit_proposal_conflicts"] == expected_conflicts
+    saved = ledger.load(work_root)["locales"]["de"]["a"]
+    assert saved["audit_proposal"] == original_proposal
+    assert saved["candidate"] is None
+    assert (saved["audit"] if old_scope == "full" else saved["canon_audits"][old_scope]) == original_record
+    new_record = saved["audit"] if new_scope == "full" else saved["canon_audits"][new_scope]
+    assert new_record["scope"] == new_scope
+    assert new_record["verdict"] == "fail" and new_record["proposed"] == new_proposed
+    assert new_record["issues"] == _verdict(_packet(next_batch)[1]["items"][0], "fail")["issues"]
+    if new_proposed is not None:
+        markdown = report.build_report(work_root, "de")
+        assert "saved replacement (not active): Hallo!" in markdown
+        assert "resolve any outstanding proposal" in markdown
+
+    # The other scope's finding cannot silently replace this approval route.
+    accepted = packets.do_accept_audit(work_root, "de", ["a"], "operator")
+    assert accepted["accepted"] == ["a"]
+    candidate = ledger.load(work_root)["locales"]["de"]["a"]["candidate"]
+    assert candidate["value"] == "Guten Tag!" and candidate["audit_scope"] == old_scope
+
+
 def test_stale_failure_is_labelled_and_missing_target_never_claimed_reviewed(work_root):
     cfg, messages = _workspace(work_root)
     batch = _build(work_root)["batches"][0]

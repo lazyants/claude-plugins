@@ -58,6 +58,12 @@ accepted verdict retires an older unaccepted proposal from the same scope before
 storing a new one, including when the new verdict passes or has no replacement. Findings with
 no replacement still appear in the report and need human attention.
 
+An outstanding replacement from another audit scope is preserved. The incoming verdict and
+its proposed value still persist; a competing replacement is reported in
+`audit_proposal_conflicts` and shown as saved evidence, not an active proposal. Resolve the
+outstanding proposal, then rerun the other scope (`--fresh` for full audits) to check and queue
+its replacement through the existing approval route.
+
 ## Canon research evidence
 
 `R/canon.research/<locale>.json`, one file per target locale, holds the usage research and its

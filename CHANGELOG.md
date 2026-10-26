@@ -72,6 +72,9 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 - Audit replies echo a snapshot token as well as the target hash, so a late answer cannot earn
   coverage for a rebuilt packet with changed inputs. Pending audit packets from earlier versions
   must be rebuilt and their audit turns rerun.
+- Pending replacements from other audit scopes are preserved. A competing replacement remains
+  in the saved verdict and report, with an explicit conflict instead of silently replacing the
+  active proposal.
 
 ## [software-localizer 0.5.0] — 2026-10-26
 

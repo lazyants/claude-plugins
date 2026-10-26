@@ -371,6 +371,11 @@ includes failures and messages still needing a current verdict. Findings without
 remain visible. A fresh same-scope verdict supersedes its older unaccepted proposal. These are
 audit records, not approval to modify the project ([details](references/state.md#audit-evidence-and-coverage)).
 
+Each message has one active replacement proposal. A failure from another audit scope preserves
+that pending replacement; any new replacement remains visible as saved evidence and is listed
+in `audit_proposal_conflicts`. Resolve the pending proposal, then rerun the other audit scope
+(`--fresh` for a full audit) before asking to approve its replacement.
+
 An accepted proposal still gets its own review verdict (step 6's review loop) before export.
 Changed proposals, including review counter-proposals, need a fresh project check before any
 new operator acceptance; results for an earlier value do not cover its replacement.

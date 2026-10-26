@@ -149,6 +149,14 @@ def _row_audit(msg_id, entry, message, current_value, record=None, stale=False, 
             out.append("  - proposal snapshot: stale; audit again before approval")
     elif record and record.get("verdict") == "fail" and record.get("proposed") is None:
         out.append("  - unresolved: no proposed replacement; needs follow-up")
+    if (record and record.get("proposed") is not None
+            and (not proposal or proposal.get("value") != record["proposed"])):
+        out.append(f"  - saved replacement (not active): {_value_text(record['proposed'])}")
+        if record.get("scope", "full") == "full":
+            out.append("  - next: resolve any outstanding proposal, then rerun this full audit with --fresh.")
+        else:
+            out.append("  - next: resolve any outstanding proposal, then rerun the restricted canon audit "
+                       f"with --entry {record['scope']}.")
     issues = record.get("issues", []) if record else (proposal or {}).get("issues", [])
     for issue in issues:
         label = "saved issue" if stale else "issue"
@@ -179,7 +187,8 @@ def _audit_rows(msg_id, entry, message, cfg, canon_lock, locale):
             continue
         stale = current_value is None or record.get("snapshot") != snapshot
         scoped_proposal = proposal if proposal_scope == scope else None
-        if record.get("verdict") == "fail" or record.get("issues") or stale or scoped_proposal:
+        if (record.get("verdict") == "fail" or record.get("issues") or stale or scoped_proposal
+                or record.get("proposed") is not None):
             rows.append((msg_id, entry, message, current_value, record, stale, scoped_proposal))
             used_proposal = used_proposal or scoped_proposal is not None
     if proposal and not used_proposal:

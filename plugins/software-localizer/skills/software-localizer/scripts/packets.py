@@ -1078,6 +1078,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
     parse_results = _parse_batch(root, cfg, list(items.values()), extra_parse_items)
 
     passed, failed_ids, escalated, proposals_stored = [], [], [], []
+    audit_proposal_conflicts = []
     new_canon_candidates = []
     invalid_canon_candidates = []
 
@@ -1221,22 +1222,33 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                 problems = checks_mod.check_candidate(
                     message, locale, proposed, source_parse, proposed_parse, canon_lock, audit_cfg,
                 )
-                proposals_stored.append(msg_id)
             entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
-            entry["audit_proposal"] = {
-                "audit_scope": audit_scope,
-                "value": proposed,
-                "value_sha256": lz_common.value_sha256(proposed) if proposed is not None else None,
-                "audited_target_sha256": item["value_sha256"],
-                "source_sha256": snapshot["source_sha256"],
-                "context_sha256": snapshot["context_sha256"],
-                "style_sha256": snapshot["style_sha256"],
-                "canon_sha256": snapshot["canon_sha256"],
-                "checks": ("fail" if problems else "pass") if proposed is not None else None,
-                "problems": problems,
-                "issues": verdict.get("issues", []),
-                "run": batch_name,
-            }
+            pending = entry.get("audit_proposal")
+            pending_scope = pending.get("audit_scope", "full") if pending else None
+            # Another scope's outstanding replacement was not judged here.
+            # Keep this verdict's alternative in its independent audit record.
+            if pending and pending.get("value") is not None and pending_scope != audit_scope:
+                if proposed is not None:
+                    audit_proposal_conflicts.append({
+                        "id": msg_id, "scope": audit_scope, "pending_scope": pending_scope,
+                    })
+            else:
+                entry["audit_proposal"] = {
+                    "audit_scope": audit_scope,
+                    "value": proposed,
+                    "value_sha256": lz_common.value_sha256(proposed) if proposed is not None else None,
+                    "audited_target_sha256": item["value_sha256"],
+                    "source_sha256": snapshot["source_sha256"],
+                    "context_sha256": snapshot["context_sha256"],
+                    "style_sha256": snapshot["style_sha256"],
+                    "canon_sha256": snapshot["canon_sha256"],
+                    "checks": ("fail" if problems else "pass") if proposed is not None else None,
+                    "problems": problems,
+                    "issues": verdict.get("issues", []),
+                    "run": batch_name,
+                }
+                if proposed is not None:
+                    proposals_stored.append(msg_id)
 
     if new_canon_candidates:
         lz_common.atomic_write_json(
@@ -1244,12 +1256,15 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             {"candidates": new_canon_candidates},
         )
 
-    return {
+    result = {
         "ok": True, "kind": kind, "locale": locale, "run": batch_name,
         "passed": passed, "failed": failed_ids, "missing": missing, "extra": extra_ids,
         "escalated": escalated, "audit_proposals": proposals_stored,
         "invalid_canon_candidates": invalid_canon_candidates,
     }
+    if kind == "audit":
+        result["audit_proposal_conflicts"] = audit_proposal_conflicts
+    return result
 
 
 def do_accept(root: Path, run_dir: Path, output_path: Path) -> dict:
