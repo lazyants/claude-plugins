@@ -93,7 +93,12 @@ def _select_records(transcript, tool_use_id):
                         session_ids.add(row.get("sessionId"))
                     if (row.get("type") == "user" and message.get("role") == "user"
                             and block.get("type") == "tool_result" and block.get("tool_use_id") == tool_use_id):
-                        results.append(block)
+                        selected = {"result": block}
+                        if "toolUseResult" in row:
+                            if sum(isinstance(b, dict) and b.get("type") == "tool_result" for b in content) != 1:
+                                raise HandoffError("ambiguous native completion metadata")
+                            selected["completion"] = row["toolUseResult"]
+                        results.append(selected)
                         session_ids.add(row.get("sessionId"))
     except (OSError, UnicodeError, AttributeError, TypeError) as exc:
         raise HandoffError(f"cannot read native session JSONL: {exc}") from exc
@@ -104,13 +109,10 @@ def _select_records(transcript, tool_use_id):
         raise HandoffError("need exactly one completed Agent request/result pair for tool_use_id")
     if len(session_ids) != 1 or not all(isinstance(s, str) and s for s in session_ids):
         raise HandoffError("request and result must belong to one native session")
-    return {"session_id": session_ids.pop(), **requests[0], "result": results[0]}
+    return {"session_id": session_ids.pop(), **requests[0], **results[0]}
 
 
-def _result_json(result):
-    if result.get("is_error"):
-        raise HandoffError("Agent returned an error")
-    content = result.get("content")
+def _text_content(content):
     if isinstance(content, list):
         if not content or any(not isinstance(b, dict) or b.get("type") != "text"
                               or not isinstance(b.get("text"), str) for b in content):
@@ -118,7 +120,23 @@ def _result_json(result):
         content = "\n".join(b["text"] for b in content)
     if not isinstance(content, str):
         raise HandoffError("Agent result has no text")
-    text = content.strip()
+    return content.strip()
+
+
+def _valid_metadata(tail):
+    metadata = (r"(?:agentId: [A-Za-z0-9_-]+(?: \((?:for resuming to continue this agent's work if needed"
+                r"|use to resume this agent if needed"
+                r"|use SendMessage with to: '[A-Za-z0-9_-]+', summary: '<5-10 word recap>' to continue this agent)"
+                r"\))?(?:\r?\n|$))?"
+                r"(?:<usage>\s*(?:total_tokens|subagent_tokens): [0-9]+\s+tool_uses: [0-9]+"
+                r"\s+duration_ms: [0-9]+\s*</usage>)?")
+    return not tail or re.fullmatch(metadata, tail) is not None
+
+
+def _result_json(result):
+    if result.get("is_error"):
+        raise HandoffError("Agent returned an error")
+    text = _text_content(result.get("content"))
     if text.startswith("```json\n") or text.startswith("```\n"):
         opening = text.index("\n") + 1
         closing = text.find("\n```", opening)
@@ -134,15 +152,52 @@ def _result_json(result):
         tail = text[end:].strip()
     # Claude adds its own resumption/usage metadata after the answer. No arbitrary
     # prefix/prose or second answer is accepted as evidence of the saved result.
-    metadata = (r"(?:agentId: [A-Za-z0-9_-]+(?: \((?:for resuming to continue this agent's work if needed"
-                r"|use to resume this agent if needed)\))?(?:\r?\n|$))?"
-                r"(?:<usage>\s*total_tokens: [0-9]+\s+tool_uses: [0-9]+"
-                r"\s+duration_ms: [0-9]+\s*</usage>)?")
-    if tail and not re.fullmatch(metadata, tail):
+    if not _valid_metadata(tail):
         raise HandoffError("unexpected text after Agent JSON answer")
     if not isinstance(answer, dict):
         raise HandoffError("Agent answer must be a JSON object")
     return answer
+
+
+def _native_answer(evidence, submitted):
+    result = evidence["result"]
+    completion = evidence.get("completion")
+    if completion is None:
+        return _result_json(result)
+    if (not isinstance(completion, dict) or completion.get("status") != "completed"
+            or not isinstance(completion.get("prompt"), str) or result.get("is_error")):
+        raise HandoffError("native Agent completion is missing or unfinished")
+    prompts = [submitted["prompt"]]
+    if isinstance(evidence.get("wire_input"), dict):
+        prompts.append(evidence["wire_input"]["prompt"])
+    matched = next((p for p in prompts if completion["prompt"].startswith(p)), None)
+    if matched is None:
+        raise HandoffError("native completed prompt differs from the submitted input")
+    if completion["prompt"] != matched and not any(
+            type(completion.get(k)) is int and completion[k] > 0 for k in ("harnessNoteCount", "harnessTailCount")):
+        raise HandoffError("unattributed additions to the native completed prompt")
+    if completion.get("agentType", submitted.get("subagent_type")) != submitted.get("subagent_type"):
+        raise HandoffError("native completion names another agent type")
+    if completion.get("handback") != "send":
+        return _result_json(result)
+    agent_id = completion.get("agentId")
+    report = completion.get("handbackReport")
+    if not isinstance(agent_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", agent_id) or not isinstance(report, dict):
+        raise HandoffError("native handback has no linked agent/report")
+    notice = (f'This agent\'s report was delivered to you as a message from "{agent_id}" '
+              '(its SubagentHandback call). Read it there; it is not repeated here.')
+    text = _text_content(result.get("content"))
+    if not text.startswith(notice) or not _valid_metadata(text[len(notice):].strip()):
+        raise HandoffError("handback notice differs from the completed Agent result")
+    return _result_json({"content": report.get("text")})
+
+
+def _check_prompt(prompt, prefix, suffix, packet):
+    if not isinstance(prompt, str) or not prompt.startswith(prefix) or not prompt.endswith(suffix):
+        raise HandoffError("submitted instructions differ from the complete original instructions")
+    payload = prompt[len(prefix):len(prompt) - len(suffix) if suffix else None]
+    if _digest(_json(payload)) != _digest(packet):
+        raise HandoffError("submitted packet differs after JSON decoding (input-fidelity failure)")
 
 
 def _check(run_dir, output_path, evidence):
@@ -169,27 +224,26 @@ def _check(run_dir, output_path, evidence):
     if not isinstance(submitted, dict) or not isinstance(submitted.get("prompt"), str):
         raise HandoffError("Agent request has no prompt")
     if "wire_input" in evidence:
-        if not isinstance(evidence["wire_input"], dict) or _digest(evidence["wire_input"]) != _digest(submitted):
+        wire = evidence["wire_input"]
+        if (not isinstance(wire, dict)
+                or _digest({k: v for k, v in wire.items() if k != "prompt"}) !=
+                _digest({k: v for k, v in submitted.items() if k != "prompt"})):
             raise HandoffError("native wire input differs from the recorded Agent arguments")
-        submitted = evidence["wire_input"]
+        _check_prompt(wire.get("prompt"), prefix, suffix, packet)
     if submitted.get("resume") or submitted.get("run_in_background"):
         raise HandoffError("use a fresh, synchronous Agent turn")
     if (packet["kind"] in ("research", "research_verify")
             and submitted.get("subagent_type") != RESEARCH_AGENT):
         raise HandoffError("research requires the web-only software-localizer:usage-research agent")
-    prompt = submitted["prompt"]
-    if not prompt.startswith(prefix) or not prompt.endswith(suffix):
-        raise HandoffError("submitted instructions differ from the complete original instructions")
-    payload = prompt[len(prefix):len(prompt) - len(suffix) if suffix else None]
-    if _digest(_json(payload)) != _digest(packet):
-        raise HandoffError("submitted packet differs after JSON decoding (input-fidelity failure)")
+    _check_prompt(submitted["prompt"], prefix, suffix, packet)
     output = _read_json(output_path)
-    if _digest(_result_json(result)) != _digest(output):
+    if _digest(_native_answer(evidence, submitted)) != _digest(output):
         raise HandoffError("saved output differs from the linked Agent result")
     bindings = {"packet_sha256": _digest(packet), "instructions_sha256": _digest(parts),
             "request_sha256": _digest(request), "result_sha256": _digest(result),
             "output_sha256": _digest(output), "tool_use_id": request["id"],
             "wire_input_sha256": _digest(evidence.get("wire_input")),
+            "completion_sha256": _digest(evidence.get("completion")),
             "session_id": evidence["session_id"]}
     return bindings, packet, output
 

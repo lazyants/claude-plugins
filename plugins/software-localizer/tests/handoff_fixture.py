@@ -10,7 +10,7 @@ from pathlib import Path
 import packet_handoff
 
 
-def record_agent_turn(run_dir, output_path, request=None, result=None, wire_input=None):
+def record_agent_turn(run_dir, output_path, request=None, result=None, wire_input=None, completion=None):
     run_dir, output_path = Path(run_dir), Path(output_path)
     packet = json.loads((run_dir / "packet.json").read_text(encoding="utf-8"))
     if packet["kind"] not in packet_handoff.GUARDED_KINDS:
@@ -28,6 +28,8 @@ def record_agent_turn(run_dir, output_path, request=None, result=None, wire_inpu
     ]
     if wire_input is not None:
         rows[0]["wireToolInputs"] = {tool_id: wire_input}
+    if completion is not None:
+        rows[1]["toolUseResult"] = completion
     transcript = run_dir / "synthetic-session.jsonl"
     transcript.write_text("".join(json.dumps(row, ensure_ascii=True) + "\n" for row in rows), encoding="utf-8")
     return packet_handoff.capture(run_dir, output_path, transcript, tool_id)

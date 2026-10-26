@@ -162,6 +162,55 @@ def test_native_wire_input_is_bound_and_must_match_recorded_arguments(work_root,
         packet_handoff.verify(directory, output)
 
 
+def test_native_wire_and_display_may_use_equivalent_packet_escaping(work_root):
+    directory, output, packet = batch(work_root)
+    request = request_for(directory, packet, ascii=False)
+    wire = request_for(directory, packet, ascii=True)
+    assert request["prompt"] != wire["prompt"]
+    record_agent_turn(directory, output, request, wire_input=wire)
+    packet_handoff.verify(directory, output)
+
+
+@pytest.mark.parametrize("mutation", [None, "equivalent_wire", "status", "agent", "notice", "report", "prompt", "unattributed", "tail"])
+def test_native_completed_handback_is_bound_to_request_agent_and_returned_json(work_root, mutation):
+    directory, output, packet = batch(work_root)
+    request = request_for(directory, packet)
+    notice = ('This agent\'s report was delivered to you as a message from "fixture" '
+              '(its SubagentHandback call). Read it there; it is not repeated here.')
+    result = [{"type": "text", "text": notice + "\n\nagentId: fixture (use SendMessage with to: 'fixture', "
+               "summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 5\n"
+               "tool_uses: 0\nduration_ms: 8</usage>"}]
+    completion = {"status": "completed", "agentId": "fixture", "agentType": "general-purpose",
+                  "handback": "send", "handbackReport": {"text": output.read_text()},
+                  "prompt": request["prompt"] + "\n<native-runtime-note>fixture</native-runtime-note>",
+                  "harnessNoteCount": 1}
+    wire = None
+    if mutation == "equivalent_wire":
+        wire = request_for(directory, packet, ascii=True)
+        completion["prompt"] = wire["prompt"]
+    if mutation == "status":
+        completion["status"] = "async_launched"
+    elif mutation == "agent":
+        completion["agentType"] = "other"
+    elif mutation == "notice":
+        completion["agentId"] = "other"
+    elif mutation == "report":
+        completion["handbackReport"]["text"] = '{"verdicts": {}}'
+    elif mutation == "prompt":
+        completion["prompt"] = completion["prompt"].replace("\u202f", " ")
+    elif mutation == "unattributed":
+        completion["harnessNoteCount"] = 0
+    elif mutation == "tail":
+        result[0]["text"] += '\n{"second":true}'
+    if mutation not in (None, "equivalent_wire"):
+        with pytest.raises(SystemExit):
+            record_agent_turn(directory, output, request, result=result, completion=completion)
+    else:
+        receipt = record_agent_turn(directory, output, request, result=result, completion=completion, wire_input=wire)
+        assert receipt["completion_sha256"] == lz_common.sha256_json(completion)
+        packet_handoff.verify(directory, output)
+
+
 @pytest.mark.parametrize("value", [[], None, True, {"schema": True, "status": "verified"}])
 def test_malformed_receipt_refuses_with_protocol_error(work_root, value):
     directory, output, _ = batch(work_root)

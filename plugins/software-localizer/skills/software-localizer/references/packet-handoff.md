@@ -31,7 +31,9 @@ The capture reads the actual assistant `tool_use` and corresponding user
 `tool_result`, checks that they belong to one session, and binds the receipt to
 their complete records, the packet, original instructions and saved answer. It
 also retains `wireToolInputs` for that call when the native log provides it and
-refuses disagreement between wire input and the recorded Agent arguments. It
+checks both prompts against the original instructions and decoded packet. Wire
+and displayed prompts may use different equivalent JSON escaping; other argument
+fields must agree. It
 compares decoded packet values and the entire instruction prefix and suffix;
 equivalent JSON escaping/formatting is allowed. String whitespace and codepoints
 are never normalized. Missing, conflicting, resumed, asynchronous, error or
@@ -44,6 +46,14 @@ The output must equal the JSON returned by that call after decoding. Native text
 blocks, optional JSON fences and trailing Claude `agentId`/usage metadata are
 supported. Metadata must match the complete native format; its prefix cannot
 hide another answer or arbitrary prose. The receipt is written beside the answer as `<answer>.receipt.json`.
+Current native `SubagentHandback` completions are supported through the same
+result row's `toolUseResult.handbackReport`: the completed status, agent type,
+agent id and matching handback notice are checked, and the entire native
+completion is bound into the receipt. Its completed prompt must start with the
+exact checked submitted prompt (or its independently checked wire representation).
+Additional native runtime harness notes need
+native harness attribution and are retained in that completion; they do not
+replace or normalize the original instruction/packet span.
 Acceptance replays the evidence checks and checks all receipt bindings before
 writing any ledger, canon candidates or research. It consumes those verified
 packet/output objects rather than rereading an unchecked answer.
@@ -71,8 +81,9 @@ are used as exact-value evidence.
 
 The trusted parent and its local session log are the root of this check. This is
 not an attestation against a parent that forges logs or edits all evidence. It
-verifies the submitted native Agent prompt, not hidden system messages or a
-provider's internal tokenization. It establishes input transport only: it does
+verifies the submitted native Agent prompt, not hidden system messages, the
+correctness of native runtime harness additions, or a provider's internal
+tokenization. It establishes input transport only: it does
 not establish linguistic correctness, source truth, research completeness or
 product improvement. The separate schema, value, research and project checks
 still apply.
