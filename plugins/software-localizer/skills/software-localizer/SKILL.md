@@ -60,6 +60,10 @@ The reserved `_packets` directory keeps new runs separate from legacy batch name
 7. **Project checks precede approval and export.** Test proposed values in a scratch project
    before asking a person to accept audit fixes, and test the final reviewed values again before
    live export. A model verdict or an export dry run does not run the project's tests.
+8. **A valid fragment can still need a project change.** When a locale needs different boundary
+   whitespace, keep the core rejection and follow the
+   [fragment-boundary decision route](references/fragment-boundaries.md). Adapter acceptance,
+   context notes and passing project tests do not authorize an exception.
 
 ## 1. Intake
 
@@ -288,6 +292,13 @@ python3 S/packets.py build --root R --kind review --locale L
 Claude subagent per batch (`prompt.md`, JSON only) → save → `packets.py accept`. Repeat
 translate (fix rounds carry the problems) and review until `packets.py build` finds nothing, or
 the rest is `escalated`.
+
+Before retrying a `whitespace` failure, inspect the caller when the value is a sentence fragment.
+If the locale needs a different boundary, pause that message and save its failed value and check
+output before another packet can overwrite them; follow the
+[caller/catalog escalation route](references/fragment-boundaries.md) instead of asking the model
+to trim it into compliance. This decision is made by the orchestrator; the scripts do not detect
+locale-specific composition or pause retries automatically.
 
 ## 7. Export and report
 

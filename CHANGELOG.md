@@ -2,6 +2,18 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.3.5] — 2026-10-26
+
+### Added
+
+- An explicit decision route for locale-specific fragment boundaries (#1017). When correct
+  composition needs different boundary whitespace, retain the core rejection and escalate to
+  a reviewed caller/catalog change, then collect, check and review the changed composition
+  again. Adapter acceptance and passing project tests do not override the strict default.
+- A golden English punctuation-suffix/German word-suffix fixture shows why trimming can join
+  words, and how a coordinated whole-message composition passes without allowing unrelated
+  boundary changes. This is a synthetic core fixture, not a new project language audit.
+
 ## [software-localizer 0.3.4] — 2026-10-26
 
 ### Added

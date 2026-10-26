@@ -501,6 +501,44 @@ def test_whitespace_nonplural_fail_dropped_leading_space():
     assert len(by_check(problems, "whitespace")) == 1
 
 
+@pytest.fixture
+def fragment_boundaries():
+    return json.loads((Path(__file__).parent / "fixtures" / "fragment_boundaries.json").read_text(encoding="utf-8"))
+
+
+def test_fragment_boundary_mismatch_stays_rejected(fragment_boundaries):
+    fragment = fragment_boundaries["fragment"]
+    message = make_message(fragment["id"], fragment["source"])
+    assert fragment["source_link_text"] + fragment["source"] == fragment["source_joined"]
+    assert fragment["target_link_text"] + fragment["target"] == fragment["target_joined"]
+    assert check_candidate(message, "de", fragment["target"], ok(), ok(), EMPTY_CANON, DEFAULT_CFG) == [{
+        "check": "whitespace",
+        "detail": "expected leading '' / trailing '', got leading ' ' / trailing ''",
+    }]
+    # Trimming satisfies the core boundary but breaks the adjacent caller's text.
+    trimmed = fragment["target"].lstrip()
+    assert check_candidate(message, "de", trimmed, ok(), ok(), EMPTY_CANON, DEFAULT_CFG) == []
+    assert fragment["target_link_text"] + trimmed == fragment["trimmed_joined"]
+    assert fragment["trimmed_joined"] != fragment["target_joined"]
+
+
+def test_coordinated_whole_message_preserves_link_and_spacing(fragment_boundaries):
+    whole = fragment_boundaries["whole_message"]
+    message = make_message(whole["id"], whole["source"])
+    parsed = ok([arg("privacyPolicy")])
+    assert check_candidate(message, "de", whole["target"], parsed, parsed, EMPTY_CANON, DEFAULT_CFG) == []
+    assert whole["target"].format(privacyPolicy=fragment_boundaries["fragment"]["target_link_text"]) == whole["target_rendered"]
+
+
+@pytest.mark.parametrize("leading,trailing", [(" ", ""), ("", " "), ("\t", ""), ("", "\n")])
+def test_whole_message_does_not_allow_unrelated_boundary_changes(fragment_boundaries, leading, trailing):
+    whole = fragment_boundaries["whole_message"]
+    message = make_message(whole["id"], whole["source"])
+    parsed = ok([arg("privacyPolicy")])
+    problems = check_candidate(message, "de", leading + whole["target"] + trailing, parsed, parsed, EMPTY_CANON, DEFAULT_CFG)
+    assert [problem["check"] for problem in problems] == ["whitespace"]
+
+
 def test_whitespace_plural_pass():
     source_forms = ["no items", "  many items  "]
     message = make_plural_message(

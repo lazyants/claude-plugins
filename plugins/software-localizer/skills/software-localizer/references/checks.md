@@ -20,6 +20,11 @@ Why the singular form is not the model for plural parity: in Russian the `one` f
 21, 31, 101…, so "один файл" without the number would be wrong there. The project's plural
 rule, through the adapter's `exact` flag, decides which forms may drop the count.
 
+Boundary whitespace is an exact source contract, including for an accepted adapter. If a
+locale needs a different boundary to compose a sentence correctly, follow the
+[fragment-boundary decision route](fragment-boundaries.md): preserve the rejection and escalate
+to a coordinated caller/catalog change. The current translation path has no whitespace override.
+
 ## When a locale needs to repeat a named argument
 
 Non-plural messages require the same **number of occurrences of each signature** as the
