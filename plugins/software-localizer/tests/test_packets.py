@@ -1479,6 +1479,7 @@ def test_accept_audit_without_replacement_survives_save_load_and_report(work_roo
     entry = saved["locales"]["de"]["a"]
     finding = entry["audit_proposal"]
     assert finding == {
+        "audit_scope": "full",
         "value": None, "value_sha256": None, "checks": None, "problems": [], "issues": issues,
         "audited_target_sha256": item["value_sha256"],
         "source_sha256": ledger_mod.source_sha256(message),
@@ -1507,7 +1508,7 @@ def test_accept_audit_without_replacement_survives_save_load_and_report(work_roo
 
 
 @pytest.mark.parametrize("proposed", [None, "Hallo!"])
-def test_accept_audit_retains_packet_style_provenance(work_root, proposed):
+def test_accept_audit_refuses_changed_live_style_without_mutating_ledger(work_root, proposed):
     cfg = make_cfg()
     message = make_message("a", "Hello", targets={"de": "Hallo"})
     run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": make_entry("existing")}}, "audit", "de")
@@ -1519,17 +1520,18 @@ def test_accept_audit_retains_packet_style_provenance(work_root, proposed):
     changed_cfg = {**cfg, "style": {"de": {"formality": "du", "notes": "Changed since build."}}}
     lz_common.atomic_write_json(work_root / "localize.json", changed_cfg)
 
-    packets.do_accept(work_root, run_dir, output_path)
-    finding = ledger_mod.load(work_root)["locales"]["de"]["a"]["audit_proposal"]
-    assert finding["style_sha256"] == ledger_mod.style_sha256(cfg, "de")
-    assert finding["style_sha256"] != ledger_mod.style_sha256(changed_cfg, "de")
+    before = ledger_mod.load(work_root)
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == ["a"]
+    assert result["passed"] == result["failed"] == result["audit_proposals"] == []
+    assert ledger_mod.load(work_root) == before
 
 
-def test_accept_audit_without_replacement_replaces_old_proposal(work_root):
+def test_accept_audit_without_replacement_replaces_known_full_scope_proposal(work_root):
     cfg = make_cfg()
     message = make_message("a", "Hello", targets={"de": "Hallo"})
     entry = make_entry("existing")
-    entry["audit_proposal"] = {"value": "Old correction", "checks": "pass", "issues": []}
+    entry["audit_proposal"] = {"audit_scope": "full", "value": "Old correction", "checks": "pass", "issues": []}
     run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": entry}}, "audit", "de")
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     output_path = write_output(run_dir, {"verdicts": {"a": {
@@ -1542,21 +1544,26 @@ def test_accept_audit_without_replacement_replaces_old_proposal(work_root):
     assert packets.do_accept_audit(work_root, "de", ["a"], "alice")["accepted"] == []
 
 
-def test_accept_audit_pass_does_not_mutate_ledger(work_root):
+def test_accept_audit_pass_persists_provenance_without_changing_translation_state(work_root):
     cfg = make_cfg()
     msgs = make_messages([make_message("a", "Hello", targets={"de": "Hallo"})])
     run_dir = build_one_batch(work_root, cfg, msgs, {"de": {"a": make_entry("existing")}}, "audit", "de")
+    before = ledger_mod.load(work_root)["locales"]["de"]["a"]
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     value_sha = packet["items"][0]["value_sha256"]
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": value_sha, "verdict": "pass", "issues": [], "proposed": None, "new_canon_candidates": [],
+        "value_sha256": value_sha, "verdict": "pass",
+        "issues": [], "proposed": None, "new_canon_candidates": [],
     }}})
 
     packets.do_accept(work_root, run_dir, output_path)
     ledger_data = ledger_mod.load(work_root)
     entry = ledger_data["locales"]["de"]["a"]
-    assert entry["candidate"] is None
+    assert {key: entry[key] for key in before} == before
     assert entry.get("audit_proposal") is None
+    assert entry["audit"]["verdict"] == "pass"
+    assert entry["audit"]["snapshot"] == ledger_mod.audit_snapshot(msgs["messages"][0], "de", cfg, EMPTY_CANON_LOCK)
+    assert entry["audit"]["run"] == packet["batch"]
 
 
 # --- accept-audit -----------------------------------------------------------

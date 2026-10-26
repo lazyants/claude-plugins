@@ -1,6 +1,6 @@
 """Read-only status report. Never writes.
 
-Reports counts per locale and state from the ledger, whether
+Reports counts per locale and state, current audit coverage, whether
 `adapter.lock.json` is present and current, and the next command to run.
 Every input is read defensively (a missing or corrupt file is reported as
 `"absent"`/`"unknown"`, never a crash): the operator runs this at any point
@@ -37,7 +37,7 @@ def _read_optional(path: Path):
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
 
 
@@ -63,6 +63,8 @@ def _load_ledger(root: Path) -> dict:
             if not isinstance(entries, dict):
                 continue
             locale = data.get("locale", path.stem)
+            if not isinstance(locale, str):
+                continue
             locales[locale] = entries
     return {"schema": 1, "locales": locales}
 
@@ -77,8 +79,35 @@ def _ledger_counts(ledger: dict) -> dict:
         by_state: dict = {}
         for entry in entries.values():
             state = entry.get("state", "unknown") if isinstance(entry, dict) else "unknown"
+            if not isinstance(state, str):
+                state = "unknown"
             by_state[state] = by_state.get(state, 0) + 1
         result[locale] = by_state
+    return result
+
+
+def _audit_counts(root: Path, cfg, cfg_problems, messages, ledger: dict) -> dict:
+    """Unknown inputs yield null coverage, never an apparent clean audit.
+
+    An absent canon lock means an empty canon, as in canon.load_lock and
+    packet building; a present but unreadable lock does not mean empty.
+    """
+    locales = cfg.get("target_locales", []) if isinstance(cfg, dict) else []
+    locales = [loc for loc in locales if isinstance(loc, str)] if isinstance(locales, list) else []
+    result = {loc: None for loc in locales}
+    if cfg_problems or lz_common.messages_shape_problem(messages):
+        return result
+    lock_path = root / "canon.lock.json"
+    canon_lock = _read_optional(lock_path) if lock_path.exists() else {"entries": []}
+    if not isinstance(canon_lock, dict) or not isinstance(canon_lock.get("entries"), list):
+        return result
+    for locale in locales:
+        try:
+            result[locale] = ledger_mod.audit_coverage(ledger, messages, cfg, canon_lock, locale)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            # Status is useful during incomplete writes and manual recovery.
+            # A malformed snapshot is unknown, never proof of completion.
+            result[locale] = None
     return result
 
 
@@ -127,7 +156,8 @@ def _adapter_lock_status(root: Path, cfg) -> dict:
     return {"present": True, "current": lz_common.adapter_lock_matches(lock, current)}
 
 
-def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock, messages, ledger, ledger_counts) -> str:
+def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock, messages, ledger, ledger_counts,
+                  audit_counts=None) -> str:
     """A best-effort staging hint. This is presence-based, not a full
     re-derivation of pipeline correctness (that is `export_values.py`'s job
     at export time)."""
@@ -158,7 +188,7 @@ def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock
     # last.
     for locale in target_locales:
         entries = locales_entries.get(locale, {})
-        if any(ledger_mod.candidate_needs_review(e) for e in entries.values()):
+        if any(ledger_mod.candidate_needs_review(e) for e in entries.values() if isinstance(e, dict)):
             return f"packets.py build --root {root_display} --kind review --locale {locale}"
 
     for locale in target_locales:
@@ -176,7 +206,19 @@ def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock
 
     for locale in target_locales:
         counts = ledger_counts.get(locale, {})
-        if counts.get("existing", 0) or counts.get("translated", 0):
+        coverage = (audit_counts or {}).get(locale)
+        if coverage is not None:
+            remaining = set(coverage["ids"]["stale"] + coverage["ids"]["unreviewed"])
+            entries = locales_entries.get(locale, {})
+            if not any(
+                msg["id"] in remaining
+                and isinstance(entries.get(msg["id"]), dict)
+                and entries[msg["id"]].get("state") in ("existing", "translated", "human_locked")
+                and msg.get("targets", {}).get(locale) is not None
+                for msg in messages["messages"]
+            ):
+                continue
+        if counts.get("existing", 0) or counts.get("translated", 0) or counts.get("human_locked", 0):
             return f"packets.py build --root {root_display} --kind audit --locale {locale} (optional: audit review)"
 
     return f"export_values.py --root {root_display} --locale <locale>, then report.py --root {root_display} --locale <locale>"
@@ -199,9 +241,10 @@ def main() -> int:
     messages = _read_optional(root / "messages.json")
     ledger = _load_ledger(root)
     ledger_counts = _ledger_counts(ledger)
+    audit_counts = _audit_counts(root, cfg, cfg_problems, messages, ledger)
 
     next_command = _next_command(
-        root, cfg, cfg_problems, adapter_check_ran, adapter_lock, messages, ledger, ledger_counts
+        root, cfg, cfg_problems, adapter_check_ran, adapter_lock, messages, ledger, ledger_counts, audit_counts
     )
 
     result = {
@@ -212,6 +255,7 @@ def main() -> int:
         "messages_collected": messages is not None,
         "ledger_present": bool(ledger.get("locales")),
         "counts": ledger_counts,
+        "audit": audit_counts,
         "next_command": next_command,
     }
 
@@ -223,6 +267,18 @@ def main() -> int:
         by_state = ledger_counts[locale]
         parts = ", ".join(f"{state}={count}" for state, count in sorted(by_state.items()))
         print(f"  {locale}: {parts or '(no entries)'}", file=sys.stderr)
+    for locale, coverage in sorted(audit_counts.items()):
+        if coverage is None:
+            print(f"  audit {locale}: unknown (inputs missing or invalid)", file=sys.stderr)
+            continue
+        print(
+            f"  audit {locale}: reviewed={coverage['reviewed']}/{coverage['total']}, "
+            + ", ".join(f"{key}={coverage[key]}" for key in ("pass", "fail", "unresolved", "stale", "unreviewed")),
+            file=sys.stderr,
+        )
+        for key in ("stale", "unreviewed"):
+            if coverage["ids"][key]:
+                print(f"    {key}: {', '.join(coverage['ids'][key])}", file=sys.stderr)
     print(f"  next: {next_command}", file=sys.stderr)
 
     lz_common.emit(result)

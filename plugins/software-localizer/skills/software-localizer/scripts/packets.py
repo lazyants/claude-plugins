@@ -197,9 +197,14 @@ def select_review(ledger_data: dict, locale: str) -> list:
     return [i for i, e in entries.items() if ledger_mod.candidate_needs_review(e)]
 
 
-def select_audit(ledger_data: dict, locale: str) -> list:
+def select_audit(ledger_data: dict, locale: str, messages=None, cfg=None, canon_lock=None, fresh=False) -> list:
     entries = ledger_mod.locale_entries(ledger_data, locale)
-    return [i for i, e in entries.items() if e.get("state") in AUDIT_STATES]
+    reviewed = set()
+    if not fresh and messages is not None:
+        coverage = ledger_mod.audit_coverage(ledger_data, messages, cfg, canon_lock, locale)
+        reviewed.update(coverage["ids"]["pass"])
+        reviewed.update(coverage["ids"]["fail"])
+    return [i for i, e in entries.items() if e.get("state") in AUDIT_STATES and i not in reviewed]
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +387,16 @@ def build_audit_item(message: dict, locale: str):
     return item
 
 
+def _audit_item_snapshot(packet: dict, item: dict) -> dict:
+    locale = packet["locale"]
+    message = {**item_to_message(item, locale), "targets": {locale: item["value"]}}
+    cfg = {"style": {locale: packet.get("style")}}
+    return ledger_mod.audit_snapshot(
+        message, locale, cfg, packet.get("canon", {"entries": []}),
+        canon_context=packet.get("canon_context", {}).get(item["id"], {}),
+    )
+
+
 def build_canon_item(message: dict, target_locales: list) -> dict:
     targets = {}
     for locale in target_locales:
@@ -394,9 +409,11 @@ def build_canon_item(message: dict, target_locales: list) -> dict:
     return item
 
 
-def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None) -> dict:
+def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None, fresh=False) -> dict:
     if kind not in KINDS + RESEARCH_KINDS:
         lz_common.fail(f"unknown packet kind: {kind}", lz_common.EXIT_CANNOT)
+    if fresh and (kind != "audit" or entry_ids):
+        lz_common.fail("--fresh is only valid with an unrestricted --kind audit", lz_common.EXIT_CANNOT)
     if kind == "audit" and entry_ids and len(entry_ids) > 1:
         lz_common.fail("--kind audit takes exactly one --entry", lz_common.EXIT_CANNOT)
     cfg = lz_common.load_config(root)
@@ -446,7 +463,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None)
     elif kind == "review":
         selected_ids = select_review(ledger_data, locale)
     else:
-        selected_ids = select_audit(ledger_data, locale)
+        selected_ids = select_audit(ledger_data, locale, messages, cfg, canon_lock, fresh=fresh)
 
     entries = ledger_mod.locale_entries(ledger_data, locale)
     style = cfg["style"][locale]
@@ -996,7 +1013,16 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         lz_common.fail(f"{kind} output is missing 'verdicts'", lz_common.EXIT_FAIL)
 
     canon_lock = packet.get("canon", {"entries": []})
+    audit_scope = (packet.get("canon_entry") or {}).get("entry", "full")
+    # The admission gate below rejects changed inputs. Keep the packet's
+    # frozen style for checking a proposal after its snapshot matches.
+    audit_cfg = {**cfg, "style": {locale: packet.get("style")}}
+    audit_at = lz_common.now_iso()
+    packet_sha = lz_common.sha256_json(packet)
     missing, extra_ids = [], sorted(set(verdicts) - set(items))
+    if kind == "audit":
+        current_by_id = message_by_id(lz_common.load_messages(root / "messages.json"))
+        current_canon_lock = canon_mod.load_lock(root)
 
     # Gather every proposed value's forms up front for one batched parse call.
     valid_verdicts = {}
@@ -1013,6 +1039,15 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             # as a hash mismatch: no rounds increment, no escalation.
             missing.append(msg_id)
             continue
+        if kind == "audit":
+            current_message = current_by_id.get(msg_id)
+            if (current_message is None or _audit_item_snapshot(packet, item)
+                    != ledger_mod.audit_snapshot(current_message, locale, cfg, current_canon_lock)):
+                # A retained run can still have a valid handoff receipt after
+                # a different batch audited newer inputs. Do not let replay
+                # replace that newer record or retire its correction.
+                missing.append(msg_id)
+                continue
         if kind == "review" and not _review_candidate_still_matches(ledger_data, locale, msg_id, item):
             # The candidate this packet item snapshot was built from has
             # since been rebuilt (context or style changed and it was
@@ -1028,9 +1063,11 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         proposed = verdict.get("proposed")
         if verdict.get("verdict") == "fail" and proposed is not None:
             extra_parse_items.extend(_parse_items(msg_id, "proposed", checks_mod.forms_of(proposed)))
-    parse_results = _parse_batch(root, cfg, list(items.values()), extra_parse_items)
+    parse_items = [items[msg_id] for msg_id in valid_verdicts] if kind == "audit" else list(items.values())
+    parse_results = _parse_batch(root, cfg, parse_items, extra_parse_items)
 
     passed, failed_ids, escalated, proposals_stored = [], [], [], []
+    audit_proposal_conflicts = []
     new_canon_candidates = []
     invalid_canon_candidates = []
 
@@ -1043,6 +1080,34 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             "issues": verdict.get("issues", []),
             "run": batch_name,
         }
+
+        if kind == "audit":
+            snapshot = _audit_item_snapshot(packet, item)
+            record = {
+                "snapshot": snapshot,
+                "verdict": verdict["verdict"],
+                "issues": verdict.get("issues", []),
+                "proposed": verdict.get("proposed"),
+                "accepted_at": audit_at,
+                "packet_sha256": packet_sha,
+                "run": batch_name,
+                "run_dir": str(run_dir.resolve()),
+                "scope": audit_scope,
+            }
+            entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
+            if packet.get("canon_entry") is None:
+                entry["audit"] = record
+            else:
+                entry.setdefault("canon_audits", {})[audit_scope] = record
+            previous = entry.get("audit_proposal")
+            if previous:
+                if previous.get("value") is None or previous.get("checks") != "pass":
+                    # Retain the exact evidence without occupying the slot a
+                    # person can promote only after a replacement passes checks.
+                    entry.setdefault("legacy_audit_findings", []).append(previous)
+                    entry["audit_proposal"] = None
+                elif previous.get("audit_scope") == audit_scope:
+                    entry["audit_proposal"] = None
 
         raw_candidates = verdict.get("new_canon_candidates")
         if raw_candidates is None:
@@ -1108,6 +1173,7 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                     # cleared when this candidate was accepted) -- it could
                     # never be exported.
                     entry["audit_proposal"] = {
+                        "audit_scope": old_candidate.get("audit_scope"),
                         "value": proposed,
                         "value_sha256": lz_common.value_sha256(proposed),
                         "audited_target_sha256": old_candidate.get("audited_target_sha256"),
@@ -1140,7 +1206,6 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         else:  # audit
             failed_ids.append(msg_id)
             proposed = verdict.get("proposed")
-            audit_cfg = {**cfg, "style": {locale: packet.get("style", cfg.get("style", {}).get(locale))}}
             problems = []
             if proposed is not None:
                 is_plural = item.get("target_labels") is not None
@@ -1151,21 +1216,33 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                 problems = checks_mod.check_candidate(
                     message, locale, proposed, source_parse, proposed_parse, canon_lock, audit_cfg,
                 )
-                proposals_stored.append(msg_id)
             entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
-            entry["audit_proposal"] = {
-                "value": proposed,
-                "value_sha256": lz_common.value_sha256(proposed) if proposed is not None else None,
-                "audited_target_sha256": item["value_sha256"],
-                "source_sha256": ledger_mod.source_sha256(message),
-                "context_sha256": ledger_mod.context_sha256(message, locale),
-                "style_sha256": ledger_mod.style_sha256(audit_cfg, locale),
-                "canon_sha256": ledger_mod.canon_sha256(message, canon_lock, locale),
-                "checks": ("fail" if problems else "pass") if proposed is not None else None,
-                "problems": problems,
-                "issues": verdict.get("issues", []),
-                "run": batch_name,
-            }
+            pending = entry.get("audit_proposal")
+            pending_scope = pending.get("audit_scope") if pending else None
+            # Only an approvable replacement can still occupy this slot after
+            # retirement above; a different or unknown scope was not judged here.
+            if pending and pending_scope != audit_scope:
+                if proposed is not None:
+                    audit_proposal_conflicts.append({
+                        "id": msg_id, "scope": audit_scope, "pending_scope": pending_scope,
+                    })
+            else:
+                entry["audit_proposal"] = {
+                    "audit_scope": audit_scope,
+                    "value": proposed,
+                    "value_sha256": lz_common.value_sha256(proposed) if proposed is not None else None,
+                    "audited_target_sha256": item["value_sha256"],
+                    "source_sha256": snapshot["source_sha256"],
+                    "context_sha256": snapshot["context_sha256"],
+                    "style_sha256": snapshot["style_sha256"],
+                    "canon_sha256": snapshot["canon_sha256"],
+                    "checks": ("fail" if problems else "pass") if proposed is not None else None,
+                    "problems": problems,
+                    "issues": verdict.get("issues", []),
+                    "run": batch_name,
+                }
+                if proposed is not None:
+                    proposals_stored.append(msg_id)
 
     if new_canon_candidates:
         lz_common.atomic_write_json(
@@ -1173,12 +1250,15 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             {"candidates": new_canon_candidates},
         )
 
-    return {
+    result = {
         "ok": True, "kind": kind, "locale": locale, "run": batch_name,
         "passed": passed, "failed": failed_ids, "missing": missing, "extra": extra_ids,
         "escalated": escalated, "audit_proposals": proposals_stored,
         "invalid_canon_candidates": invalid_canon_candidates,
     }
+    if kind == "audit":
+        result["audit_proposal_conflicts"] = audit_proposal_conflicts
+    return result
 
 
 def do_accept(root: Path, run_dir: Path, output_path: Path) -> dict:
@@ -1588,6 +1668,7 @@ def do_accept_audit(root: Path, locale: str, ids: list, by: str) -> dict:
             "value": proposal["value"],
             "value_sha256": proposal["value_sha256"],
             "origin": "audit",
+            "audit_scope": proposal.get("audit_scope"),
             "source_sha256": proposal["source_sha256"],
             "context_sha256": proposal["context_sha256"],
             "style_sha256": proposal["style_sha256"],
@@ -1623,6 +1704,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--root", required=True)
     p_build.add_argument("--kind", required=True, choices=KINDS + RESEARCH_KINDS)
     p_build.add_argument("--locale", default=None)
+    p_build.add_argument("--fresh", action="store_true",
+                         help="with unrestricted --kind audit: include already reviewed messages")
     p_build.add_argument("--entry", action="append", default=None,
                          help="with --kind audit: a restricted audit of one canon entry (after canon.py change); "
                               "with --kind research or research_verify: limit to this canon entry (repeatable)")
@@ -1650,7 +1733,7 @@ def main() -> int:
     if args.command == "build":
         root = lz_common.resolve_root(args.root)
         templates_dir = Path(args.templates_dir) if args.templates_dir else default_templates_dir()
-        result = do_build(root, args.kind, args.locale, templates_dir, entry_ids=args.entry)
+        result = do_build(root, args.kind, args.locale, templates_dir, entry_ids=args.entry, fresh=args.fresh)
         lz_common.emit(result)
         return lz_common.EXIT_OK
 

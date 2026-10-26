@@ -222,6 +222,60 @@ def _project_value_sha256(message: dict, locale: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Audit provenance and current coverage
+# ---------------------------------------------------------------------------
+
+
+def audit_snapshot(message: dict, locale: str, cfg: dict, canon_lock: dict, *, canon_context=None) -> dict:
+    """The exact inputs a full audit judges, independent of translation state.
+
+    Read current inputs rather than sync's cached hashes: status and a resumed
+    build must notice drift even before the operator runs sync again.
+    """
+    if canon_context is None:
+        canon_context = informational_canon_context(message, canon_lock, locale)
+    return {
+        "source_sha256": source_sha256(message),
+        "value_sha256": _project_value_sha256(message, locale),
+        "context_sha256": context_sha256(message, locale),
+        "style_sha256": style_sha256(cfg, locale),
+        "canon_sha256": canon_sha256(message, canon_lock, locale),
+        "canon_context_sha256": lz_common.sha256_json(canon_context),
+    }
+
+
+def audit_coverage(ledger_data: dict, messages: dict, cfg: dict, canon_lock: dict, locale: str) -> dict:
+    """Partition every collected message into current pass/fail or remaining.
+
+    A missing target is never reviewed. Restricted canon audits are separate
+    evidence and do not contribute to full-audit coverage. Keep stale records
+    on disk so their original finding and provenance remain recoverable.
+    """
+    ids: dict = {"pass": [], "fail": [], "stale": [], "unreviewed": []}
+    entries = locale_entries(ledger_data, locale)
+    for message in sorted(messages["messages"], key=lambda m: m["id"]):
+        msg_id = message["id"]
+        entry = entries.get(msg_id, {})
+        record = entry.get("audit") if isinstance(entry, dict) else None
+        category = "unreviewed"
+        if record is not None:
+            category = "stale"
+            if (isinstance(record, dict) and record.get("scope") == "full"
+                    and record.get("verdict") in ("pass", "fail")):
+                snapshot = audit_snapshot(message, locale, cfg, canon_lock)
+                if snapshot["value_sha256"] is not None and record.get("snapshot") == snapshot:
+                    category = record["verdict"]
+        ids[category].append(msg_id)
+
+    result = {category: len(values) for category, values in ids.items()}
+    result["reviewed"] = result["pass"] + result["fail"]
+    result["total"] = result["reviewed"] + result["stale"] + result["unreviewed"]
+    result["unresolved"] = result["fail"] + result["stale"] + result["unreviewed"]
+    result["ids"] = ids
+    return result
+
+
+# ---------------------------------------------------------------------------
 # sync
 # ---------------------------------------------------------------------------
 

@@ -11,7 +11,10 @@ native speaker.
   the skill is used (see `skills/software-localizer/references/adapter-contract.md`), accepted
   only after round-trip, parse and coverage checks.
 - **Two modes.** *Translate* new and changed strings incrementally; *audit* the existing
-  translation and propose fixes a person accepts.
+  translation and propose fixes a person accepts. Audit verdicts persist with snapshot
+  provenance; status and report show current reviewed/total coverage, and builds resume the
+  remaining messages. Use `packets.py build --kind audit --locale L --root R --fresh` to rerun
+  every eligible message.
 - **Term evidence.** Before a person approves a canon term in a language they cannot judge, a
   research turn finds how established products in the project's field name it there, with a
   verbatim quote per source, and an independent turn re-opens every source and tries to refute

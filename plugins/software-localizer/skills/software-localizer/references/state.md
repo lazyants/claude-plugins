@@ -22,6 +22,69 @@ translated it meanwhile) becomes `existing`.
 Every candidate records the source, context and style it was made and reviewed against; when
 any of them changes, sync clears the candidate.
 
+## Audit evidence and coverage
+
+Each ledger entry can retain its last accepted full-audit verdict independently of translation
+state: pass/fail, issues, optional replacement, acceptance time, packet digest, run location and
+the source/target/context/style/relevant-canon hashes. Restricted canon-entry audit records are
+kept separately and never count as a full-message audit. Verdict acceptance does not adopt a
+translation or approve a replacement for export.
+
+The snapshot also hashes the message's approved informational `canon_context`, including
+linked entries and group/scope notes. It uses the same selector as audit packet construction;
+acceptance binds the frozen packet's context and coverage compares the current one. This
+additional audit hash does not alter a candidate's mechanical canon hash or export rules.
+
+Status and report compare these records with the current `messages.json`, configuration and
+canon lock, even before another sync. Changed inputs make a record stale; the record remains
+available as earlier evidence. Recollect after project edits: changes not yet collected cannot
+be reflected in coverage. A legacy ledger without records starts unreviewed.
+
+- **Total:** every currently collected message for the locale, including missing targets.
+- **Reviewed:** current full-audit passes plus failures.
+- **Stale:** messages with an obsolete full-audit record.
+- **Unreviewed:** messages without a full-audit record.
+- **Unresolved:** failures plus stale and unreviewed messages. A reviewed failure is not a pass.
+
+Thus `total = reviewed + stale + unreviewed`. Messages without a target cannot count as
+reviewed; audit builds keep their existing eligibility rules (`existing`, `translated`,
+`human_locked` with a target), so missing translations require the translation workflow.
+Partial or malformed answers do not earn coverage for their missing IDs. Unknown inputs in
+status mean coverage is unavailable, never that the audit is complete.
+
+The existing [native handoff receipt](packet-handoff.md) binds the complete packet, original
+instructions and actual returned JSON before acceptance. An old answer cannot review changed
+inputs after a rebuild merely because its target hash still matches. The handoff archive
+retains the exact input/output evidence; audit records identify their packet digest and run.
+Acceptance also compares every audit item's frozen snapshot with the current collected
+message, style and canon. An obsolete or removed item is reported as missing and cannot
+replace a verdict or proposal; rebuild its audit packet. Unchanged items in the same answer
+can still be accepted. This protects newer corrections even when an old batch directory and
+its receipt remain intact after a resumed build writes a different directory.
+
+Ordinary audit builds select the remaining eligible messages; `--fresh` requests a new full
+audit. The prior verdict remains evidence until a new valid verdict replaces it. A newly
+accepted verdict retires an older unaccepted proposal from the same scope before optionally
+storing a new one, including when the new verdict passes or has no replacement. Findings with
+no replacement still appear in the report and need human attention. Before replacing a finding
+without an approvable replacement (no value or failed checks), acceptance retains its exact
+record in `legacy_audit_findings`; the report shows it as historical evidence, not active work.
+
+An outstanding checked replacement from another audit scope is preserved. The incoming verdict and
+its proposed value still persist; a competing replacement is reported in
+`audit_proposal_conflicts` and shown as saved evidence, not an active proposal. Resolve the
+outstanding proposal, then rerun the other scope (`--fresh` for full audits) to check and queue
+its replacement through the existing approval route.
+
+Legacy proposals without `audit_scope` have unknown provenance: earlier versions used the
+same record shape for full and restricted audits. They remain visible for operator review,
+including unresolved findings with no replacement, and do not earn full-audit coverage.
+Checked legacy replacements remain active and use the existing `accept-audit` route; their
+unknown scope is preserved through candidate review rather than guessed from a batch name.
+Legacy findings with no replacement or without passing checks use the same evidence retention
+when a new verdict arrives. This leaves the active slot available for a new checked correction
+without inferring the earlier finding's scope.
+
 ## Canon research evidence
 
 `R/canon.research/<locale>.json`, one file per target locale, holds the usage research and its

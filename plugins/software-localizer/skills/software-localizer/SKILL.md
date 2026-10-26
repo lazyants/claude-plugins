@@ -338,6 +338,17 @@ as its prompt directs. See [state and evidence](references/state.md#shared-note-
 python3 S/packets.py build --root R --kind audit --locale L
 ```
 
+Builds resume messages without a current full-audit verdict. To audit every eligible message
+again, add `--fresh` (unrestricted audit only). A canon-entry audit never substitutes for a full
+message audit. Accepted passes and failures are saved with their snapshot and run provenance;
+missing or invalid verdicts remain unreviewed. Changed source, target, context, style or relevant
+canon makes the saved verdict stale. Run collect and sync after project edits before resuming.
+Approved informational canon context is part of that snapshot, including linked group and
+scope notes; it does not change mechanical candidate/export hashes.
+The existing [native handoff receipt](references/packet-handoff.md) binds each answer to the
+complete original packet and instructions, so a late answer cannot claim changed inputs after
+a rebuild. Audit replies keep the existing `value_sha256` verdict format.
+
 For each batch run a Claude subagent on its `prompt.md` (JSON only), save the answer, and
 `packets.py accept --root R --run <batch dir> --output <answer.json>`. Every accepted failure
 is stored with its issues and snapshot hashes. Findings without a proposed replacement appear
@@ -354,6 +365,25 @@ the proposals that passed:
 python3 S/report.py --root R --locale L
 python3 S/packets.py accept-audit --root R --locale L --id ID [--id ID …] --by "<operator>"
 ```
+
+`status.py` and the report show current **reviewed / total**, pass/fail, unresolved, stale and
+unreviewed counts, with remaining IDs. Total includes every collected message, including those
+without a target; reviewed means a current accepted full-audit pass or fail, while unresolved
+includes failures and messages still needing a current verdict. Findings without a replacement
+remain visible. A fresh same-scope verdict supersedes its older unaccepted proposal. These are
+audit records, not approval to modify the project ([details](references/state.md#audit-evidence-and-coverage)).
+Audit acceptance rejects items whose collected snapshot has changed since the packet was
+built, preserving newer verdicts and proposals. Rebuild those missing items before continuing.
+
+Each message has one active replacement proposal. A failure from another audit scope preserves
+that pending checked replacement; any new replacement remains visible as saved evidence and is listed
+in `audit_proposal_conflicts`. Resolve the pending proposal, then rerun the other audit scope
+(`--fresh` for a full audit) before asking to approve its replacement.
+Older proposals without scope metadata remain **unknown**, not assumed to be full audits.
+Checked replacements stay active and can still be approved through `accept-audit`.
+Findings without an approvable replacement are retained as legacy evidence when a new verdict
+arrives, leaving the active slot available for a newly checked correction. Their original
+issues, hashes and run remain visible without inferring a scope.
 
 An accepted proposal still gets its own review verdict (step 6's review loop) before export.
 Changed proposals, including review counter-proposals, need a fresh project check before any

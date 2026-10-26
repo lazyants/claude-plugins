@@ -2,6 +2,28 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.6.0] — 2026-10-26
+
+### Added
+
+- Accepted audit verdicts, including passes, persist with snapshot and run provenance (#1013).
+  Restricted canon audits retain their own scope and do not count as full-message reviews.
+- Status and reports show current reviewed/total coverage, pass/fail and unresolved counts,
+  and stale/unreviewed IDs. Snapshot changes invalidate coverage without discarding the saved
+  verdict; a completed audit is distinguishable from one that never ran.
+- Full audit builds resume remaining messages; `--fresh` explicitly reruns all eligible
+  messages. A newly accepted verdict retires an older unaccepted proposal from the same known
+  scope. Missing or invalid answers earn no coverage, and verdict acceptance grants no export
+  permission. The existing native handoff receipt binds answers to their complete frozen input.
+  Obsolete audit snapshots cannot overwrite newer verdicts or corrections, including replays
+  from batch directories left intact by a resumed audit.
+- Pending checked replacements from other audit scopes are preserved. Competing replacements remain
+  in saved verdicts and reports, with an explicit conflict instead of replacing active work.
+  Legacy proposals without scope metadata remain unknown and are retained for operator review;
+  findings without an approvable replacement leave the active slot available for new corrections.
+- Audit snapshots include approved informational canon context and follow the existing
+  locale-specific canon dependency rules for corrected notes.
+
 ## [software-localizer 0.5.3] — 2026-10-26
 
 ### Fixed
