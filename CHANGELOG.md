@@ -2,6 +2,16 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.3.6] — 2026-10-26
+
+### Added
+
+- Research and research verification builds report unresolved stored canon occurrence IDs
+  in structured `diagnostics`, with the entry ID and declared/resolvable reference counts
+  (#1023). The check covers every declared reference, including IDs after the five-example
+  sample. Real examples, packets, canon approvals and history remain unchanged; these warnings
+  are separate from current-message audit coverage and do not invalidate accepted results.
+
 ## [software-localizer 0.3.5] — 2026-10-26
 
 ### Added
