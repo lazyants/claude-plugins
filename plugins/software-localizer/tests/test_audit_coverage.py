@@ -213,6 +213,93 @@ def test_partial_and_refused_verdicts_remain_unreviewed_and_resume(work_root):
     assert _selected(_build(work_root)) == {"b", "c", "d"}
 
 
+def test_untouched_old_batch_replay_preserves_newer_subset_audit_and_proposal(work_root):
+    cfg, messages = _workspace(work_root, [
+        make_message("a", "Hello", targets={"de": "Hallo"}),
+        make_message("b", "World", targets={"de": "Welt"}),
+    ])
+    cfg["batch_size"] = 2
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+    first = _build(work_root)["batches"][0]
+    assert first["batch"] == "a"
+    original_dir, original_output = _record_answer(first)
+    original_packet = _packet(first)[1]
+    original_receipt = packet_handoff.receipt_path(original_output).read_bytes()
+    assert packets.do_accept(work_root, original_dir, original_output)["passed"] == ["a", "b"]
+
+    messages["messages"][1]["targets"]["de"] = "Neue Welt"
+    lz_common.atomic_write_json(work_root / "messages.json", messages)
+    ledger.sync(work_root, cfg, messages,
+                lambda items: fake_parse(work_root, cfg, Path(cfg["project_root"]), items), {"entries": []})
+    resumed = _build(work_root)["batches"][0]
+    assert resumed["batch"] == "b" and Path(resumed["dir"]) != original_dir
+    item = _packet(resumed)[1]["items"][0]
+    assert item["id"] == "b"
+    assert _accept(work_root, resumed, {"b": _verdict(item, "fail", "Neue Welt!")})["audit_proposals"] == ["b"]
+    newer_b = copy.deepcopy(ledger.load(work_root)["locales"]["de"]["b"])
+    coverage_before = _coverage(work_root)
+
+    # The old directory was never rebuilt: its original native receipt still verifies.
+    assert packet_handoff.verify(original_dir, original_output)[0] == original_packet
+    assert packet_handoff.receipt_path(original_output).read_bytes() == original_receipt
+    replayed = packets.do_accept(work_root, original_dir, original_output)
+    assert replayed["passed"] == ["a"] and replayed["missing"] == ["b"]
+    assert replayed["failed"] == [] and replayed["audit_proposals"] == []
+    assert ledger.load(work_root)["locales"]["de"]["b"] == newer_b
+    assert _coverage(work_root) == coverage_before
+    assert packets.do_accept_audit(work_root, "de", ["b"], "operator")["accepted"] == ["b"]
+    candidate = ledger.load(work_root)["locales"]["de"]["b"]["candidate"]
+    assert candidate["value"] == "Neue Welt!"
+
+
+@pytest.mark.parametrize("changed", ["source", "target", "context", "style", "canon", "informational_context", "removed"])
+@pytest.mark.parametrize("verdict", ["pass", "fail"])
+def test_receipted_stale_audit_item_cannot_mutate_current_evidence(work_root, approved_context, changed, verdict):
+    if changed == "informational_context":
+        cfg, messages, lock = _approved_context_workspace(work_root, approved_context)
+        prior_proposal, stale_proposal = "evidenzbasierte Auswertung", "evidenzbasierte Prüfung"
+    else:
+        lock = {"schema": 1, "entries": [_canon_entry()]}
+        cfg, messages = _workspace(work_root, canon_lock=lock)
+        prior_proposal, stale_proposal = "Hallo!", "Guten Tag!"
+    msg_id = messages["messages"][0]["id"]
+    first = _build(work_root)["batches"][0]
+    first_item = _packet(first)[1]["items"][0]
+    assert _accept(work_root, first, {msg_id: _verdict(first_item, "fail", prior_proposal)})["audit_proposals"] == [msg_id]
+    stale_batch = _build(work_root, fresh=True)["batches"][0]
+    run_dir, frozen_packet = _packet(stale_batch)
+    stale_reply = _verdict(frozen_packet["items"][0], verdict, stale_proposal if verdict == "fail" else None)
+    stale_reply["new_canon_candidates"] = [{
+        "kind": "term", "source": "Greeting", "proposed": "Begrüßung", "note": "A stale output must not publish this candidate.",
+    }]
+    _, output_path = _record_answer(stale_batch, {msg_id: stale_reply})
+    if changed == "source":
+        messages["messages"][0]["source"] = "Hello again"
+    elif changed == "target":
+        messages["messages"][0]["targets"]["de"] = "Guten Tag"
+    elif changed == "context":
+        messages["messages"][0]["context"]["comment"] = "A changed meaning"
+    elif changed == "style":
+        cfg["style"]["de"]["notes"] = "A changed style requirement"
+    elif changed == "canon":
+        lock["entries"][0]["translations"]["de"]["value"] = "Guten Tag"
+    elif changed == "informational_context":
+        approved_context["canon"]["groups"][0]["scope"] += " A later approved scope clarification."
+        lock = canon.freeze(work_root, approved_context["canon"])
+    else:
+        messages["messages"] = []
+    lz_common.atomic_write_json(work_root / "messages.json", messages)
+    lz_common.atomic_write_json(work_root / "localize.json", cfg)
+    lz_common.atomic_write_json(work_root / "canon.lock.json", lock)
+    before = ledger.load(work_root)
+    assert packet_handoff.verify(run_dir, output_path)[0] == frozen_packet
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == [msg_id]
+    assert result["passed"] == result["failed"] == result["audit_proposals"] == []
+    assert ledger.load(work_root) == before
+    assert not (run_dir / "new_canon_candidates.json").exists()
+
+
 @pytest.mark.parametrize("changed", ["source", "context", "style", "canon"])
 def test_old_answer_cannot_cover_rebuilt_packet_with_same_target(work_root, changed, capsys):
     canon_lock = {"schema": 1, "entries": [_canon_entry()]}
@@ -436,21 +523,23 @@ def test_unrelated_or_unapproved_audit_context_does_not_invalidate(work_root, ap
     assert _build(work_root)["selected"] == 0
 
 
-def test_accept_keeps_frozen_approved_context_when_live_lock_changed_without_rebuild(work_root, approved_context):
+def test_accept_rejects_changed_approved_context_without_rebuilding_packet(work_root, approved_context):
     _, messages, _ = _approved_context_workspace(work_root, approved_context)
     msg_id = messages["messages"][0]["id"]
     batch = _build(work_root)["batches"][0]
     frozen_packet = _packet(batch)[1]
     frozen_context = frozen_packet["canon_context"][msg_id]
+    run_dir, output_path = _record_answer(batch)
     approved_context["canon"]["groups"][0]["scope"] += " A later approved scope clarification."
     current_lock = canon.freeze(work_root, approved_context["canon"])
     assert ledger.informational_canon_context(messages["messages"][0], current_lock, "de") != frozen_context
-    result = _accept(work_root, batch)
-    assert result["passed"] == [msg_id]
-    record = ledger.load(work_root)["locales"]["de"][msg_id]["audit"]
-    assert record["snapshot"]["canon_context_sha256"] == lz_common.sha256_json(frozen_context)
+    before = ledger.load(work_root)
+    assert packet_handoff.verify(run_dir, output_path)[0] == frozen_packet
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == [msg_id] and result["passed"] == []
+    assert ledger.load(work_root) == before
     assert _packet(batch)[1] == frozen_packet  # No build has replaced the reviewed packet.
-    assert _coverage(work_root)["ids"]["stale"] == [msg_id]
+    assert _coverage(work_root)["ids"]["unreviewed"] == [msg_id]
 
 
 def test_audit_context_hash_stays_separate_from_proposal_and_candidate_canon_hash(work_root, approved_context):
@@ -512,19 +601,20 @@ def test_group_only_corrected_note_keeps_accepted_audit_current_and_candidate_ha
 
 
 @pytest.mark.parametrize("verdict,proposed", [("pass", None), ("fail", "Hallo!")])
-def test_accept_uses_frozen_packet_style_after_config_changes(work_root, verdict, proposed):
+def test_accept_rejects_changed_style_after_native_capture(work_root, verdict, proposed):
     cfg, _ = _workspace(work_root)
     old_style_hash = ledger.style_sha256(cfg, "de")
     batch = _build(work_root)["batches"][0]
     item = _packet(batch)[1]["items"][0]
+    run_dir, output_path = _record_answer(batch, {"a": _verdict(item, verdict, proposed)})
     cfg["style"]["de"]["notes"] = "Changed while the audit turn was running"
     lz_common.atomic_write_json(work_root / "localize.json", cfg)
-    _accept(work_root, batch, {"a": _verdict(item, verdict, proposed)})
-    entry = ledger.load(work_root)["locales"]["de"]["a"]
-    assert entry["audit"]["snapshot"]["style_sha256"] == old_style_hash
-    if proposed is not None:
-        assert entry["audit_proposal"]["style_sha256"] == old_style_hash
-    assert _coverage(work_root)["stale"] == 1
+    before = ledger.load(work_root)
+    assert ledger.style_sha256(cfg, "de") != old_style_hash
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == ["a"] and result["passed"] == result["failed"] == []
+    assert ledger.load(work_root) == before
+    assert _coverage(work_root)["unreviewed"] == 1
     assert _coverage(work_root)["reviewed"] == 0
 
 

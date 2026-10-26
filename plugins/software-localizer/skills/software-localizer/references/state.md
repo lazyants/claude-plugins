@@ -56,6 +56,11 @@ The existing [native handoff receipt](packet-handoff.md) binds the complete pack
 instructions and actual returned JSON before acceptance. An old answer cannot review changed
 inputs after a rebuild merely because its target hash still matches. The handoff archive
 retains the exact input/output evidence; audit records identify their packet digest and run.
+Acceptance also compares every audit item's frozen snapshot with the current collected
+message, style and canon. An obsolete or removed item is reported as missing and cannot
+replace a verdict or proposal; rebuild its audit packet. Unchanged items in the same answer
+can still be accepted. This protects newer corrections even when an old batch directory and
+its receipt remain intact after a resumed build writes a different directory.
 
 Ordinary audit builds select the remaining eligible messages; `--fresh` requests a new full
 audit. The prior verdict remains evidence until a new valid verdict replaces it. A newly

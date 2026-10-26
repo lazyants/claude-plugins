@@ -1014,12 +1014,15 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
 
     canon_lock = packet.get("canon", {"entries": []})
     audit_scope = (packet.get("canon_entry") or {}).get("entry", "full")
-    # The verdict was cast on the packet's style, even if localize.json
-    # changed while the turn ran. Do not credit that verdict to the new style.
+    # The admission gate below rejects changed inputs. Keep the packet's
+    # frozen style for checking a proposal after its snapshot matches.
     audit_cfg = {**cfg, "style": {locale: packet.get("style")}}
     audit_at = lz_common.now_iso()
     packet_sha = lz_common.sha256_json(packet)
     missing, extra_ids = [], sorted(set(verdicts) - set(items))
+    if kind == "audit":
+        current_by_id = message_by_id(lz_common.load_messages(root / "messages.json"))
+        current_canon_lock = canon_mod.load_lock(root)
 
     # Gather every proposed value's forms up front for one batched parse call.
     valid_verdicts = {}
@@ -1036,6 +1039,15 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             # as a hash mismatch: no rounds increment, no escalation.
             missing.append(msg_id)
             continue
+        if kind == "audit":
+            current_message = current_by_id.get(msg_id)
+            if (current_message is None or _audit_item_snapshot(packet, item)
+                    != ledger_mod.audit_snapshot(current_message, locale, cfg, current_canon_lock)):
+                # A retained run can still have a valid handoff receipt after
+                # a different batch audited newer inputs. Do not let replay
+                # replace that newer record or retire its correction.
+                missing.append(msg_id)
+                continue
         if kind == "review" and not _review_candidate_still_matches(ledger_data, locale, msg_id, item):
             # The candidate this packet item snapshot was built from has
             # since been rebuilt (context or style changed and it was
@@ -1051,7 +1063,8 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
         proposed = verdict.get("proposed")
         if verdict.get("verdict") == "fail" and proposed is not None:
             extra_parse_items.extend(_parse_items(msg_id, "proposed", checks_mod.forms_of(proposed)))
-    parse_results = _parse_batch(root, cfg, list(items.values()), extra_parse_items)
+    parse_items = [items[msg_id] for msg_id in valid_verdicts] if kind == "audit" else list(items.values())
+    parse_results = _parse_batch(root, cfg, parse_items, extra_parse_items)
 
     passed, failed_ids, escalated, proposals_stored = [], [], [], []
     audit_proposal_conflicts = []

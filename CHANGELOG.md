@@ -13,8 +13,10 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   verdict; a completed audit is distinguishable from one that never ran.
 - Full audit builds resume remaining messages; `--fresh` explicitly reruns all eligible
   messages. A newly accepted verdict retires an older unaccepted proposal from the same known
-  scope. Missing or invalid answers remain unreviewed, and verdict acceptance grants no export
+  scope. Missing or invalid answers earn no coverage, and verdict acceptance grants no export
   permission. The existing native handoff receipt binds answers to their complete frozen input.
+  Obsolete audit snapshots cannot overwrite newer verdicts or corrections, including replays
+  from batch directories left intact by a resumed audit.
 - Pending checked replacements from other audit scopes are preserved. Competing replacements remain
   in saved verdicts and reports, with an explicit conflict instead of replacing active work.
   Legacy proposals without scope metadata remain unknown and are retained for operator review;

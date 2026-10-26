@@ -372,6 +372,8 @@ without a target; reviewed means a current accepted full-audit pass or fail, whi
 includes failures and messages still needing a current verdict. Findings without a replacement
 remain visible. A fresh same-scope verdict supersedes its older unaccepted proposal. These are
 audit records, not approval to modify the project ([details](references/state.md#audit-evidence-and-coverage)).
+Audit acceptance rejects items whose collected snapshot has changed since the packet was
+built, preserving newer verdicts and proposals. Rebuild those missing items before continuing.
 
 Each message has one active replacement proposal. A failure from another audit scope preserves
 that pending checked replacement; any new replacement remains visible as saved evidence and is listed

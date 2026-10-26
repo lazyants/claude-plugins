@@ -1508,7 +1508,7 @@ def test_accept_audit_without_replacement_survives_save_load_and_report(work_roo
 
 
 @pytest.mark.parametrize("proposed", [None, "Hallo!"])
-def test_accept_audit_retains_packet_style_provenance(work_root, proposed):
+def test_accept_audit_refuses_changed_live_style_without_mutating_ledger(work_root, proposed):
     cfg = make_cfg()
     message = make_message("a", "Hello", targets={"de": "Hallo"})
     run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": make_entry("existing")}}, "audit", "de")
@@ -1520,10 +1520,11 @@ def test_accept_audit_retains_packet_style_provenance(work_root, proposed):
     changed_cfg = {**cfg, "style": {"de": {"formality": "du", "notes": "Changed since build."}}}
     lz_common.atomic_write_json(work_root / "localize.json", changed_cfg)
 
-    packets.do_accept(work_root, run_dir, output_path)
-    finding = ledger_mod.load(work_root)["locales"]["de"]["a"]["audit_proposal"]
-    assert finding["style_sha256"] == ledger_mod.style_sha256(cfg, "de")
-    assert finding["style_sha256"] != ledger_mod.style_sha256(changed_cfg, "de")
+    before = ledger_mod.load(work_root)
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["missing"] == ["a"]
+    assert result["passed"] == result["failed"] == result["audit_proposals"] == []
+    assert ledger_mod.load(work_root) == before
 
 
 def test_accept_audit_without_replacement_replaces_known_full_scope_proposal(work_root):
