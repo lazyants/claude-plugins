@@ -1,0 +1,18 @@
+{
+  "fragment": {
+    "id": "app:consentSuffix",
+    "source": ". The service processes these data.",
+    "target": " beschrieben zu. Der Dienst verarbeitet diese Daten.",
+    "source_link_text": "Privacy Policy",
+    "target_link_text": "Datenschutzerklärung",
+    "source_joined": "Privacy Policy. The service processes these data.",
+    "target_joined": "Datenschutzerklärung beschrieben zu. Der Dienst verarbeitet diese Daten.",
+    "trimmed_joined": "Datenschutzerklärungbeschrieben zu. Der Dienst verarbeitet diese Daten."
+  },
+  "whole_message": {
+    "id": "app:consent",
+    "source": "I consent to processing as described in {privacyPolicy}. The service processes these data.",
+    "target": "Ich stimme der Verarbeitung wie in der {privacyPolicy} beschrieben zu. Der Dienst verarbeitet diese Daten.",
+    "target_rendered": "Ich stimme der Verarbeitung wie in der Datenschutzerklärung beschrieben zu. Der Dienst verarbeitet diese Daten."
+  }
+}
