@@ -31,7 +31,12 @@ sha256. A `dnt` entry a person never approved must not lock -- a
 model-proposed `dnt` from a canon or review turn is only ever `import`ed, and
 `import` never approves anything, so an unreviewed proposal must not become
 an active do-not-translate rule the moment someone runs `freeze` (security-
-review observation). `R/canon.history.json` is an append-only record of
+review observation). `approved_occurrences` snapshots a DNT's active scope;
+later imports extend `occurrences` with pending proposals, never that snapshot.
+Legacy approved entries without it retain their existing scope until the next
+import captures it. `scope` displays active/pending ids and the entire entry's
+hash; `change-scope` applies only a person's hash-bound explicit delta.
+`R/canon.history.json` is an append-only record of
 every approval and change (who, when, before, after).
 
 `R/canon.research/<locale>.json` holds the usage-research evidence for that
@@ -251,6 +256,8 @@ def import_candidates(canon: dict, candidates: list) -> dict:
     `proposed` translation already had, display-only (see the module
     docstring); a malformed one is silently dropped rather than refusing the
     whole candidate. Returns `{"added": [...ids...], "merged": [...ids...]}`.
+    For an approved DNT, new occurrences remain pending until `change-scope`;
+    importing a subset never removes either active or pending occurrences.
 
     Raises `ValueError` for a candidate missing `kind`/`source` or naming an
     unknown `kind`; by the time a canon-turn or review-turn output reaches
@@ -292,6 +299,10 @@ def import_candidates(canon: dict, candidates: list) -> dict:
             canon["entries"].append(entry)
             added.append(entry["id"])
         else:
+            if kind == "dnt" and entry.get("approved_by"):
+                # Legacy approvals cover the pre-import scope. New ids are
+                # proposals until a person explicitly accepts their delta.
+                entry.setdefault("approved_occurrences", list(entry.get("occurrences", [])))
             for occ in occurrences:
                 if occ not in entry["occurrences"]:
                     entry["occurrences"].append(occ)
@@ -356,9 +367,15 @@ def approve(root, canon: dict, entry_id: str, locale: str | None, value: str | N
                 "a dnt entry is approved as a whole, without --locale/--value",
                 lz_common.EXIT_FAIL, entry=entry_id,
             )
+        if entry.get("approved_by"):
+            lz_common.fail(
+                "dnt entry is already approved; use `change-scope` for scope decisions",
+                lz_common.EXIT_FAIL, entry=entry_id,
+            )
         before = {"approved_by": entry.get("approved_by"), "approved_at": entry.get("approved_at")}
         entry["approved_by"] = by
         entry["approved_at"] = at
+        entry["approved_occurrences"] = list(entry.get("occurrences", []))
         _append_history(root, {
             "at": at, "by": by, "action": "approve", "entry": entry_id, "locale": None,
             "before": before, "after": {"approved_by": by, "approved_at": at},
@@ -419,7 +436,7 @@ def freeze(root, canon: dict | None = None) -> dict:
                 continue
             locked = {
                 "id": entry["id"], "kind": entry["kind"], "source": entry["source"],
-                "note": entry.get("note", ""), "occurrences": list(entry.get("occurrences", [])),
+                "note": entry.get("note", ""), "occurrences": _active_dnt_scope(entry),
             }
         else:
             # `current` is display-only (see `import_candidates`) and never
@@ -499,6 +516,105 @@ def change(
 
 
 # ---------------------------------------------------------------------------
+# reviewed DNT scope changes
+# ---------------------------------------------------------------------------
+
+
+def _active_dnt_scope(entry: dict) -> list:
+    """An absent snapshot preserves a legacy approval; an empty one is empty."""
+    return list(entry.get("approved_occurrences", entry.get("occurrences", [])))
+
+
+def scope(canon: dict, entry_id: str) -> dict:
+    """Read the exact entry hash to bind a person's scope decision to."""
+    entry = _find_by_id(canon, entry_id)
+    if entry is None or entry.get("kind") != "dnt" or not entry.get("approved_by"):
+        lz_common.fail("scope requires an approved dnt entry", lz_common.EXIT_FAIL, entry=entry_id)
+    active = _active_dnt_scope(entry)
+    return {
+        "entry": entry_id, "source": entry["source"],
+        "entry_sha256": lz_common.sha256_json(entry), "active": active,
+        "pending": [i for i in entry.get("occurrences", []) if i not in active],
+    }
+
+
+def change_scope(root, canon: dict, entry_id: str, expect_sha256: str,
+                 additions: list, removals: list, reason: str, by: str) -> dict:
+    """Apply only an explicit person's DNT delta; imported proposals stay pending.
+
+    Canon mutations are serialized by the coordinator, as with `change`.
+    All business refusals and input reads precede the first mutation.
+    """
+    snapshot = scope(canon, entry_id)
+    if snapshot["entry_sha256"] != expect_sha256:
+        lz_common.fail("current entry does not match --expect-sha256", lz_common.EXIT_FAIL, entry=entry_id)
+    if not by.strip() or not reason.strip():
+        lz_common.fail("--by and --reason must be nonblank", lz_common.EXIT_FAIL)
+    if (not additions and not removals
+            or any(not isinstance(i, str) or not i.strip() for i in additions + removals)
+            or len(set(additions)) != len(additions) or len(set(removals)) != len(removals)
+            or set(additions) & set(removals)):
+        lz_common.fail("supply nonempty, distinct, disjoint --add/--remove ids", lz_common.EXIT_FAIL)
+
+    entry = _find_by_id(canon, entry_id)
+    before = snapshot["active"]
+    stored_before = list(entry.get("occurrences", []))
+    if any(i in before for i in additions) or any(i not in stored_before for i in removals):
+        lz_common.fail("--add is already active or --remove is not in the stored scope", lz_common.EXIT_FAIL)
+
+    cfg = lz_common.load_config(root)
+    messages = lz_common.load_messages(Path(root) / "messages.json")["messages"]
+    known_ids = {m["id"] for m in messages}
+    if any(i not in known_ids for i in additions):
+        lz_common.fail("--add id not present in messages.json; collect first", lz_common.EXIT_FAIL)
+    # Validate history before changing the in-memory canon, too.
+    load_history(root)
+    after = [i for i in before if i not in removals] + additions
+    stored_after = [i for i in stored_before if i not in removals]
+    stored_after += [i for i in additions if i not in stored_after]
+
+    affected = []
+    if before != after:
+        # Keep removed/deleted ids for the packet builder's explicit skip report.
+        affected = list(dict.fromkeys(before + after))
+        # Use the same relevance rule as candidate hashes: source matches share
+        # this entry's hash even outside its explicit DNT occurrence scope.
+        import ledger
+        impact_lock = {"entries": [{
+            "id": entry_id, "kind": "dnt", "source": entry["source"], "occurrences": affected,
+        }]}
+        affected += [m["id"] for m in messages
+                     if m["id"] not in affected and ledger.relevant_canon(m, impact_lock)]
+
+    at = lz_common.now_iso()
+    entry["occurrences"] = stored_after
+    entry["approved_occurrences"] = after
+    entry["scope_approved_by"] = by
+    entry["scope_approved_at"] = at
+    event = {
+        "action": "change-scope", "entry": entry_id, "at": at, "by": by, "reason": reason,
+        "before": before, "after": after,
+        "stored_before": stored_before, "stored_after": stored_after,
+        "additions": additions, "removals": removals,
+        "entry_sha256_before": expect_sha256, "entry_sha256_after": lz_common.sha256_json(entry),
+        "affected_occurrences": affected, "target_locales": list(cfg["target_locales"]),
+    }
+    _append_history(root, event)
+    freeze(root, canon)
+    for locale in cfg["target_locales"]:
+        if not affected:
+            continue
+        audit_request = {
+            **event, "kind": "dnt", "source": entry["source"], "locale": locale,
+            "occurrences": affected, "scope_change": {"before": before, "after": after},
+        }
+        lz_common.atomic_write_json(
+            Path(root) / "runs" / locale / f"canon-audit-{entry_id}.json", audit_request,
+        )
+    return event
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -541,6 +657,22 @@ def _cmd_change(args) -> int:
     return lz_common.EXIT_OK
 
 
+def _cmd_scope(args) -> int:
+    root = lz_common.resolve_root(args.root)
+    lz_common.emit({"ok": True, **scope(load(root), args.entry)})
+    return lz_common.EXIT_OK
+
+
+def _cmd_change_scope(args) -> int:
+    root = lz_common.resolve_root(args.root)
+    canon = load(root)
+    event = change_scope(root, canon, args.entry, args.expect_sha256,
+                         args.add, args.remove, args.reason, args.by)
+    save(root, canon)
+    lz_common.emit({"ok": True, **event})
+    return lz_common.EXIT_OK
+
+
 def build_parser():
     parser = lz_common.make_parser("canon.py", "Canon (glossary) management")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -568,6 +700,19 @@ def build_parser():
     p_change.add_argument("--reason", required=True)
     p_change.add_argument("--by", required=True)
 
+    p_scope = sub.add_parser("scope", help="inspect an approved dnt scope and its expected entry hash")
+    p_scope.add_argument("--root", required=True)
+    p_scope.add_argument("--entry", required=True)
+
+    p_scope_change = sub.add_parser("change-scope", help="record a person's explicit dnt scope decision")
+    p_scope_change.add_argument("--root", required=True)
+    p_scope_change.add_argument("--entry", required=True)
+    p_scope_change.add_argument("--expect-sha256", required=True)
+    p_scope_change.add_argument("--add", action="append", default=[])
+    p_scope_change.add_argument("--remove", action="append", default=[])
+    p_scope_change.add_argument("--reason", required=True)
+    p_scope_change.add_argument("--by", required=True)
+
     return parser
 
 
@@ -575,6 +720,7 @@ def main() -> int:
     args = build_parser().parse_args()
     dispatch = {
         "import": _cmd_import, "approve": _cmd_approve, "freeze": _cmd_freeze, "change": _cmd_change,
+        "scope": _cmd_scope, "change-scope": _cmd_change_scope,
     }
     return dispatch[args.command](args)
 

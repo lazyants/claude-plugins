@@ -19,6 +19,9 @@ native speaker.
   for a native speaker. A person still approves every term.
 - **Models.** Codex translates (read-only, returns JSON); Claude subagents review, audit, propose
   the canon, research and verify term usage on the web, and check adapter coverage.
+- **DNT scope decisions.** A person can explicitly add/remove do-not-translate occurrences
+  using an expected entry hash, with durable history and audits across target locales. Imported
+  expansions stay pending until that decision; subset imports never delete scope.
 - **Safety.** A person's translation is never overwritten; nothing is exported without script
   checks and a review verdict bound to the exact value; export re-collects, compares, and writes
   under a journal that rolls back on failure.

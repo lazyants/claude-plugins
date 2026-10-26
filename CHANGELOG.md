@@ -2,6 +2,19 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.4.0] — 2026-10-26
+
+### Added
+
+- Reviewed DNT occurrence-scope decisions (#1022): `canon.py scope` exposes active/pending ids
+  and the current entry hash; `change-scope` requires that hash, exact additions/removals,
+  a person and a reason. History retains before/after scopes and decisions; affected messages
+  receive restricted-audit requests in every target locale, and existing candidate hash guards
+  require fresh checks/reviews after active changes.
+- Imported additions to an approved DNT remain pending until explicitly approved through
+  `change-scope`. Subset imports remain non-destructive; legacy approvals retain their existing
+  scope. DNT spelling, approved locale wording, sibling entries and prior evidence are preserved.
+
 ## [software-localizer 0.3.6] — 2026-10-26
 
 ### Added

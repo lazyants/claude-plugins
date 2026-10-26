@@ -219,7 +219,7 @@ Review turns later propose new candidates (each review batch writes
 Nothing a model proposes takes effect until a person approves it — an unapproved entry,
 do-not-translate entries included, stays out of `canon.lock.json`.
 
-Changing an approved entry later is always `canon.py change` (it states the current value and
+Changing approved locale wording later uses `canon.py change` (it states the current value and
 a reason), followed by a restricted audit of that entry in the locale:
 
 ```bash
@@ -227,6 +227,41 @@ python3 S/canon.py change --root R --entry ID --locale L --expect CURRENT --valu
   --reason "…" --by "<operator>"
 python3 S/packets.py build --root R --kind audit --locale L --entry ID
 ```
+
+**DNT occurrence scope.** Import still unions occurrences; additions to an already-approved
+DNT stay pending until a person reviews them. Subset imports never delete scope. Inspect it:
+
+```bash
+python3 S/canon.py scope --root R --entry ID
+```
+
+Show the operator its `active` and `pending` ids, the messages and current/proposed translations
+in every configured target locale, and the intended exact additions/removals. A brand absent
+from source copy does not establish that its scope is wrong. The operator may retain it; current
+rejections remain in force. Apply only their concrete decision, using this output's
+`entry_sha256` as `HASH` (the entire current entry, including pending proposals):
+
+```bash
+python3 S/canon.py change-scope --root R --entry ID --expect-sha256 HASH \
+  --add MESSAGE_ID --remove OTHER_ID --reason "Person's scope decision" --by "<operator>"
+python3 S/ledger.py sync --root R
+# For EACH configured target locale L:
+python3 S/packets.py build --root R --kind audit --locale L --entry ID
+```
+
+`--add`/`--remove` repeat; supply either or both. Adding a pending id approves only that id;
+removing a pending id rejects its proposal. Other pending ids remain pending. Fresh additions
+must exist in `messages.json` (collect first). Stale hashes and invalid/no-op deltas refuse
+without writing. Repeating `approve` on an approved DNT refuses; use `change-scope`.
+The command records exact before/after scopes, hashes, who and why in history, refreezes, and
+requests audits of affected ids in every target locale. Removed ids and source-text matches
+are included; audit packets explain the new scope and never authorize reinserting the brand
+for a removed occurrence. Inspect skipped missing ids/targets rather than counting them as
+audited. Active scope changes invalidate dependent candidate reviews through existing hashes:
+sync, fresh checks/review and the restricted audits are required before export. Rejecting only
+pending proposals leaves the active lock unchanged and requests no new audit. Spelling, approved
+locale wording, sibling entries and prior research/history are retained. See
+[scope state and recovery](references/state.md#reviewed-dnt-scope-decisions).
 
 ## 5. Audit an existing translation
 
