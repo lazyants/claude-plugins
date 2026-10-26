@@ -44,9 +44,11 @@ The reserved `_packets` directory keeps new runs separate from legacy batch name
 
 **Native Claude turns require verified transport.** For canon, research,
 research verification, audit and review, submit the generated ASCII `request.json`
-as the complete native `Agent` arguments. Save the answer, then capture a receipt
-from the actual parent's session JSONL and call id before `packets.py accept`.
-The parent does all file operations; research children have only web tools.
+as the complete native `Agent` arguments, or pipe `prompt.md` directly to a fresh
+CLI child with the packaged web-only agent. Prefer CLI stdin when host hooks
+rewrite Agent prompts. Capture a receipt from the actual session and returned
+result before `packets.py accept`. The parent does all file operations;
+research children have only web tools.
 Follow [packet handoff](references/packet-handoff.md) for the executable commands,
 supported log format and failed-attempt recovery. A packet file or value hash
 alone does not prove what the worker saw.
@@ -173,10 +175,10 @@ communities in the project's field name it there. Per locale:
 
 ```bash
 python3 S/packets.py build --root R --kind research --locale L [--entry ID …]
-# dispatch each request.json via the web-only usage-research Agent; save and capture receipt
+# run the web-only usage-research CLI child from prompt.md; capture its CLI receipt
 python3 S/packets.py accept --root R --run <batch dir> --output <answer.json>
 python3 S/packets.py build --root R --kind research_verify --locale L
-# a DIFFERENT fresh usage-research Agent per batch; save and capture receipt
+# a DIFFERENT fresh usage-research child per batch; capture its receipt
 python3 S/packets.py accept --root R --run <batch dir> --output <answer.json>
 ```
 

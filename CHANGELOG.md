@@ -13,6 +13,10 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   parent's session JSONL. Acceptance requires a receipt and rechecks decoded packet values,
   complete original instructions, request/result identity and the returned JSON before
   changing state. Schema/value hashes alone no longer admit an altered-input verdict.
+- A direct CLI stdin handoff supports normal profiles whose hooks rewrite Agent prompts.
+  Its separate receipt checks the actual user message, native answer, completed stream
+  result and an exact web-only tool roster. Native Agent instruction additions remain
+  rejected; a later correct CLI attempt does not relabel the failed Agent attempt.
 - The packaged `usage-research` agent allows only WebSearch and WebFetch. Failed handoffs
   retain their original snapshots, actual request/result and rejected receipt independently
   of later repaired attempts. The guard establishes transport, not linguistic or source

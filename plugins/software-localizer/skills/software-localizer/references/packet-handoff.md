@@ -1,10 +1,45 @@
-# Native Claude packet handoff
+# Claude packet handoff
 
 `packet.json` records the intended input. It does not prove what a child received.
 For canon, research, research verification, audit and review, `packets.py accept`
-requires a receipt from the actual synchronous native Claude `Agent` call.
+requires a receipt from the actual native Claude CLI session or synchronous
+`Agent` call. Both check the complete original instructions and decoded packet.
 
-## Dispatch and receipt
+## Direct CLI handoff
+
+Use this route when a host hook rewrites Agent prompts. The trusted parent pipes
+the complete generated prompt directly to a fresh CLI child, with its normal
+profile settings and enabled plugins. The packaged agent supplies only
+`WebSearch` and `WebFetch`; no file or shell tools are added to the child. It
+follows the supplied canon, research, verification, audit or review task.
+
+```bash
+claude --agent software-localizer:usage-research --print --verbose \
+  --output-format stream-json --session-id <new-uuid> --max-turns <agreed-limit> \
+  < <batch-dir>/prompt.md > <batch-dir>/claude-stream.jsonl
+python3 S/packet_handoff.py --run <batch-dir> --output <new-answer.json> \
+  --transcript <actual-child-session.jsonl> --cli-stream <batch-dir>/claude-stream.jsonl \
+  --save-output
+python3 S/packets.py accept --root R --run <batch-dir> --output <new-answer.json>
+```
+
+Use the active profile's normal launcher. An installed plugin provides the named
+agent; during development `--plugin-dir <plugin-root>` loads that same package.
+The actual session JSONL is in that profile's `projects/<encoded-directory>/`
+under the supplied UUID. Keep the stream and session log; never reconstruct them.
+Use a fresh child for verification and respect the research turn's agreed bounds.
+
+The CLI receipt binds the actual original user-message record, native assistant
+answer, stream assistant message id, successful completion and init tool roster
+to one session. It requires exactly the two web tools and refuses recorded calls
+to any other tool. Multiple original user messages, changed input, tool changes,
+unfinished/limited completions or mismatched answers are refused. `--save-output`
+serializes the actual returned JSON only after these checks, without another
+model copying it, and refuses an existing answer path. Omitting that flag checks
+an already saved answer. A CLI receipt is identified as `claude-cli`, separately
+from the `claude-agent` receipt; it does not pretend a native Agent call occurred.
+
+## Native Agent handoff
 
 1. Build the batch. It contains `prompt.md`, `packet.json`, the complete original
    instruction prefix/suffix in `instructions.json`, and `request.json`: complete
@@ -18,7 +53,7 @@ requires a receipt from the actual synchronous native Claude `Agent` call.
    file or shell tools to solve transport problems.
 3. Save the returned JSON object as the answer file. Obtain the actual call's
    `tool_use` id from the parent's native session JSONL, normally
-   `~/.claude/projects/<encoded-working-directory>/<session-id>.jsonl`. Use that
+   `<profile-config>/projects/<encoded-working-directory>/<session-id>.jsonl`. Use that
    real log, never a reconstructed request, copied prompt or worker echo. Then:
 
    ```bash
@@ -49,11 +84,14 @@ hide another answer or arbitrary prose. The receipt is written beside the answer
 Current native `SubagentHandback` completions are supported through the same
 result row's `toolUseResult.handbackReport`: the completed status, agent type,
 agent id and matching handback notice are checked, and the entire native
-completion is bound into the receipt. Its completed prompt must start with the
-exact checked submitted prompt (or its independently checked wire representation).
-Additional native runtime harness notes need
-native harness attribution and are retained in that completion; they do not
-replace or normalize the original instruction/packet span.
+completion is bound into the receipt. Its completed prompt must equal the
+checked submitted prompt (or its independently checked wire representation).
+Appended native runtime notes are instruction changes and are refused even when
+the completion attributes them to a harness. A counter is not an exception to
+the original instruction contract. For example, a hook that appends a routing
+block to every Agent prompt makes that Agent route fail; use the direct CLI
+stdin route with the same normal settings, rather than disabling the hook or
+grandfathering the changed input.
 Acceptance replays the evidence checks and checks all receipt bindings before
 writing any ledger, canon candidates or research. It consumes those verified
 packet/output objects rather than rereading an unchecked answer.
@@ -81,9 +119,8 @@ are used as exact-value evidence.
 
 The trusted parent and its local session log are the root of this check. This is
 not an attestation against a parent that forges logs or edits all evidence. It
-verifies the submitted native Agent prompt, not hidden system messages, the
-correctness of native runtime harness additions, or a provider's internal
-tokenization. It establishes input transport only: it does
+verifies the submitted native Agent prompt, not hidden system messages or a
+provider's internal tokenization. It establishes input transport only: it does
 not establish linguistic correctness, source truth, research completeness or
 product improvement. The separate schema, value, research and project checks
 still apply.
