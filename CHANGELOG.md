@@ -2,6 +2,21 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.3.4] — 2026-10-26
+
+### Added
+
+- Canon research and independent verification now record `complete` or `resource_limited`
+  progress with exact remaining work (#1018). A completed bounded search with no external
+  findings remains a valid low-confidence assessment; tool-limited entries stay selectable
+  and appear separately in the report instead of looking finished.
+- Continuation packets retain earlier findings and checked source indexes, archive accepted
+  answers, preserve original packet directories and reject stale replies. Verification waits
+  for completed research and counts as complete only after every source check is accounted for.
+- The coordinator procedure bounds each ordinary user turn, respects its shared tool cap and
+  waits for next-turn authorization before continuing only unfinished entries. It never raises
+  limits or switches profiles to evade an exhausted allowance.
+
 ## [software-localizer 0.3.3] — 2026-10-26
 
 ### Fixed

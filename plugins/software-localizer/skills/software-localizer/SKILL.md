@@ -163,8 +163,11 @@ python3 S/packets.py accept --root R --run <batch dir> --output <answer.json>
 ```
 
 By default `research` takes every term and UI label not yet approved in `L` that has no
-research; agree the scope with the operator first and narrow it to the core list with `--entry`
-(repeatable; naming an entry also re-researches it, which discards its old verification).
+research, plus resource-limited entries. Agree the scope with the operator first and narrow it
+to the core list with `--entry` (repeatable; naming a completed entry explicitly re-researches
+it, which discards its old verification). A low-confidence completed search with no findings
+stays complete. `research_verify` takes completed research with no verification or a
+resource-limited verification. Both turns return typed `progress` with exact remaining work.
 Batches hold 8 terms. The research turn cites a site, URL, rendering and verbatim quote per
 source and gives a recommendation, a confidence and a note per term; the verification turn
 re-opens every source, marks each confirmed or not, and tries to refute the recommendation
@@ -176,6 +179,16 @@ web-search budget can run out mid-batch, and a concept that exists only in this 
 outside evidence — it gets low confidence and says so. Both turns read untrusted web pages, so
 give their subagents web search and page fetch only, no file or shell tools; the session saves
 each answer itself.
+
+**Pace the coordinator across ordinary user turns.** A tool allowance is shared by the
+coordinator and its nested agents in that user turn, so adding subagents or locales does not
+multiply it. Choose a bounded set of packets, keep separate ownership per locale, and stop
+searching when the tool says the turn is exhausted. Save and accept actual answers, report
+completed versus resource-limited entries, then finish the reply. Wait for the operator's
+normal next-turn authorization before continuing unfinished work; another `claude -p` launched
+inside the exhausted turn is not that authorization. Never raise a setting or switch profiles
+to evade the cap. Follow [checkpoint and continuation](references/research-continuation.md)
+for exact packet/entry handoff, preserved evidence and verification recovery.
 
 Show the operator the proposals — **a short core list**: product terms, UI labels that other
 messages refer to, do-not-translate names. In audit mode the proposals also show every current
