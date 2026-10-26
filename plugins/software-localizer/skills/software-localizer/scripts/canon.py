@@ -425,8 +425,46 @@ def freeze(root, canon: dict | None = None) -> dict:
         locked_entries.append(locked)
 
     lock = {"schema": 1, "entries": locked_entries}
+    groups = _freeze_groups(canon, locked_entries)
+    if groups:
+        lock["groups"] = groups
     lz_common.atomic_write_json(Path(root) / "canon.lock.json", lock)
     return lock
+
+
+def _freeze_groups(canon: dict, locked_entries: list) -> list:
+    """Owner-reviewed, locale-scoped context; never imported from model output.
+
+    Group membership and scope notes are maintained in canon.json through
+    the project's normal review. Every member must already be approved for
+    the group's locale. Groups stay outside entry hashes and enforcement.
+    """
+    entries = {entry["id"]: entry for entry in locked_entries}
+    groups = []
+    seen = set()
+    for group in canon.get("groups", []):
+        if not group.get("approved_by") or not group.get("approved_at"):
+            continue
+        for field in ("id", "locale", "note", "scope", "approved_by", "approved_at"):
+            if not isinstance(group.get(field), str) or not group[field].strip():
+                raise ValueError(f"approved canon group needs a nonempty {field}")
+        ids = group.get("entry_ids")
+        if (not isinstance(ids, list) or not ids
+                or not all(isinstance(entry_id, str) for entry_id in ids)
+                or len(set(ids)) != len(ids)):
+            raise ValueError(f"canon group {group['id']} needs distinct entry_ids")
+        if group["id"] in seen:
+            raise ValueError(f"duplicate canon group: {group['id']}")
+        seen.add(group["id"])
+        for entry_id in ids:
+            entry = entries.get(entry_id)
+            if entry is None or (entry["kind"] != "dnt" and
+                    group["locale"] not in entry.get("translations", {})):
+                raise ValueError(f"canon group {group['id']}: {entry_id} is not approved for {group['locale']}")
+        groups.append({field: group[field] for field in (
+            "id", "locale", "entry_ids", "note", "scope", "approved_by", "approved_at",
+        )})
+    return groups
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,15 @@ style (see `style`); text left in the source language; wrong plural forms; incon
 sibling items; grammar and spelling. If the packet is a **restricted canon audit**
 (`canon_entry` is set), judge only how that one entry is rendered in each item.
 
+`canon_context` is informational, keyed by message id. It carries already-approved entries
+linked by an explicit occurrence or an owner-reviewed group. Preserve their IDs and read each
+group's `note` and `scope` before proposing a canon finding or a new candidate: an existing
+decision may explain a noun/adjective distinction or a scoped exception. Do not propose the
+same decision again. If its scope does not settle this usage, report that specific scope
+question rather than treating the decision as absent. Related phrases are not mandatory
+replacements outside their scope. This context never expands `canon`'s mechanical rules,
+waives a failed check, or widens a restricted audit beyond `canon_entry`.
+
 Reply with ONE JSON object and nothing else:
 
 ```json

@@ -1,0 +1,81 @@
+{
+  "canon": {
+    "schema": 1,
+    "entries": [
+      {
+        "id": "t-evidence", "kind": "term", "source": "evidence",
+        "note": "Noun decision", "occurrences": [],
+        "translations": {"de": {"status": "approved", "value": "Beweis", "approved_by": "owner", "approved_at": "2026-10-25"}}
+      },
+      {
+        "id": "t-evidence-based-genealogy", "kind": "term", "source": "Evidence-Based Genealogy",
+        "note": "Positioning adjective in the genealogy tagline", "occurrences": [],
+        "translations": {"de": {"status": "approved", "value": "Evidenzbasierte Genealogie", "approved_by": "owner", "approved_at": "2026-10-25"}}
+      },
+      {
+        "id": "t-ancestor-couple", "kind": "term", "source": "ancestor couple",
+        "note": "Rank row label", "occurrences": ["app:rank.rowCouple"],
+        "translations": {"de": {"status": "approved", "value": "Vorfahrenpaar", "approved_by": "owner", "approved_at": "2026-10-25"}}
+      },
+      {
+        "id": "t-save", "kind": "ui_label", "source": "Save",
+        "note": "Save button", "occurrences": [],
+        "translations": {"de": {"status": "approved", "value": "Speichern", "approved_by": "owner", "approved_at": "2026-10-25"}}
+      }
+    ],
+    "groups": [
+      {
+        "id": "evidence", "locale": "de",
+        "entry_ids": ["t-evidence", "t-evidence-based-genealogy"],
+        "note": "Use Beweis for the noun; retain evidenzbasiert for the positioning adjective.",
+        "scope": "Noun and positioning adjective decisions; other marketing phrases need a scoped decision.",
+        "approved_by": "owner", "approved_at": "2026-10-25"
+      },
+      {
+        "id": "unrelated", "locale": "de", "entry_ids": ["t-save"],
+        "note": "Approved button terminology", "scope": "Save buttons",
+        "approved_by": "owner", "approved_at": "2026-10-25"
+      }
+    ]
+  },
+  "messages": [
+    {"id": "app:analysis", "source": "evidence-based analysis", "targets": {"de": "evidenzbasierte Analysen"}},
+    {"id": "app:rank.rowCouple", "source": "Ancestor couple", "targets": {"de": "Vorfahrenpaar"}},
+    {"id": "app:other", "source": "Hello", "targets": {"de": "Hallo"}}
+  ],
+  "expected_context": {
+    "app:analysis": {
+      "entries": [
+        {
+          "id": "t-evidence", "kind": "term", "source": "evidence",
+          "note": "Noun decision", "occurrences": [],
+          "translations": {"de": {"status": "approved", "value": "Beweis", "approved_by": "owner", "approved_at": "2026-10-25"}}
+        },
+        {
+          "id": "t-evidence-based-genealogy", "kind": "term", "source": "Evidence-Based Genealogy",
+          "note": "Positioning adjective in the genealogy tagline", "occurrences": [],
+          "translations": {"de": {"status": "approved", "value": "Evidenzbasierte Genealogie", "approved_by": "owner", "approved_at": "2026-10-25"}}
+        }
+      ],
+      "groups": [
+        {
+          "id": "evidence", "locale": "de",
+          "entry_ids": ["t-evidence", "t-evidence-based-genealogy"],
+          "note": "Use Beweis for the noun; retain evidenzbasiert for the positioning adjective.",
+          "scope": "Noun and positioning adjective decisions; other marketing phrases need a scoped decision.",
+          "approved_by": "owner", "approved_at": "2026-10-25"
+        }
+      ]
+    },
+    "app:rank.rowCouple": {
+      "entries": [
+        {
+          "id": "t-ancestor-couple", "kind": "term", "source": "ancestor couple",
+          "note": "Rank row label", "occurrences": ["app:rank.rowCouple"],
+          "translations": {"de": {"status": "approved", "value": "Vorfahrenpaar", "approved_by": "owner", "approved_at": "2026-10-25"}}
+        }
+      ],
+      "groups": []
+    }
+  }
+}

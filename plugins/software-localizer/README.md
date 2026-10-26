@@ -19,6 +19,9 @@ native speaker.
   for a native speaker. A person still approves every term.
 - **Models.** Codex translates (read-only, returns JSON); Claude subagents review, audit, propose
   the canon, research and verify term usage on the web, and check adapter coverage.
+- **Approved audit context.** Explicit reviewed concept groups, scope notes and approved term
+  occurrences accompany audit messages without expanding mechanical enforcement
+  ([format and bounds](skills/software-localizer/references/state.md#approved-audit-context)).
 - **Safety.** A person's translation is never overwritten; nothing is exported without script
   checks and a review verdict bound to the exact value; export re-collects, compares, and writes
   under a journal that rolls back on failure.

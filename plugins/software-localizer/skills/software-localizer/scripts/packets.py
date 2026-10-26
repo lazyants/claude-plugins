@@ -218,6 +218,33 @@ def filter_canon_lock(canon_lock: dict, messages: list) -> dict:
     return {"entries": [entry for entry in canon_lock.get("entries", []) if entry.get("id") in seen_ids]}
 
 
+def audit_canon_context(canon_lock: dict, messages: list, locale: str) -> dict:
+    """Per-message informational links, separate from checks and candidate hashes.
+
+    Seed with literal relevance and explicit approved occurrences; expand
+    only through directly linked, approved groups for this locale. Never
+    infer aliases, follow transitive groups, or read the unfrozen canon.
+    """
+    entries = [entry for entry in canon_lock.get("entries", [])
+               if entry.get("kind") == "dnt" or
+               entry.get("translations", {}).get(locale, {}).get("status") == "approved"]
+    result = {}
+    for message in messages:
+        seeds = {entry["id"] for entry in ledger_mod.relevant_canon(message, {"entries": entries})}
+        occurrences = {entry["id"] for entry in entries if message["id"] in entry.get("occurrences", [])}
+        seeds.update(occurrences)
+        groups = [group for group in canon_lock.get("groups", [])
+                  if group.get("locale") == locale and group.get("approved_by")
+                  and group.get("approved_at") and seeds.intersection(group["entry_ids"])]
+        context_ids = occurrences | {entry_id for group in groups for entry_id in group["entry_ids"]}
+        if context_ids:
+            result[message["id"]] = {
+                "entries": [entry for entry in entries if entry["id"] in context_ids],
+                "groups": groups,
+            }
+    return result
+
+
 # ---------------------------------------------------------------------------
 # messages.json helpers
 # ---------------------------------------------------------------------------
@@ -456,6 +483,7 @@ def do_build(root: Path, kind: str, locale, templates_dir: Path, entry_ids=None)
         }
         if kind == "audit":
             packet["canon_entry"] = None
+            packet["canon_context"] = audit_canon_context(canon_lock, item_messages, locale)
         batches_out.append(_write_batch(run_locale_dir, name, kind, packet, templates_dir))
 
     return {"ok": True, "kind": kind, "locale": locale, "selected": len(selected_ids),
@@ -625,6 +653,7 @@ def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: 
             "kind": "audit", "locale": locale, "batch": name, "style": style,
             "canon": filter_canon_lock(canon_lock, item_messages),
             "canon_entry": canon_entry_meta,
+            "canon_context": audit_canon_context(canon_lock, item_messages, locale),
             "items": items,
         }
         batches_out.append(_write_batch(run_locale_dir, name, "audit", packet, templates_dir))
