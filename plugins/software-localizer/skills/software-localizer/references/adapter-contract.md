@@ -65,6 +65,9 @@ refusal replies `{"ok": false, "error": "…"}` with exit code 1.
   backups, staged copies). `collect` is refused when `files` names one.
 - `targets` — one entry per target locale; `null` when the project has no translation yet.
 - Values are carried **exactly**: leading and trailing spaces included.
+  Adapter acceptance verifies this preservation; it does not permit locale-specific boundary
+  exceptions to the core checks. A fragment that needs one follows the
+  [caller/catalog escalation route](fragment-boundaries.md).
 - `plural` — only for plural messages. `target_labels` must cover every target locale, in the
   order the project stores the forms. `exact: true` means the project's own plural rule selects
   that form for exactly one count (only such a form may drop the count argument). Take labels

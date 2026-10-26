@@ -16,6 +16,18 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   the noun/adjective group and the initial-capital occurrence example; they prove context transfer,
   not a model's linguistic verdict or a translation-quality improvement.
 
+## [software-localizer 0.3.5] — 2026-10-26
+
+### Added
+
+- An explicit decision route for locale-specific fragment boundaries (#1017). When correct
+  composition needs different boundary whitespace, retain the core rejection and escalate to
+  a reviewed caller/catalog change, then collect, check and review the changed composition
+  again. Adapter acceptance and passing project tests do not override the strict default.
+- A golden English punctuation-suffix/German word-suffix fixture shows why trimming can join
+  words, and how a coordinated whole-message composition passes without allowing unrelated
+  boundary changes. This is a synthetic core fixture, not a new project language audit.
+
 ## [software-localizer 0.3.4] — 2026-10-26
 
 ### Added
