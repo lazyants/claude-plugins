@@ -15,9 +15,10 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
   messages. A newly accepted verdict retires an older unaccepted proposal from the same known
   scope. Missing or invalid answers remain unreviewed, and verdict acceptance grants no export
   permission. The existing native handoff receipt binds answers to their complete frozen input.
-- Pending replacements from other audit scopes are preserved. Competing replacements remain
+- Pending checked replacements from other audit scopes are preserved. Competing replacements remain
   in saved verdicts and reports, with an explicit conflict instead of replacing active work.
-  Legacy proposals without scope metadata remain unknown and are retained for operator review.
+  Legacy proposals without scope metadata remain unknown and are retained for operator review;
+  findings without an approvable replacement leave the active slot available for new corrections.
 - Audit snapshots include approved informational canon context and follow the existing
   locale-specific canon dependency rules for corrected notes.
 

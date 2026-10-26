@@ -374,12 +374,14 @@ remain visible. A fresh same-scope verdict supersedes its older unaccepted propo
 audit records, not approval to modify the project ([details](references/state.md#audit-evidence-and-coverage)).
 
 Each message has one active replacement proposal. A failure from another audit scope preserves
-that pending replacement; any new replacement remains visible as saved evidence and is listed
+that pending checked replacement; any new replacement remains visible as saved evidence and is listed
 in `audit_proposal_conflicts`. Resolve the pending proposal, then rerun the other audit scope
 (`--fresh` for a full audit) before asking to approve its replacement.
 Older proposals without scope metadata remain **unknown**, not assumed to be full audits.
-They stay visible for operator review and can still be approved through `accept-audit` when
-checked; a new verdict cannot silently retire their unproven scope.
+Checked replacements stay active and can still be approved through `accept-audit`.
+Findings without an approvable replacement are retained as legacy evidence when a new verdict
+arrives, leaving the active slot available for a newly checked correction. Their original
+issues, hashes and run remain visible without inferring a scope.
 
 An accepted proposal still gets its own review verdict (step 6's review loop) before export.
 Changed proposals, including review counter-proposals, need a fresh project check before any

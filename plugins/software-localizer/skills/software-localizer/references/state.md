@@ -61,9 +61,11 @@ Ordinary audit builds select the remaining eligible messages; `--fresh` requests
 audit. The prior verdict remains evidence until a new valid verdict replaces it. A newly
 accepted verdict retires an older unaccepted proposal from the same scope before optionally
 storing a new one, including when the new verdict passes or has no replacement. Findings with
-no replacement still appear in the report and need human attention.
+no replacement still appear in the report and need human attention. Before replacing a finding
+without an approvable replacement (no value or failed checks), acceptance retains its exact
+record in `legacy_audit_findings`; the report shows it as historical evidence, not active work.
 
-An outstanding replacement from another audit scope is preserved. The incoming verdict and
+An outstanding checked replacement from another audit scope is preserved. The incoming verdict and
 its proposed value still persist; a competing replacement is reported in
 `audit_proposal_conflicts` and shown as saved evidence, not an active proposal. Resolve the
 outstanding proposal, then rerun the other scope (`--fresh` for full audits) to check and queue
@@ -72,9 +74,11 @@ its replacement through the existing approval route.
 Legacy proposals without `audit_scope` have unknown provenance: earlier versions used the
 same record shape for full and restricted audits. They remain visible for operator review,
 including unresolved findings with no replacement, and do not earn full-audit coverage.
-Neither a full nor a restricted verdict can automatically retire or overwrite this unknown
-work. Checked legacy replacements still use the existing `accept-audit` route; their unknown
-scope is preserved through candidate review rather than guessed from a batch name.
+Checked legacy replacements remain active and use the existing `accept-audit` route; their
+unknown scope is preserved through candidate review rather than guessed from a batch name.
+Legacy findings with no replacement or without passing checks use the same evidence retention
+when a new verdict arrives. This leaves the active slot available for a new checked correction
+without inferring the earlier finding's scope.
 
 ## Canon research evidence
 

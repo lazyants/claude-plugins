@@ -211,6 +211,31 @@ def _audit_rows(msg_id, entry, message, cfg, canon_lock, locale):
     return rows
 
 
+def _row_retained_audit(msg_id, finding):
+    scope = finding.get("audit_scope")
+    if scope is None:
+        scope_label = "unknown (legacy record)"
+    else:
+        scope_label = "full audit" if scope == "full" else f"restricted canon audit {scope}"
+    value = finding.get("value")
+    out = [
+        f"- `{msg_id}` — historical evidence; not an active proposal",
+        f"  - saved scope: {scope_label}; run: {finding.get('run', '?')}",
+        f"  - saved replacement: {_value_text(value) if value is not None else 'none'}",
+        f"  - saved checks: {finding.get('checks') or 'not recorded'}",
+    ]
+    if finding.get("run_dir"):
+        out.append(f"  - saved run directory: {finding['run_dir']}")
+    for field, digest in sorted(finding.items()):
+        if field.endswith("_sha256"):
+            out.append(f"  - saved {field}: {digest}")
+    for issue in finding.get("issues", []):
+        out.append(f"  - saved issue: {issue.get('kind', '?')}: {issue.get('text', '')}")
+    for problem in finding.get("problems", []):
+        out.append(f"  - saved problem: {_problem_text(problem)}")
+    return out
+
+
 def _audit_summary(lines, coverage):
     lines.extend(["## Audit coverage", "", f"- reviewed: {coverage['reviewed']} / {coverage['total']}"])
     for key in ("pass", "fail", "unresolved", "stale", "unreviewed"):
@@ -297,6 +322,7 @@ def build_report(root: Path, locale: str) -> str:
 
     exported, adopted, ready, needs_translation = [], [], [], []
     escalated, audit_findings, existing_notes = [], [], []
+    retained_audit_findings = []
     counts: dict = {}
 
     for msg_id, entry in sorted(entries.items()):
@@ -306,6 +332,9 @@ def build_report(root: Path, locale: str) -> str:
 
         message_findings = _audit_rows(msg_id, entry, message, cfg, canon_lock, locale)
         audit_findings.extend(message_findings)
+        retained_audit_findings.extend(
+            (msg_id, finding) for finding in entry.get("legacy_audit_findings", [])
+        )
 
         if state == "translated":
             if entry.get("candidate"):
@@ -348,6 +377,7 @@ def build_report(root: Path, locale: str) -> str:
     _section(lines, "Still needs translation", needs_translation, _row_pending)
     _section(lines, "Escalated", escalated, _row_escalated)
     _section(lines, "Audit findings", audit_findings, _row_audit)
+    _section(lines, "Retained audit findings", retained_audit_findings, _row_retained_audit)
     _section(lines, "Existing / human-locked translations", existing_notes, _row_notes)
 
     lines.append("## Canon candidates raised by reviews")

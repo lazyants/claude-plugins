@@ -1087,8 +1087,14 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             else:
                 entry.setdefault("canon_audits", {})[audit_scope] = record
             previous = entry.get("audit_proposal")
-            if previous and previous.get("audit_scope") == audit_scope:
-                entry["audit_proposal"] = None
+            if previous:
+                if previous.get("value") is None or previous.get("checks") != "pass":
+                    # Retain the exact evidence without occupying the slot a
+                    # person can promote only after a replacement passes checks.
+                    entry.setdefault("legacy_audit_findings", []).append(previous)
+                    entry["audit_proposal"] = None
+                elif previous.get("audit_scope") == audit_scope:
+                    entry["audit_proposal"] = None
 
         raw_candidates = verdict.get("new_canon_candidates")
         if raw_candidates is None:
@@ -1200,10 +1206,9 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             entry = ledger_mod.locale_entries(ledger_data, locale).setdefault(msg_id, {})
             pending = entry.get("audit_proposal")
             pending_scope = pending.get("audit_scope") if pending else None
-            # Unknown legacy scope cannot be retired: even a null finding may
-            # have no other durable record. Other scopes retain replacements.
-            if pending and (pending_scope is None
-                            or (pending.get("value") is not None and pending_scope != audit_scope)):
+            # Only an approvable replacement can still occupy this slot after
+            # retirement above; a different or unknown scope was not judged here.
+            if pending and pending_scope != audit_scope:
                 if proposed is not None:
                     audit_proposal_conflicts.append({
                         "id": msg_id, "scope": audit_scope, "pending_scope": pending_scope,

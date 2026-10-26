@@ -615,6 +615,29 @@ def _legacy_finding(root, run, value, explicit_unknown=False):
     return proposal
 
 
+def _assert_retained_history(markdown, original):
+    section = markdown.split("## Retained audit findings", 1)[1].split("\n## ", 1)[0]
+    assert "historical evidence; not an active proposal" in section
+    scope = original.get("audit_scope")
+    if scope is None:
+        assert "saved scope: unknown (legacy record)" in section
+    elif scope == "full":
+        assert "saved scope: full audit" in section
+    else:
+        assert f"saved scope: restricted canon audit {scope}" in section
+    assert f"run: {original['run']}" in section
+    assert original["issues"][0]["text"] in section
+    if original["value"] is not None:
+        assert original["value"] in section
+    for problem in original.get("problems", []):
+        assert problem["detail"] in section
+    for field, digest in original.items():
+        if field.endswith("_sha256"):
+            assert f"saved {field}: {digest}" in section
+    for activation_hint in ("next:", "accept-audit", "--fresh", "rerun"):
+        assert activation_hint not in section
+
+
 @pytest.mark.parametrize("run,explicit_unknown", [
     ("legacy-full-batch", False), ("canon-audit-t-hello", False), ("legacy-null-scope", True),
 ])
@@ -630,24 +653,38 @@ def test_full_audit_preserves_real_legacy_findings_without_scope_or_verdict_reco
     result = _accept(work_root, batch, {"a": _verdict(_packet(batch)[1]["items"][0], verdict, proposed)})
     saved = ledger.load(work_root)
     entry = saved["locales"]["de"]["a"]
-    assert entry["audit_proposal"] == original
+    if old_value is None:
+        assert entry["legacy_audit_findings"] == [original]
+        if verdict == "fail":
+            assert entry["audit_proposal"]["value"] == proposed
+            assert entry["audit_proposal"]["audit_scope"] == "full"
+        else:
+            assert not entry.get("audit_proposal")
+    else:
+        assert entry["audit_proposal"] == original
+        assert not entry.get("legacy_audit_findings")
     assert entry["audit"]["verdict"] == verdict
-    assert result["audit_proposals"] == []
+    assert result["audit_proposals"] == (["a"] if old_value is None and proposed is not None else [])
     assert result["audit_proposal_conflicts"] == (
-        [{"id": "a", "scope": "full", "pending_scope": None}] if proposed is not None else []
+        [{"id": "a", "scope": "full", "pending_scope": None}] if old_value is not None and proposed is not None else []
     )
     markdown = report.build_report(work_root, "de")
-    assert f"proposal scope: unknown (legacy record); run: {run}" in markdown
+    if old_value is not None:
+        assert f"proposal scope: unknown (legacy record); run: {run}" in markdown
+    else:
+        _assert_retained_history(markdown, original)
     assert "Legacy finding requiring operator follow-up." in markdown
     accepted = packets.do_accept_audit(work_root, "de", ["a"], "operator")
-    if old_value is None:
+    if old_value is None and proposed is None:
         assert accepted["accepted"] == []
-        assert accepted["failed"][0]["reason"] == "audit finding has no proposed replacement"
+        expected_reason = "audit finding has no proposed replacement" if verdict == "fail" else "no stored audit proposal"
+        assert accepted["failed"][0]["reason"] == expected_reason
         assert ledger.load(work_root) == saved
     else:
         assert accepted["accepted"] == ["a"]
         candidate = ledger.load(work_root)["locales"]["de"]["a"]["candidate"]
-        assert candidate["value"] == old_value and candidate.get("audit_scope") is None
+        assert candidate["value"] == (old_value if old_value is not None else proposed)
+        assert candidate.get("audit_scope") == (None if old_value is not None else "full")
 
 
 def test_restricted_pass_preserves_unknown_legacy_null_finding(work_root):
@@ -655,9 +692,67 @@ def test_restricted_pass_preserves_unknown_legacy_null_finding(work_root):
     _restricted_request(work_root)
     _accept(work_root, _build(work_root, entry_ids=["t-hello"])["batches"][0])
     saved = ledger.load(work_root)["locales"]["de"]["a"]
-    assert saved["audit_proposal"] == original
+    assert saved["legacy_audit_findings"] == [original]
+    assert not saved.get("audit_proposal")
     assert saved["canon_audits"]["t-hello"]["verdict"] == "pass"
-    assert "Legacy finding requiring operator follow-up." in report.build_report(work_root, "de")
+    _assert_retained_history(report.build_report(work_root, "de"), original)
+
+
+@pytest.mark.parametrize("legacy_kind", ["null", "failed_checks"])
+@pytest.mark.parametrize("verdict,proposed", [("pass", None), ("fail", "Hallo!")])
+def test_unapprovable_unknown_finding_is_retained_without_blocking_fresh_work(work_root, legacy_kind, verdict, proposed):
+    original = _legacy_finding(work_root, "legacy-unapprovable", None if legacy_kind == "null" else "Broken correction")
+    if legacy_kind == "failed_checks":
+        original["checks"] = "fail"
+        original["problems"] = [{"check": "arguments", "detail": "The previous correction failed its checks."}]
+        data = ledger.load(work_root)
+        data["locales"]["de"]["a"]["audit_proposal"] = copy.deepcopy(original)
+        ledger.save(work_root, data, locales=["de"])
+    batch = _build(work_root, fresh=True)["batches"][0]
+    result = _accept(work_root, batch, {"a": _verdict(_packet(batch)[1]["items"][0], verdict, proposed)})
+    saved = ledger.load(work_root)["locales"]["de"]["a"]
+    assert saved["legacy_audit_findings"] == [original]
+    assert result["audit_proposal_conflicts"] == []
+    assert saved["candidate"] is None
+    markdown = report.build_report(work_root, "de")
+    _assert_retained_history(markdown, original)
+    if verdict == "pass":
+        assert not saved.get("audit_proposal")
+        assert result["audit_proposals"] == []
+        assert _coverage(work_root)["pass"] == 1
+        return
+
+    assert result["audit_proposals"] == ["a"]
+    assert saved["audit_proposal"]["value"] == proposed and saved["audit_proposal"]["checks"] == "pass"
+    assert packets.do_accept_audit(work_root, "de", ["a"], "operator")["accepted"] == ["a"]
+    review = packets.do_build(work_root, "review", "de", TEMPLATES_DIR)["batches"][0]
+    assert _accept(work_root, review)["passed"] == ["a"]
+    final = ledger.load(work_root)
+    candidate = final["locales"]["de"]["a"]["candidate"]
+    assert candidate["value"] == proposed and candidate["accepted_by"] == "operator"
+    assert ledger.exportable(final, "de") == ["a"]
+    assert final["locales"]["de"]["a"]["legacy_audit_findings"] == [original]
+
+
+def test_failed_check_other_scope_proposal_is_retained_without_blocking_checked_correction(work_root):
+    _workspace(work_root)
+    _restricted_request(work_root)
+    restricted = _build(work_root, entry_ids=["t-hello"])["batches"][0]
+    _accept(work_root, restricted, {"a": _verdict(_packet(restricted)[1]["items"][0], "fail", "Hallo {unexpected}")})
+    original = copy.deepcopy(ledger.load(work_root)["locales"]["de"]["a"]["audit_proposal"])
+    assert original["audit_scope"] == "t-hello" and original["checks"] == "fail"
+    assert original["problems"]
+    fresh = _build(work_root, fresh=True)["batches"][0]
+    result = _accept(work_root, fresh, {"a": _verdict(_packet(fresh)[1]["items"][0], "fail", "Hallo!")})
+    saved = ledger.load(work_root)["locales"]["de"]["a"]
+    assert result["audit_proposals"] == ["a"] and result["audit_proposal_conflicts"] == []
+    assert saved["legacy_audit_findings"] == [original]
+    assert saved["audit_proposal"]["value"] == "Hallo!" and saved["audit_proposal"]["checks"] == "pass"
+    assert saved["audit_proposal"]["audit_scope"] == "full"
+    _assert_retained_history(report.build_report(work_root, "de"), original)
+    assert packets.do_accept_audit(work_root, "de", ["a"], "operator")["accepted"] == ["a"]
+    candidate = ledger.load(work_root)["locales"]["de"]["a"]["candidate"]
+    assert candidate["value"] == "Hallo!" and candidate["audit_scope"] == "full"
 
 
 def test_legacy_unknown_scope_survives_candidate_and_review_counterproposal(work_root):
