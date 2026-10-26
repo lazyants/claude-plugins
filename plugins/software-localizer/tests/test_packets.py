@@ -1469,7 +1469,8 @@ def test_accept_audit_without_replacement_survives_save_load_and_report(work_roo
     item = packet["items"][0]
     issues = [{"kind": "meaning", "text": "Needs domain clarification before a safe replacement."}]
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": item["value_sha256"], "verdict": "fail", "issues": issues,
+        "value_sha256": item["value_sha256"], "audit_sha256": item["audit_sha256"],
+        "verdict": "fail", "issues": issues,
         "proposed": None, "new_canon_candidates": [],
     }}})
 
@@ -1481,6 +1482,7 @@ def test_accept_audit_without_replacement_survives_save_load_and_report(work_roo
     entry = saved["locales"]["de"]["a"]
     finding = entry["audit_proposal"]
     assert finding == {
+        "audit_scope": "full",
         "value": None, "value_sha256": None, "checks": None, "problems": [], "issues": issues,
         "audited_target_sha256": item["value_sha256"],
         "source_sha256": ledger_mod.source_sha256(message),
@@ -1515,7 +1517,8 @@ def test_accept_audit_retains_packet_style_provenance(work_root, proposed):
     run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": make_entry("existing")}}, "audit", "de")
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
+        "value_sha256": packet["items"][0]["value_sha256"],
+        "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "fail",
         "issues": [{"kind": "style", "text": "Needs follow-up."}], "proposed": proposed,
     }}})
     changed_cfg = {**cfg, "style": {"de": {"formality": "du", "notes": "Changed since build."}}}
@@ -1535,7 +1538,8 @@ def test_accept_audit_without_replacement_replaces_old_proposal(work_root):
     run_dir = build_one_batch(work_root, cfg, make_messages([message]), {"de": {"a": entry}}, "audit", "de")
     packet = lz_common.read_json(run_dir / "packet.json", "packet.json")
     output_path = write_output(run_dir, {"verdicts": {"a": {
-        "value_sha256": packet["items"][0]["value_sha256"], "verdict": "fail",
+        "value_sha256": packet["items"][0]["value_sha256"],
+        "audit_sha256": packet["items"][0]["audit_sha256"], "verdict": "fail",
         "issues": [{"kind": "meaning", "text": "The earlier correction is unsafe."}], "proposed": None,
     }}})
 

@@ -418,12 +418,17 @@ def test_new_same_scope_verdict_retires_unaccepted_old_proposal(work_root, next_
     fresh = _build(work_root, fresh=True)["batches"][0]
     _accept(work_root, fresh, {"a": _verdict(_packet(fresh)[1]["items"][0], next_verdict)})
     entry = ledger.load(work_root)["locales"]["de"]["a"]
-    assert not entry.get("audit_proposal")
+    if next_verdict == "fail":
+        assert entry["audit_proposal"]["value"] is None
+        assert entry["audit_proposal"]["audit_scope"] == "full"
+    else:
+        assert not entry.get("audit_proposal")
     assert entry["candidate"] is None
     assert "Hallo!" not in report.build_report(work_root, "de")
     result = packets.do_accept_audit(work_root, "de", ["a"], "operator")
     assert result["accepted"] == []
-    assert result["failed"][0]["reason"] == "no stored audit proposal"
+    expected_reason = "audit finding has no proposed replacement" if next_verdict == "fail" else "no stored audit proposal"
+    assert result["failed"][0]["reason"] == expected_reason
     coverage = _coverage(work_root)
     assert coverage["reviewed"] == 1
     assert coverage["unresolved"] == (1 if next_verdict == "fail" else 0)
