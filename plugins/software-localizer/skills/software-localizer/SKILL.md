@@ -232,6 +232,10 @@ An accepted proposal still gets its own review verdict (step 6's review loop) be
 Changed proposals, including review counter-proposals, need a fresh project check before any
 new operator acceptance; results for an earlier value do not cover its replacement.
 
+If a proposal needs to repeat a named argument more often than its non-plural source, keep
+the failed check and follow the [reviewed source/caller escalation](references/checks.md#when-a-locale-needs-to-repeat-a-named-argument).
+Runtime success and audit acceptance cannot waive the argument check.
+
 **Many target languages.** Every step from here on is per locale (`--locale L`), and locales
 never share state: the ledger, candidates, style, plural labels, canon translations, export and
 report are all kept per locale. With several target languages, run the per-locale loops in

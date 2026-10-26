@@ -117,6 +117,9 @@ Reply:
   variants the framework generates from the actual replacement key: for `actionText`, those are
   `:actionText`, `:ActionText` and `:ACTIONTEXT`, with signature `:actionText`. Do not lowercase
   arbitrary tokens: `:actiontext` keeps its own name and signature and must not match `:actionText`.
+  Emit one token for **each occurrence**, including repeated uses of the same named argument;
+  never deduplicate them. A locale that needs more occurrences than a non-plural source follows
+  the [reviewed source/caller escalation](checks.md#when-a-locale-needs-to-repeat-a-named-argument).
 - `structure` — anything that must survive translation verbatim: a reference to another
   message, a markup tag, a format directive.
 - `ok: false` — the text would fail to compile or render in the project.

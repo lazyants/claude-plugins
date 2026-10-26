@@ -20,6 +20,59 @@ Why the singular form is not the model for plural parity: in Russian the `one` f
 21, 31, 101…, so "один файл" without the number would be wrong there. The project's plural
 rule, through the adapter's `exact` flag, decides which forms may drop the count.
 
+## When a locale needs to repeat a named argument
+
+Non-plural messages require the same **number of occurrences of each signature** as the
+source. Reusing one named runtime value can be valid in the project's renderer and still fail
+this check. The current contract has no per-message or per-locale multiplicity waiver;
+adapter acceptance, an operator's audit acceptance and a model review do not grant one.
+
+For example, suppose the caller supplies one numeric `n >= 2`, the number of great
+generations for both reciprocal relatives:
+
+```text
+source:   {n}× Great-grandparent or Great-grandchild
+current:  Ur×{n}-Großelternteil oder Urenkelkind
+proposed: Ur×{n}-Großelternteil oder Ur×{n}-Enkelkind
+```
+
+The current target applies the multiplier only to the ancestor. Repeating it for the
+descendant corrects that depth mismatch, but has two `{n}` signatures against the source's
+one, so the proposal remains blocked with `arguments: extra ['{n}']`. This example does not
+approve the German wording as a whole. Successful parsing or rendering proves neither the
+intended relationship depth nor linguistic suitability.
+
+**Escalate to the project owner for a reviewed caller/source-catalog rewrite:**
+
+1. Record the message id, locale, exact source/current/proposed values and parsed signatures,
+   the failed core check, the caller's actual argument meaning and supported values, and the
+   reason repetition is needed. Preserve the failed proposal and its check output as evidence;
+   a stored audit finding is not an accepted candidate.
+2. Have the project owner and a reviewer competent in the locale judge a concrete rewrite
+   against the caller and UI. One option, if both roles use the same depth, is to make both
+   occurrences explicit in the source:
+   `{n}× Great-grandparent or {n}× Great-grandchild`. A named-value renderer may still need only
+   one supplied `n`; verify that in the actual project with representative supported values
+   (here, at least `n=2` and `n=3`) and check the meaning of both roles. Review every affected
+   locale against the rewritten source: a target with only one `{n}` now fails multiplicity.
+   If the source cannot express the intended use safely, redesign the caller/messages with
+   the owner. Record who approved which exact change and why through normal project review.
+3. After that project change is approved, run `collect.py` and `ledger.py sync` again. Build
+   fresh audit/translation and review packets against the new source; old proposals and
+   verdicts do not authorize it. Existing and human-locked translations still need explicit
+   adoption or audit acceptance. Follow the [project checks](project-checks.md) before audit
+   acceptance and live export, as well as all core checks and review of the exact value.
+   Any adapter change also needs `adapter_check.py run` + `accept` again.
+4. If the owner declines the rewrite, a reviewer rejects it, or caller/runtime evidence is
+   unavailable, leave the proposal blocked and report the unresolved message. Do not promote
+   or export it. A pending translation that exhausts `max_rounds` follows the normal
+   `escalated` path; existing project text stays in place pending an approved project fix.
+
+Do not deduplicate parser tokens, hide or rename an extra argument, change its formatter,
+misclassify a non-plural message as plural, or edit the ledger/check results to make this pass.
+`allow_identical` only covers the `identical` check. A future adapter/per-message exception
+would require an explicitly reviewed core contract change; none is enabled by this procedure.
+
 ## The review turn (Claude) — what scripts cannot see
 
 Meaning in context; whether approved canon terms and UI labels are used (in any correct
