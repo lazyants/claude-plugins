@@ -70,6 +70,8 @@ seed is one of its members and its locale matches the audit. Its members and sco
 together; membership does not expand transitively through other groups. Unrelated groups and
 unapproved translations stay out. A term's explicit occurrence supplies informational context even
 when `ancestor couple` does not literally match the source `Ancestor couple`.
+Occurrence entries already present in `canon` are not repeated unless they belong to a selected
+group, whose members travel together with their shared note and scope.
 
 `canon` still contains only the existing mechanical relevance selection. `canon_context` is a
 separate frozen snapshot for the reviewer: it never enters checks or candidate canon hashes,

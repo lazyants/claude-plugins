@@ -91,6 +91,17 @@ def test_audit_approved_context_golden_packet(work_root, approved_context, restr
     assert actual_context == approved_context["expected_context"]
 
 
+def test_audit_without_groups_does_not_duplicate_existing_canon(work_root, approved_context):
+    del approved_context["canon"]["groups"]
+    lock = canon_mod.freeze(work_root, approved_context["canon"])
+    msg = make_message("app:rank.rowCouple", "ancestor couple", targets={"de": "Vorfahrenpaar"})
+    run_dir = build_one_batch(work_root, make_cfg(), make_messages([msg]),
+                              {"de": {msg["id"]: make_entry("existing")}}, "audit", "de", canon_lock=lock)
+    packet = lz_common.read_json(run_dir / "packet.json", "packet")
+    assert [entry["id"] for entry in packet["canon"]["entries"]] == ["t-ancestor-couple"]
+    assert packet["canon_context"] == {}
+
+
 def test_canon_context_is_locale_scoped_one_hop_and_approved_only(work_root, approved_context):
     canon = approved_context["canon"]
     evidence_group = canon["groups"][0]

@@ -230,13 +230,13 @@ def audit_canon_context(canon_lock: dict, messages: list, locale: str) -> dict:
                entry.get("translations", {}).get(locale, {}).get("status") == "approved"]
     result = {}
     for message in messages:
-        seeds = {entry["id"] for entry in ledger_mod.relevant_canon(message, {"entries": entries})}
+        literal = {entry["id"] for entry in ledger_mod.relevant_canon(message, {"entries": entries})}
         occurrences = {entry["id"] for entry in entries if message["id"] in entry.get("occurrences", [])}
-        seeds.update(occurrences)
+        seeds = literal | occurrences
         groups = [group for group in canon_lock.get("groups", [])
                   if group.get("locale") == locale and group.get("approved_by")
                   and group.get("approved_at") and seeds.intersection(group["entry_ids"])]
-        context_ids = occurrences | {entry_id for group in groups for entry_id in group["entry_ids"]}
+        context_ids = (occurrences - literal) | {entry_id for group in groups for entry_id in group["entry_ids"]}
         if context_ids:
             result[message["id"]] = {
                 "entries": [entry for entry in entries if entry["id"] in context_ids],
