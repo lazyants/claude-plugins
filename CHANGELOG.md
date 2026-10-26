@@ -2,6 +2,18 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.3.2] — 2026-10-26
+
+### Added
+
+- A reviewed escalation route for a locale that needs to repeat one named argument in a
+  non-plural message (#1021). The operator takes a concrete caller/source-catalog rewrite to
+  the project owner and locale reviewer, then recollects and runs fresh checks and review.
+  Exact signature multiplicity stays enforced; runtime success or audit approval grants no
+  waiver. The adapter contract explicitly requires a token for every argument occurrence.
+- A reciprocal-relationship depth fixture covers the blocked repeat, a matching rewritten
+  source, and continued rejection of missing, extra, renamed or differently formatted arguments.
+
 ## [software-localizer 0.3.1] — 2026-10-24
 
 ### Added

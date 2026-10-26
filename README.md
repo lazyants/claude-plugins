@@ -13,7 +13,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code). Choose a plugi
 | [`enduser-handbook`](#enduser-handbook--v1190) | 1.19.0 | Write and maintain a user handbook with screenshots from the running app. |
 | [`literary-translator`](#literary-translator--v12221) | 1.222.1 | Translate books with a shared glossary, review, and resumable work. |
 | [`multi-profile-plugins`](#multi-profile-plugins--v152) | 1.5.2 | Diagnose Claude/Codex profile isolation and report usage limits across accounts. |
-| [`software-localizer`](#software-localizer--v031) | 0.3.1 | Translate application strings or audit existing translations. |
+| [`software-localizer`](#software-localizer--v032) | 0.3.2 | Translate application strings or audit existing translations. |
 
 ## Install / update / uninstall
 
@@ -87,7 +87,7 @@ Diagnoses shared plugin stores and configuration paths that cross profile bounda
 
 [Profiles, diagnostics, and usage reports](docs/plugin-guide.md#multi-profile-plugins)
 
-## `software-localizer` — v0.3.1
+## `software-localizer` — v0.3.2
 
 Ask: “Translate this app into German,” or “Audit our German translation.”
 

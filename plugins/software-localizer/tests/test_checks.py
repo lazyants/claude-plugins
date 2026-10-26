@@ -6,6 +6,9 @@ fixtures directly instead of running a real adapter.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from checks import check_candidate, forms_of
@@ -160,6 +163,60 @@ def test_arguments_nonplural_fail_different_signature():
     value_parse = ok([arg("price", "{price, currency}")])
     problems = check_candidate(message, "de", "Zahl {price}", source_parse, value_parse, EMPTY_CANON, DEFAULT_CFG)
     assert len(by_check(problems, "arguments")) == 1
+
+
+@pytest.fixture
+def reciprocal_depth():
+    return json.loads(
+        (Path(__file__).parent / "fixtures" / "reciprocal_depth.json").read_text(encoding="utf-8")
+    )
+
+
+def test_reciprocal_depth_repeat_is_blocked_until_source_rewrite(reciprocal_depth):
+    # Golden core fixture from #1021, with declared parse results. It does
+    # not exercise a project parser or certify the example's German wording.
+    case = reciprocal_depth
+    argument = case["argument"]
+    current_parse = ok([argument.copy()])
+    proposed_parse = ok([argument.copy(), argument.copy()])
+    message = make_message(case["id"], case["source"])
+    assert check_candidate(
+        message, case["locale"], case["current"], current_parse, current_parse,
+        EMPTY_CANON, DEFAULT_CFG,
+    ) == []  # Passing script checks cannot establish relationship depth.
+    assert check_candidate(
+        message, case["locale"], case["proposed"], current_parse, proposed_parse,
+        EMPTY_CANON, DEFAULT_CFG,
+    ) == case["default_problems"]
+
+    rewritten = make_message(case["id"], case["rewritten_source"])
+    assert check_candidate(
+        rewritten, case["locale"], case["proposed"], proposed_parse, proposed_parse,
+        EMPTY_CANON, DEFAULT_CFG,
+    ) == []
+    assert check_candidate(
+        rewritten, case["locale"], case["current"], proposed_parse, current_parse,
+        EMPTY_CANON, DEFAULT_CFG,
+    ) == [{"check": "arguments", "detail": "missing ['{n}']"}]
+
+
+@pytest.mark.parametrize("target, tokens", [
+    ("Großelternteil oder Enkelkind", []),
+    ("Ur×{n}-Großelternteil oder Ur×{m}-Enkelkind", [arg("n"), arg("m")]),
+    ("Ur×{n}-Großelternteil oder Ur×{n, number}-Enkelkind", [arg("n"), arg("n", "{n, number}")]),
+    ("Ur×{n}-Großelternteil oder Ur×{n}-Enkelkind ({n})", [arg("n"), arg("n"), arg("n")]),
+])
+def test_reciprocal_depth_unrelated_argument_changes_stay_blocked(reciprocal_depth, target, tokens):
+    case = reciprocal_depth
+    for source in (case["source"], case["rewritten_source"]):
+        # The fixture uses plain named placeholders; declare every occurrence
+        # rather than collapsing repeated names to a set.
+        source_parse = ok([case["argument"].copy() for _ in range(source.count("{n}"))])
+        problems = check_candidate(
+            make_message(case["id"], source), case["locale"], target,
+            source_parse, ok(tokens), EMPTY_CANON, DEFAULT_CFG,
+        )
+        assert by_check(problems, "arguments")
 
 
 # --- arguments (plural): count_arguments as one group, exact/non-exact -----

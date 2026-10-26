@@ -1,0 +1,10 @@
+{
+  "id": "ui:reciprocalDepth",
+  "locale": "de",
+  "source": "{n}× Great-grandparent or Great-grandchild",
+  "current": "Ur×{n}-Großelternteil oder Urenkelkind",
+  "proposed": "Ur×{n}-Großelternteil oder Ur×{n}-Enkelkind",
+  "rewritten_source": "{n}× Great-grandparent or {n}× Great-grandchild",
+  "argument": {"kind": "argument", "name": "n", "signature": "{n}"},
+  "default_problems": [{"check": "arguments", "detail": "extra ['{n}']"}]
+}
