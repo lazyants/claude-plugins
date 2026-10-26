@@ -47,6 +47,16 @@ research packets use unused directories, preserving original packets, prompts an
 resource-limited work separately, and approval history includes explicit progress when present.
 See [ordinary-turn continuation](research-continuation.md) before running the next packets.
 
+Both research build kinds return a `diagnostics` list in their JSON response. A selected
+entry with stored occurrence IDs absent from `messages.json` gets one
+`unresolved_canon_occurrences` diagnostic with `entry_id`, `unresolved_ids`, `declared_count`
+and `resolvable_count`. Counts cover its entire declared list, independently of the five-example
+sample; a present message without a target in this locale still counts as resolvable.
+Entries with no unresolved IDs produce no diagnostic. The build keeps using current examples
+and leaves `ok`, `selected` and `skipped` unchanged. These are source-context warnings, separate
+from current-message audit coverage: they neither invalidate accepted results nor authorize
+pruning references, changing approvals or broad re-research. Packets and canon state are unchanged.
+
 Nothing hashes it: it is not part of `canon.lock.json`, a candidate's snapshot or any check, so
 adding or redoing research never makes a translation stale. It is durable evidence that belongs
 with `canon.json` and `canon.history.json` — the record of why a term was chosen — and

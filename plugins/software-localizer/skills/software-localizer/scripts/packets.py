@@ -577,6 +577,19 @@ def _build_research(root: Path, cfg: dict, kind: str, locale: str, entry_ids, te
     else:
         selected_ids = _select_research_verify(research, entry_ids)
 
+    # Check every declared reference, independently of the bounded example
+    # sample. These warnings describe stored source context, not audit coverage.
+    diagnostics = []
+    for entry_id in selected_ids:
+        occurrences = (by_entry.get(entry_id) or {}).get("occurrences") or []
+        unresolved = [i for i in occurrences if i not in by_id]
+        if unresolved:
+            diagnostics.append({
+                "code": "unresolved_canon_occurrences", "entry_id": entry_id,
+                "unresolved_ids": unresolved, "declared_count": len(occurrences),
+                "resolvable_count": len(occurrences) - len(unresolved),
+            })
+
     batches_out = []
     for name, ids in name_batches(make_batches(selected_ids, RESEARCH_BATCH_SIZE)):
         if kind == "research":
@@ -597,7 +610,7 @@ def _build_research(root: Path, cfg: dict, kind: str, locale: str, entry_ids, te
         batches_out.append(_write_batch(root / "runs" / locale, name, kind, packet, templates_dir))
 
     return {"ok": True, "kind": kind, "locale": locale, "selected": len(selected_ids),
-            "batches": batches_out, "skipped": []}
+            "batches": batches_out, "skipped": [], "diagnostics": diagnostics}
 
 
 def _build_restricted_canon_audit(root: Path, cfg: dict, locale: str, entry_id: str, by_id: dict,

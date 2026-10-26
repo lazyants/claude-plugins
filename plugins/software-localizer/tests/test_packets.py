@@ -1756,6 +1756,63 @@ def test_build_research_without_config_block_has_null_field_and_no_sites(work_ro
     assert packet["field"] is None and packet["sites"] == []
 
 
+@pytest.mark.parametrize("kind", ["research", "research_verify"])
+@pytest.mark.parametrize("occurrences,unresolved,example_ids,resolvable", [
+    (["gone", "m0", "m1"], ["gone"], ["m0", "m1"], 2),
+    (["gone-a", "gone-b"], ["gone-a", "gone-b"], [], 0),
+    ([f"m{n}" for n in range(7)] + ["gone-tail"], ["gone-tail"],
+     [f"m{n}" for n in range(5)], 7),
+    ([f"m{n}" for n in range(7)], [], [f"m{n}" for n in range(5)], 7),
+    ([], [], [], 0),
+])
+def test_research_build_reports_unresolved_occurrences_without_changing_state(
+        work_root, kind, occurrences, unresolved, example_ids, resolvable):
+    # m1 has no German target: it is still a resolvable source example.
+    messages = make_messages([make_message(f"m{n}", f"Account {n}",
+                                         targets={"de": f"Konto {n}"} if n != 1 else {})
+                              for n in range(7)])
+    entry = make_canon_entry("t-account", "account", note="a login",
+                             locales={"de": ("Konto", "approved")}, occurrences=occurrences)
+    entry["translations"]["de"].update(approved_by="operator", approved_at="2026-10-24T12:00:00Z")
+    setup_research_workspace(work_root, [entry], messages=messages)
+    research = research_term()
+    canon_mod.save_research(work_root, "de", {"schema": 1, "locale": "de", "entries": {"t-account": {
+        "kind": "term", "source": "account", "research": research,
+        "research_sha256": canon_mod.research_sha256(research),
+        "researched": {"run": "earlier", "at": "2026-10-24T12:00:00Z"}, "verification": None}}})
+    checkpoint_sha256 = lz_common.sha256_json(research_records(work_root)["t-account"])
+    lz_common.atomic_write_json(work_root / "canon.history.json", [{"entry": "t-account", "action": "approve"}])
+    old_packet = work_root / "runs" / "de" / "earlier" / "packet.json"
+    lz_common.atomic_write_json(old_packet, {"kind": "audit", "items": []})
+    old_packet_bytes = old_packet.read_bytes()
+    before = _snapshot(work_root, skip={"runs"})
+
+    code, result = run_cli(["build", "--root", str(work_root), "--kind", kind,
+                            "--locale", "de", "--entry", "t-account"])
+
+    assert code == 0 and result["ok"] is True
+    assert result["selected"] == 1 and result["skipped"] == []
+    assert result["diagnostics"] == ([{
+        "code": "unresolved_canon_occurrences", "entry_id": "t-account",
+        "unresolved_ids": unresolved, "declared_count": len(occurrences),
+        "resolvable_count": resolvable,
+    }] if unresolved else [])
+    item = packet_of(result["batches"][0])["items"][0]
+    expected_examples = [{"id": i, "source": f"Account {i[1:]}",
+                          **({"value": f"Konto {i[1:]}"} if i != "m1" else {})}
+                         for i in example_ids]
+    assert item["examples"] == expected_examples
+    expected_item = {"id": "t-account", "kind": "term", "source": "account", "note": "a login",
+                     "examples": expected_examples, "checkpoint_sha256": checkpoint_sha256}
+    if kind == "research":
+        expected_item.update(proposed="Konto", status="approved", current=[])
+    else:
+        expected_item.update(research=research, research_sha256=canon_mod.research_sha256(research))
+    assert item == expected_item
+    assert _snapshot(work_root, skip={"runs"}) == before
+    assert old_packet.read_bytes() == old_packet_bytes
+
+
 def build_research_batch(work_root, ids):
     return packets.do_build(work_root, "research", "de", TEMPLATES_DIR, entry_ids=list(ids))["batches"][0]
 
