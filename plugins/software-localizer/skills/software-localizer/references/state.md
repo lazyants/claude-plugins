@@ -62,6 +62,37 @@ adding or redoing research never makes a translation stale. It is durable eviden
 with `canon.json` and `canon.history.json` — the record of why a term was chosen — and
 `canon.py approve` copies a summary of it into the history event of each approval.
 
+## Reviewed DNT scope decisions
+
+For an approved DNT in `canon.json`, `occurrences` is the stored union and
+`approved_occurrences` is the active scope copied into `canon.lock.json`. The difference is
+pending import proposals. Existing approved entries without the snapshot retain their prior
+scope; the next import captures it before merging additions. Initial `approve` snapshots the
+whole proposed scope. Imports remain non-destructive and never approve an expansion.
+
+`canon.py scope` reports active/pending ids and a hash of the entire current entry.
+`change-scope` requires that hash, the person's name/reason and exact add/remove ids. It appends
+the before/after active and stored scopes, deltas, hashes, affected ids, locales and decision to
+`canon.history.json`; `scope_approved_by`/`scope_approved_at` identify the latest scope decision
+without overwriting the original entry approval. A stale expected hash refuses before writing.
+Source spelling, notes, translations, sibling entries and research files are unchanged.
+
+An active change updates the frozen entry hash and writes
+`runs/<locale>/canon-audit-<entry>.json` for every configured target locale. These requests cover
+the old/new scope union plus source-text matches, because the shared entry hash also makes
+their candidate reviews stale. Deleted ids remain in requests so the packet builder reports
+them, along with missing target values, as skipped. A request is work to do, not proof that an
+audit ran. Build/accept each restricted audit and run fresh checks/review after ledger sync;
+export's existing hash guard still refuses a stale candidate. A pending-only rejection changes
+history and the editable entry hash but leaves the active lock unchanged and requests no audit.
+
+Keep canon operations serialized in the coordinating session, as for locale wording changes.
+The canon, lock and history are separate atomic file replacements, not a multi-file transaction:
+after an interrupted operation compare their readbacks with the appended decision before
+continuing; refreeze the saved canon and rebuild any missing audit requests from that event's
+`affected_occurrences`/`target_locales`, retaining its `scope_change` before/after context.
+Never invent or infer a person's approval to repair an interrupted decision.
+
 ## Export safety — `export_values.py`
 
 0. Exports hold an exclusive lock on `R/exports/.lock` from start to finish, so two exports
