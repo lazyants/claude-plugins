@@ -2,6 +2,17 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [software-localizer 0.7.2] — 2026-10-30
+
+### Fixed
+
+- After collection, ledger sync marks absent message IDs as retired so their saved candidates
+  no longer block unrelated locale exports (#1038). Retirement retains state, candidates,
+  verdicts, audit records and notes, including accepted audit replacements.
+- Returning IDs resume ordinary state transitions and freshness checks. Present stale
+  candidates still refuse export, and human edits retain their existing protection.
+- Reports list retired messages separately and status omits them from translation/review hints.
+
 ## [software-localizer 0.7.1] — 2026-10-30
 
 ### Fixed

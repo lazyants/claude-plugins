@@ -188,7 +188,8 @@ def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock
     # last.
     for locale in target_locales:
         entries = locales_entries.get(locale, {})
-        if any(ledger_mod.candidate_needs_review(e) for e in entries.values() if isinstance(e, dict)):
+        if any(ledger_mod.candidate_needs_review(e) for e in entries.values()
+               if isinstance(e, dict) and not e.get("retired")):
             return f"packets.py build --root {root_display} --kind review --locale {locale}"
 
     for locale in target_locales:
@@ -201,7 +202,8 @@ def _next_command(root: Path, cfg, cfg_problems, adapter_check_ran, adapter_lock
         if exportable_ids is None:
             continue  # unknown export-readiness here -- never guess "needs translate"
         for msg_id, e in entries.items():
-            if isinstance(e, dict) and e.get("state") in ("pending", "stale") and msg_id not in exportable_ids:
+            if (isinstance(e, dict) and not e.get("retired")
+                    and e.get("state") in ("pending", "stale") and msg_id not in exportable_ids):
                 return f"packets.py build --root {root_display} --kind translate --locale {locale}"
 
     for locale in target_locales:
