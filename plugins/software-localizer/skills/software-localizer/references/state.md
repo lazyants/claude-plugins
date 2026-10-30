@@ -22,6 +22,17 @@ translated it meanwhile) becomes `existing`.
 Every candidate records the source, context and style it was made and reviewed against; when
 any of them changes, sync clears the candidate.
 
+After collection removes an ID, sync reports it in `gone` and marks its entry
+`retired: true`. Its state, candidates, review verdicts and audit evidence remain
+in the ledger, but it is ineligible for export, including accepted audit replacements.
+Reports list retired entries separately; status does not recommend more translation
+or review work for them. Run the normal `collect.py` then `ledger.py sync` sequence
+after deleting messages. Export still refuses an absent candidate that has not been
+retired by sync, and still checks every selected present candidate for freshness.
+If an ID returns, the next sync removes the marker and applies the ordinary state,
+human-edit and candidate freshness checks to the retained entry. No adoption or
+review is invented; an unchanged reviewed candidate can resume normally.
+
 ## Audit evidence and coverage
 
 Each ledger entry can retain its last accepted full-audit verdict independently of translation

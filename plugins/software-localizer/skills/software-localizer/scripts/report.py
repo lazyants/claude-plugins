@@ -351,11 +351,13 @@ def build_report(root: Path, locale: str) -> str:
     exported, adopted, ready, needs_translation = [], [], [], []
     escalated, audit_findings, existing_notes = [], [], []
     retained_audit_findings = []
+    retired = []
     counts: dict = {}
 
     for msg_id, entry in sorted(entries.items()):
         state = entry.get("state", "?")
-        counts[state] = counts.get(state, 0) + 1
+        count_state = "retired" if entry.get("retired") else state
+        counts[count_state] = counts.get(count_state, 0) + 1
         message = by_id.get(msg_id)
 
         message_findings = _audit_rows(msg_id, entry, message, cfg, canon_lock, locale, check_inputs)
@@ -363,6 +365,10 @@ def build_report(root: Path, locale: str) -> str:
         retained_audit_findings.extend(
             (msg_id, finding) for finding in entry.get("legacy_audit_findings", [])
         )
+
+        if entry.get("retired"):
+            retired.append((msg_id, entry, message))
+            continue
 
         if state == "translated":
             if entry.get("candidate"):
@@ -412,6 +418,7 @@ def build_report(root: Path, locale: str) -> str:
     _section(lines, "Audit findings", audit_findings, _row_audit)
     _section(lines, "Retained audit findings", retained_audit_findings, _row_retained_audit)
     _section(lines, "Existing / human-locked translations", existing_notes, _row_notes)
+    _section(lines, "Retired messages (history retained)", retired, _row_notes)
 
     lines.append("## Canon candidates raised by reviews")
     lines.append("")

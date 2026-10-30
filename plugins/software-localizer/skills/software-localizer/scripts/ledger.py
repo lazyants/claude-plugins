@@ -18,6 +18,9 @@ sibling locale's file. An entry:
      "project_value_sha256": "...", "last_exported_sha256": None,
      "candidate": None, "rounds": 0, "notes": []}
 
+An absent ID additionally carries `retired: true` until sync sees it again.
+Retirement preserves the entry's state and evidence but excludes it from export.
+
 `sync()` is the only place these states move for reasons other than a human
 decision (`adopt`) or a model turn's outcome (`set_candidate`/`record_verdict`
 /`mark_escalated`, applied by `packets.py`) or an export
@@ -379,6 +382,9 @@ def sync(root, cfg: dict, messages: dict, parse_fn: Callable[[list], dict], cano
                 counts["new"] += 1
                 continue
 
+            # Reappearing IDs resume their normal transitions and freshness
+            # checks against the retained entry, never a fabricated baseline.
+            entry.pop("retired", None)
             state = entry["state"]
             changed = []
             if entry["source_sha256"] != new_source_sha:
@@ -432,6 +438,9 @@ def sync(root, cfg: dict, messages: dict, parse_fn: Callable[[list], dict], cano
 
         for msg_id in locale_entries:
             if msg_id not in seen_ids:
+                # Keep candidate/verdict/audit history intact, but stop this
+                # absent ID from blocking unrelated exports in this locale.
+                locale_entries[msg_id]["retired"] = True
                 report["gone"].append({"locale": locale, "id": msg_id})
                 counts["gone"] += 1
 
@@ -582,10 +591,12 @@ def candidate_needs_review(entry: dict) -> bool:
 
 
 def exportable(ledger: dict, locale: str) -> list:
-    """Ids ready for `export_values.py`."""
+    """Non-retired ids ready for `export_values.py`."""
     ids = []
     for msg_id, entry in locale_entries(ledger, locale).items():
         if not candidate_ready(entry):
+            continue
+        if entry.get("retired"):
             continue
         candidate = entry.get("candidate")
         eligible_state = entry.get("state") in ("pending", "stale", "translated", "escalated")
