@@ -1224,6 +1224,60 @@ def test_accept_review_fail_below_max_rounds_installs_proposal_and_increments(wo
     assert e["candidate"]["value"] == "Hallo"  # the checked proposal was installed
     assert e["candidate"]["verdict"] is None
 
+    # The last checked replacement still gets its own review at the cap.
+    assert packets.select_review(ledger_data, "de") == ["a"]
+    result = packets.do_build(work_root, "review", "de", TEMPLATES_DIR)
+    run_dir = Path(result["batches"][0]["dir"])
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": e["candidate"]["value_sha256"], "verdict": "pass",
+        "issues": [], "proposed": None, "new_canon_candidates": [],
+    }}})
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["passed"] == ["a"]
+    assert result["escalated"] == []
+    ledger_data = ledger_mod.load(work_root)
+    e = ledger_data["locales"]["de"]["a"]
+    assert e["rounds"] == 2
+    assert e["candidate"]["value"] == "Hallo"
+    assert e["candidate"]["verdict"]["value_sha256"] == e["candidate"]["value_sha256"]
+    assert e["candidate"]["verdict"]["verdict"] == "pass"
+    assert packets.select_translate(ledger_data, "de") == []
+    assert packets.select_review(ledger_data, "de") == []
+    assert ledger_mod.exportable(ledger_data, "de") == ["a"]
+
+
+@pytest.mark.parametrize("state", ["pending", "stale"])
+@pytest.mark.parametrize("rounds, exhausted", [(1, False), (2, True)])
+def test_accept_review_fail_without_proposal_honors_round_limit(work_root, state, rounds, exhausted):
+    cfg = make_cfg(max_rounds=3)
+    msgs = make_messages([make_message("a", "Hello")])
+    candidate = make_candidate("Hallo!!!", checks="pass")
+    entry = make_entry(state, candidate=candidate, rounds=rounds)
+    run_dir = build_one_batch(work_root, cfg, msgs, {"de": {"a": entry}}, "review", "de")
+    issues = [{"kind": "style", "text": "too many exclamation marks"}]
+    output_path = write_output(run_dir, {"verdicts": {"a": {
+        "value_sha256": candidate["value_sha256"], "verdict": "fail",
+        "issues": issues, "proposed": None, "new_canon_candidates": [],
+    }}})
+
+    result = packets.do_accept(work_root, run_dir, output_path)
+    assert result["failed"] == ["a"]
+    assert result["escalated"] == (["a"] if exhausted else [])
+    ledger_data = ledger_mod.load(work_root)
+    entry = ledger_data["locales"]["de"]["a"]
+    assert entry["rounds"] == rounds + 1
+    assert entry["state"] == ("escalated" if exhausted else state)
+    assert entry["candidate"] == {**candidate, "verdict": {
+        "value_sha256": candidate["value_sha256"], "verdict": "fail",
+        "issues": issues, "run": result["run"],
+    }}
+    assert packets.select_translate(ledger_data, "de") == ([] if exhausted else ["a"])
+    assert packets.select_review(ledger_data, "de") == []
+    assert ledger_mod.exportable(ledger_data, "de") == []
+    if exhausted:
+        assert entry["notes"][-1]["note"] == "escalated"
+        assert entry["notes"][-1]["problems"] == issues
+
 
 def test_accept_review_fail_at_max_rounds_escalates_without_a_further_increment(work_root):
     """The other half of item 3's boundary: a failure at `rounds ==

@@ -1220,7 +1220,8 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
             # this round -- otherwise a failure at
             # `rounds == max_rounds - 1` escalates one round early and
             # discards a proposal that should still have been installed and
-            # reviewed.
+            # reviewed. Without a proposal, recheck the incremented count:
+            # there is no replacement left to review at the cap.
             if _maybe_escalate(ledger_data, cfg, locale, msg_id, verdict.get("issues", [])):
                 escalated.append(msg_id)
                 entry["review_proposal"] = {"value": verdict.get("proposed"), "issues": verdict.get("issues", []),
@@ -1228,6 +1229,8 @@ def _accept_review_or_audit(root: Path, cfg: dict, packet: dict, output: dict, l
                 continue
             entry["rounds"] = entry.get("rounds", 0) + 1
             proposed = verdict.get("proposed")
+            if proposed is None and _maybe_escalate(ledger_data, cfg, locale, msg_id, verdict.get("issues", [])):
+                escalated.append(msg_id)
             if proposed is not None:
                 is_plural = item.get("target_labels") is not None
                 source_forms = checks_mod.forms_of(item["source"])
