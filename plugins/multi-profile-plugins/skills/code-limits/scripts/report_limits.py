@@ -709,7 +709,13 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime,
                 **_claude_raw_place(item)))
         return records
 
-    for key in ("five_hour", "seven_day"):
+    keys = ["five_hour", "seven_day"]
+    if include_scoped:
+        # Keep flat scoped windows by their own identity, including future model names.
+        # seven_day_breakdown is attribution metadata, not a utilization/reset window.
+        keys.extend(key for key in utilization
+                    if key.startswith("seven_day_") and key != "seven_day_breakdown")
+    for key in keys:
         slot = utilization.get(key)
         if slot is None:
             continue
@@ -726,6 +732,7 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime,
 
 def _claude_flat_row(key: str, slot, freshness: str, now: datetime.datetime) -> Record:
     """One row of the older flat shape, whose windows are named keys rather than list items."""
+    _text(key, 64)
     body = _obj(slot)
     # `(flat)` rides the ALLOWANCE, which is the only cell on the row that names it now that
     # the window is a column heading. Which container shape answered is worth disclosing: the

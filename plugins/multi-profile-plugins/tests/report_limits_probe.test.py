@@ -194,6 +194,30 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(len(R._claude_rows(utilization, "live now", NOW)), 1)
         self.assertEqual(len(R._claude_rows(utilization, "live now", NOW, include_scoped=True)), 2)
 
+    def test_json_flat_shape_keeps_model_constraints_and_skips_breakdown_metadata(self):
+        reset = (NOW + datetime.timedelta(days=2)).isoformat()
+        utilization = {"five_hour": {"utilization": 10, "resets_at": reset},
+                       "seven_day": {"utilization": 20, "resets_at": reset},
+                       "seven_day_sonnet": {"utilization": 100, "resets_at": reset},
+                       "seven_day_opus": None,
+                       "seven_day_future_model": {"utilization": 75, "resets_at": reset},
+                       "seven_day_breakdown": {"by_model": []}}
+        human = R._claude_rows(utilization, "live now", NOW)
+        machine = R._claude_rows(utilization, "live now", NOW, include_scoped=True)
+        self.assertEqual(len(human), 2)
+        self.assertEqual([(r.name, r.percent) for r in machine],
+                         [("five_hour (flat)", 10), ("seven_day (flat)", 20),
+                          ("seven_day_sonnet (flat)", 100),
+                          ("seven_day_future_model (flat)", 75)])
+
+    def test_malformed_flat_scoped_window_gaps_without_discarding_general_windows(self):
+        utilization = {"seven_day": {"utilization": 20,
+                                     "resets_at": (NOW + datetime.timedelta(days=2)).isoformat()},
+                       "seven_day_opus": {"utilization": "broken", "resets_at": None}}
+        rows = R._claude_rows(utilization, "live now", NOW, include_scoped=True)
+        self.assertEqual([r.state for r in rows], [R.REPORTED, R.GAP])
+        self.assertEqual(rows[1].name, "seven_day_opus (flat)")
+
     def test_cli_json_vendor_filter_and_probe_are_wired_without_real_network(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
