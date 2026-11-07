@@ -12,7 +12,7 @@ Public plugins for [Claude Code](https://claude.com/claude-code). Choose a plugi
 | [`cc-usage-coach`](#cc-usage-coach--v110) | 1.1.0 | Explain your Claude Code usage and suggest ways to spend fewer tokens. |
 | [`enduser-handbook`](#enduser-handbook--v1190) | 1.19.0 | Write and maintain a user handbook with screenshots from the running app. |
 | [`literary-translator`](#literary-translator--v12221) | 1.222.1 | Translate books with a shared glossary, review, and resumable work. |
-| [`multi-profile-plugins`](#multi-profile-plugins--v160) | 1.6.0 | Diagnose Claude/Codex profile isolation and report usage limits across accounts. |
+| [`multi-profile-plugins`](#multi-profile-plugins--v161) | 1.6.1 | Diagnose Claude/Codex profile isolation and report usage limits across accounts. |
 | [`software-localizer`](#software-localizer--v072) | 0.7.2 | Translate application strings or audit existing translations. |
 
 ## Install / update / uninstall
@@ -79,7 +79,7 @@ Translates and reviews books in segments, with consistent names, configurable ve
 
 [Setup, workflow, and limitations](docs/plugin-guide.md#literary-translator) · [Skill](plugins/literary-translator/skills/literary-translator/SKILL.md)
 
-## `multi-profile-plugins` — v1.6.0
+## `multi-profile-plugins` — v1.6.1
 
 Ask: “Check my Claude and Codex profiles,” or “How much usage limit is left?”
 

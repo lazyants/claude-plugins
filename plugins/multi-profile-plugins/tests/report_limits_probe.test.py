@@ -1,7 +1,9 @@
 """Quota fallback and machine-output contracts; all HTTP and CLI processes are fixtures."""
+import contextlib
 import datetime
 import inspect
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -96,6 +98,17 @@ class ProbeTests(unittest.TestCase):
         records, calls = self.read([(200, body, [])], quota_probe=True)
         self.assertEqual(records[0].percent, 21)
         self.assertEqual(len(calls), 1)
+
+    def test_human_report_labels_unreported_probe_vouchers(self):
+        records, _calls = self.read([(429, b"throttled", []),
+                                     (200, b"ignored", headers(("7d", .8)))], quota_probe=True)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            R._render([(R.CLAUDE_GROUP, "/fixture/.claude", ".claude", records)],
+                      [], NOW, R.Paint(False), codex_examined=False)
+        self.assertRegex(output.getvalue(), r"(?m)^    \.claude\s+not reported$")
+        self.assertIn("80%", output.getvalue())
+        self.assertIn("headers", output.getvalue())
 
     def test_max_or_pro_keep_both_session_and_weekly_constraints(self):
         rows = R._claude_header_rows(headers(("5h", .95), ("7d", .2)), NOW)

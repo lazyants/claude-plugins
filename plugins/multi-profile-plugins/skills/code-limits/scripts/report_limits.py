@@ -1145,7 +1145,7 @@ def _claude_probe(token: str, agent: str, model: str) -> list[Record]:
         if status == 429:
             raise Malformed("rate-limited") from None
         raise
-    records.append(Record(VOUCHER_NAME, NO_CURRENT, info=True,
+    records.append(Record(VOUCHER_NAME, NO_CURRENT, info=True, freshness="not reported",
                           note="not reported by quota check"))
     return records
 
