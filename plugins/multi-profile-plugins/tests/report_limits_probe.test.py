@@ -1,5 +1,6 @@
 """Quota fallback and machine-output contracts; all HTTP and CLI processes are fixtures."""
 import datetime
+import inspect
 import importlib.util
 import json
 import os
@@ -178,10 +179,12 @@ class ProbeTests(unittest.TestCase):
         rows = R._claude_header_rows(fields, NOW)
         self.assertEqual(rows[0].kind(), "stale")
 
-    def test_unknown_request_paths_are_refused_before_credentials_move(self):
-        with patch.object(R, "HTTPSConnection") as conn, self.assertRaises(R.Malformed):
-            R._claude_http(TOKEN, "", "POST", "/other", b"{}")
-        conn.assert_not_called()
+    def test_transport_has_no_method_or_destination_input(self):
+        self.assertEqual(list(inspect.signature(R._claude_http).parameters),
+                         ["token", "agent", "quota_body"])
+        self.assertEqual(R.API_HOST, "api.anthropic.com")
+        self.assertEqual(R.API_PATH, "/api/oauth/usage?cedar_ember=1&skip_spend=1")
+        self.assertEqual(R.QUOTA_PATH, "/v1/messages")
 
     def test_json_retains_model_scoped_limits_omitted_by_human_layout(self):
         utilization = {"limits": [{"kind": "weekly_all", "percent": 10,

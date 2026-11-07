@@ -1013,16 +1013,14 @@ def _claude_token(profile: Path) -> str:
             raise file_error from None
 
 
-def _claude_http(token: str, agent: str, method: str, path: str, body=None):
-    if (method, path) not in (("GET", API_PATH), ("POST", QUOTA_PATH)):
-        raise Malformed("internal-error")
+def _claude_http(token: str, agent: str, quota_body=None):
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
     }
     if agent:  # no agent means exactly the headers this module always sent
         headers["User-Agent"] = agent
-    if body is not None:
+    if quota_body is not None:
         headers.update({"Content-Type": "application/json", "anthropic-version": "2023-06-01",
                         "anthropic-beta": "oauth-2025-04-20"})
     conn = HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT)
@@ -1045,19 +1043,19 @@ def _claude_http(token: str, agent: str, method: str, path: str, body=None):
         if cancellation is not None:
             cancellation.register(conn, abort)
         try:
-            if body is None:
-                conn.request(method, path, headers=headers)
+            if quota_body is None:
+                conn.request("GET", API_PATH, headers=headers)
             else:
-                conn.request(method, path, body=body, headers=headers)
+                conn.request("POST", QUOTA_PATH, body=quota_body, headers=headers)
             observed_socket = getattr(conn, "sock", None)
             if cancellation is not None:
                 cancellation.check()
             response = conn.getresponse()
-            body = response.read(65536) if method == "POST" else response.read()
+            body = response.read(65536) if quota_body is not None else response.read()
             if cancellation is not None:
                 cancellation.check()
             status = response.status
-            response_headers = response.getheaders() if method == "POST" else []
+            response_headers = response.getheaders() if quota_body is not None else []
         except Exception:
             # Deliberately bare and deliberately silent: rendering any exception text here can
             # print the bearer, which http.client embeds in an invalid-header ValueError.
@@ -1130,7 +1128,7 @@ def _claude_header_rows(headers, now: datetime.datetime) -> list[Record]:
 def _claude_probe(token: str, agent: str, model: str) -> list[Record]:
     body = json.dumps({"model": model, "max_tokens": 1,
                        "messages": [{"role": "user", "content": "quota"}]}).encode("utf-8")
-    status, _body, headers = _claude_http(token, agent, "POST", QUOTA_PATH, body)
+    status, _body, headers = _claude_http(token, agent, body)
     if status not in (200, 429):
         raise Malformed("http-error")
     try:
@@ -1148,7 +1146,7 @@ def _claude_live(profile: Path, *, quota_probe: bool = False,
                  quota_model: str = QUOTA_MODEL, include_scoped: bool = False) -> list[Record]:
     token = _claude_token(profile)
     agent = _claude_user_agent()
-    status, body, _headers = _claude_http(token, agent, "GET", API_PATH)
+    status, body, _headers = _claude_http(token, agent)
     now = datetime.datetime.now(datetime.timezone.utc)  # observation time, not run-start time
     # A 429 is the endpoint's own throttle on this login, which Claude Code sessions use too
     # (measured: it refused the voucher query and the plain path, with and without the User-Agent,

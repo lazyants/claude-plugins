@@ -3514,9 +3514,13 @@ check("79 the redeem endpoint's name appears nowhere in the module",
 request_calls = [node for node in ast.walk(ast.parse(script_source))
                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                  and node.func.attr == "request"]
-check("79 the module has one request call site, and it passes the literal GET",
-      len(request_calls) == 1 and isinstance(request_calls[0].args[0], ast.Constant)
-      and request_calls[0].args[0].value == "GET", str(len(request_calls)))
+# The opt-in quota check adds one fixed POST; neither verb nor destination may be data.
+check("79 the only HTTP calls are the fixed usage GET and quota-check POST",
+      len(request_calls) == 2
+      and all(len(node.args) >= 2 and isinstance(node.args[0], ast.Constant)
+              and isinstance(node.args[1], ast.Name) for node in request_calls)
+      and {(node.args[0].value, node.args[1].id) for node in request_calls}
+      == {("GET", "API_PATH"), ("POST", "QUOTA_PATH")}, str(len(request_calls)))
 
 # --- 80: #978, a 429 is the endpoint's throttle on the login, not an http-error ----------------
 
