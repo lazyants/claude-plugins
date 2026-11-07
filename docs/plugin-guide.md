@@ -316,6 +316,11 @@ reset", "codex reset vouchers", "claude reset vouchers" — full lists in
   of it.
   Independent profiles are read in parallel, with up to eight readers across both vendors and
   stable report order; aliases of the same home are serialized.
+  `--vendor claude` or `--vendor codex` selects one service; `--json` exposes current observations
+  without parsing the table. Actual reported windows determine the constraints, including accounts
+  with only a weekly window. With explicit `--quota-probe`, a Claude statistics HTTP 429 triggers
+  one native-style quota check with `max_tokens: 1`, labelled `headers`; this can consume usage.
+  The default remains GET-only, and no missing window is fabricated as zero.
 - **The deep mechanism** (`references/cli-mechanism.md`) — the reverse-engineered `installLocation`
   prefix check (`path.resolve` + `startsWith`, no symlink resolution; cache-managed sources checked
   while `file`/`directory`/seed skip it), the catalog-scoped startup GC + `uninstall` that force

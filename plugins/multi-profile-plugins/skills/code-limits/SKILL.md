@@ -1,19 +1,13 @@
 ---
 name: code-limits
 description: >-
-  How much of a usage-limit window is left, when it resets, and which Claude Code profile or Codex
-  home is close to exhausted, across every profile on this machine -- every discovered Claude Code
-  profile under `~/.claude*` (`CLAUDE_CONFIG_DIR`) and every discovered Codex home under
-  `~/.codex*` (`CODEX_HOME`).
-  Use when asked how much usage-limit budget is left, when a five-hour or weekly window resets,
-  which profile or account is nearly out, or how many Claude Code or Codex "usage limit reset"
-  vouchers remain.
-  Ships `scripts/report_limits.py`, installable on PATH as `code-limit`, one table covering both
-  CLIs: Claude Code read live by default, on-disk cache as fallback (`--live` skips it), and Codex
-  read live over `codex app-server`'s `account/rateLimits/read` JSON-RPC call. Not the sibling
-  `multi-profile-plugins` skill (plugin-store topology, `installLocation` errors) or
-  `multi-profile-codex` (`CODEX_HOME` architecture, seeding, config pins) -- this one is only
-  about usage-limit consumption and reset timing.
+  Report remaining usage allowances, reset timing and reset vouchers across Claude Code
+  CLAUDE_CONFIG_DIR profiles and Codex CODEX_HOME profiles. Use when asked which account has
+  the most allowance left or when limits reset. Ships scripts/report_limits.py, installable
+  as code-limit: live Claude statistics, optional one-token quota-header fallback, cached
+  observations with provenance, live Codex account/rateLimits/read, JSON and vendor filters.
+  Discovers actual windows rather than assuming every plan has a five-hour limit. Plugin-store
+  isolation and profile configuration belong to the sibling skills.
 ---
 
 # Usage-limit report across Claude Code and Codex profiles
@@ -104,6 +98,48 @@ The Claude Code side and the Codex side are read differently, and every row says
 last column: `live` for Codex, `api` for a Claude Code row the live read answered, and the
 cache's age for a Claude Code row that fell back to it.
 
+### Optional quota-header fallback and machine output
+
+For automated profile selection, request current observations explicitly:
+
+```sh
+code-limit --live --quota-probe --vendor claude --json
+```
+
+`--quota-probe` enables one fallback only when the statistics GET returns HTTP 429. It sends
+Claude Code's native-style quota check to the fixed `POST https://api.anthropic.com/v1/messages`
+endpoint, with the user message `quota` and `max_tokens: 1`. This can consume subscription usage
+or paid usage credits if the account has them enabled. It is never enabled by default. No reset
+voucher is redeemed. `--quota-model MODEL` selects the check's model; the default is
+`claude-haiku-4-5`. This choice does not change any profile's configured model. The check is not
+retried, and redirects, authentication errors and other statistics failures do not trigger it.
+
+Quota figures come from the response's `anthropic-ratelimit-unified-<duration>-utilization` and
+`-reset` headers, including both five-hour and weekly windows when present. A weekly-only account
+has no fabricated five-hour reading; an account reporting a session window remains constrained
+by it. Other durations receive their own columns. Paid-overage figures never count as remaining
+subscription allowance. Model-scoped subscription windows are kept when returned, but a probe
+does not establish the absence of restrictions for other models. For a particular model's
+availability, select that model for the check. A missing or malformed header gaps its window;
+HTTP 429 without quota headers leaves the allowance unknown. An unexplained rejected quota is a
+gap, not an available account.
+
+`SOURCE` is `headers` for a successful quota check, and a note names the check's model. This is
+a current network observation and remains permitted under `--live`; disk-cache fallback does
+not. Reset vouchers are `not reported` because the check does not return them. Without
+`--quota-probe`, the existing GET-only behavior is unchanged.
+
+`--vendor claude` skips Codex discovery and app-server startup; `--vendor codex` skips Claude.
+`--json` emits one object with `schema_version: 1`, `observed_at`, `quota_probe_model`, `profiles`,
+`warnings` and `notes`. Each profile has `vendor`, its absolute `path`, `state`, `diagnostic` and
+`records`. A record includes `name`, `family`, `window`, `percent`, `resets_at`, `kind`, `source`,
+`state`, `diagnostic` and `note`. Percentages mean consumed allowance. Window names include `5h`,
+`weekly` and duration labels such as `43200min`; missing windows are absent, not observed zeros.
+The JSON keeps reported model-scoped windows omitted by the compact human layout, and excludes
+vouchers and credit balances from `records`. Consumers must reject stale, cached, malformed or
+failed observations instead of treating them as spare capacity. The existing exit status still
+signals whether any selected candidate could not be checked.
+
 **Claude Code is read live first, in default mode too.** Default mode makes the same
 `GET https://api.anthropic.com/api/oauth/usage` call `--live` makes (see below), for every
 discovered profile, before it opens the cache. If that read produced any records at all, those are
@@ -179,9 +215,9 @@ config directory uses a name suffixed with the first 8 hex of the SHA-256 of its
 A profile reached by a different spelling of the same directory, or through a separate
 secure-storage override, hashes to a name that simply is not there, so it gaps as `token-absent`
 rather than reading another account's item. A live call that fails is reported as a gap for that
-profile, with its diagnostic code. An HTTP 429 is the endpoint's own throttle: it allows only a few
-reads per login every few minutes, and Claude Code sessions on that login use the same allowance. It
-gets its own code, `rate-limited`, with a hint to try again in a few minutes; any other non-200 is
+profile, with its diagnostic code. An HTTP 429 means this statistics request was throttled; it
+does not establish that the subscription quota is exhausted. Unless `--quota-probe` is enabled,
+it gets its own code, `rate-limited`, with a hint to try again in a few minutes; any other non-200 is
 `http-error`, and neither is retried. Under `--live` that gap is the whole answer: it never falls
 back to the cache, because a live run that quietly degraded would print exactly what a successful
 one prints, so a failed `--live` read renders a `NOT checked` warning and the run exits 1. In

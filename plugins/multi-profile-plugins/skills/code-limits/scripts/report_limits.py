@@ -9,8 +9,9 @@ when the live read produces nothing at all does this fall back to the CACHE Clau
 disk, `<profile>/.claude.json` -> `cachedUsageUtilization`, refreshed whenever Claude Code happens
 to fetch it. That cache goes stale between fetches, and a window whose `resets_at` has already
 passed describes the PREVIOUS window -- not the current one, and not zero -- so a fallback row can
-still render as `stale-after-reset`, never presented as current usage. `--live` is live ONLY: it
-never falls back, so a failed read gaps the profile instead of quietly reading the disk.
+still render as `stale-after-reset`, never presented as current usage. `--live` never uses disk.
+With explicit `--quota-probe`, a statistics HTTP 429 instead triggers one native-style quota
+check (max_tokens=1); its current response headers are labelled `headers`. This can consume usage.
 
 Codex answers live: `codex app-server` exposes the read-only JSON-RPC method
 `account/rateLimits/read`. It carries `rateLimitResetCredits` -- the "usage limit reset" the
@@ -42,6 +43,7 @@ import http.client
 import json
 import math
 import os
+import re
 import select
 import socket
 import stat
@@ -64,6 +66,7 @@ DIAGNOSTICS = (
     "keychain-denied",
     "http-error",
     "rate-limited",
+    "quota-rejected",
     "response-malformed",
     "appserver-failed",
     "appserver-protocol-error",
@@ -82,8 +85,8 @@ DIAGNOSTIC_SET = frozenset(DIAGNOSTICS)
 HINTS = {
     "token-expired": "open Claude Code in that profile once -- only a running session refreshes"
                       " its login",
-    "rate-limited": "try again in a few minutes -- the endpoint allows only a few reads per login,"
-                     " and Claude Code sessions on that login use the same allowance",
+    "rate-limited": "try again in a few minutes -- quota statistics are unavailable;"
+                     " this does not establish that the subscription allowance is exhausted",
 }
 # A key outside the closed vocabulary would look wired up and never fire -- DIAGNOSTIC_SET is
 # the only thing `_with_hint` ever looks a code up against.
@@ -134,8 +137,10 @@ _RATE_LIMITS_ID = 2
 API_HOST = "api.anthropic.com"
 # The query is what makes the reply carry the `cedar_ember` block (Claude Code's reset vouchers):
 # it is the exact path Claude Code's own status read uses. Still ONE frozen literal -- nothing is
-# interpolated into it, and it is the only path this module ever requests.
+# interpolated into it. The optional quota check has its own frozen destination below.
 API_PATH = "/api/oauth/usage?cedar_ember=1&skip_spend=1"
+QUOTA_PATH = "/v1/messages"
+QUOTA_MODEL = "claude-haiku-4-5"
 HTTP_TIMEOUT = 15.0
 HTTPSConnection = http.client.HTTPSConnection  # module-level so a test can substitute it
 
@@ -504,6 +509,8 @@ def _source(freshness: str, group: str) -> str:
     column becomes a wall of identical text and the reader stops reading it. What still varies
     is WHICH source and, for a cache, how old. Nothing is dropped that the header does not say.
     """
+    if freshness.startswith("headers "):
+        return "headers"
     if freshness.startswith("live"):
         # `api` vs `live` also keeps the VENDOR readable off the row. A Claude row can be live in
         # EITHER mode now -- default reads live first, `--live` reads live only -- and under
@@ -670,7 +677,8 @@ def _claude_place(kind: str) -> tuple[str, str]:
     return CLAUDE_KINDS.get(kind, (kind, kind))
 
 
-def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> list[Record]:
+def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime,
+                 *, include_scoped: bool = False) -> list[Record]:
     """Rows from a `utilization` object, in either of the two shapes Claude Code emits."""
     entries = utilization.get("limits")
     records: list[Record] = []
@@ -689,7 +697,7 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
         # shifted every label under it, and a warning reading `limits[1]` named payload entry 2 --
         # against what _claude_raw_place's own docstring promises the number means.
         for index, item in enumerate(entries):
-            if _is_scoped(item):
+            if _is_scoped(item) and not include_scoped:
                 continue
             # Per RECORD, not per candidate. One malformed entry must not suppress its siblings:
             # the valid pools are exactly what the operator opened the report to see, and a
@@ -701,7 +709,13 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
                 **_claude_raw_place(item)))
         return records
 
-    for key in ("five_hour", "seven_day"):
+    keys = ["five_hour", "seven_day"]
+    if include_scoped:
+        # Keep flat scoped windows by their own identity, including future model names.
+        # seven_day_breakdown is attribution metadata, not a utilization/reset window.
+        keys.extend(key for key in utilization
+                    if key.startswith("seven_day_") and key != "seven_day_breakdown")
+    for key in keys:
         slot = utilization.get(key)
         if slot is None:
             continue
@@ -718,6 +732,7 @@ def _claude_rows(utilization: dict, freshness: str, now: datetime.datetime) -> l
 
 def _claude_flat_row(key: str, slot, freshness: str, now: datetime.datetime) -> Record:
     """One row of the older flat shape, whose windows are named keys rather than list items."""
+    _text(key, 64)
     body = _obj(slot)
     # `(flat)` rides the ALLOWANCE, which is the only cell on the row that names it now that
     # the window is a column heading. Which container shape answered is worth disclosing: the
@@ -1005,15 +1020,16 @@ def _claude_token(profile: Path) -> str:
             raise file_error from None
 
 
-def _claude_live(profile: Path) -> list[Record]:
-    token = _claude_token(profile)
-    agent = _claude_user_agent()
+def _claude_http(token: str, agent: str, quota_body=None):
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
     }
     if agent:  # no agent means exactly the headers this module always sent
         headers["User-Agent"] = agent
+    if quota_body is not None:
+        headers.update({"Content-Type": "application/json", "anthropic-version": "2023-06-01",
+                        "anthropic-beta": "oauth-2025-04-20"})
     conn = HTTPSConnection(API_HOST, timeout=HTTP_TIMEOUT)
     cancellation = getattr(_reader_context, "cancellation", None)
     observed_socket = None
@@ -1034,15 +1050,19 @@ def _claude_live(profile: Path) -> list[Record]:
         if cancellation is not None:
             cancellation.register(conn, abort)
         try:
-            conn.request("GET", API_PATH, headers=headers)
+            if quota_body is None:
+                conn.request("GET", API_PATH, headers=headers)
+            else:
+                conn.request("POST", QUOTA_PATH, body=quota_body, headers=headers)
             observed_socket = getattr(conn, "sock", None)
             if cancellation is not None:
                 cancellation.check()
             response = conn.getresponse()
-            body = response.read()
+            body = response.read(65536) if quota_body is not None else response.read()
             if cancellation is not None:
                 cancellation.check()
             status = response.status
+            response_headers = response.getheaders() if quota_body is not None else []
         except Exception:
             # Deliberately bare and deliberately silent: rendering any exception text here can
             # print the bearer, which http.client embeds in an invalid-header ValueError.
@@ -1055,12 +1075,94 @@ def _claude_live(profile: Path) -> list[Record]:
         except Exception:
             pass
 
+    return status, body, response_headers
+
+
+def _claude_header_rows(headers, now: datetime.datetime) -> list[Record]:
+    """Read subscription windows from a quota check, never the paid-overage allowance."""
+    prefix = "anthropic-ratelimit-unified-"
+    fields = {}
+    for key, value in headers:
+        key = key.lower()
+        if not key.startswith(prefix):
+            continue
+        if key in fields:
+            raise Malformed("response-malformed")
+        fields[key] = value
+    status = fields.get(prefix + "status")
+    if status not in ("allowed", "allowed_warning", "rejected"):
+        raise Malformed("response-malformed")
+    windows = {}
+    for key, value in fields.items():
+        # Claude Code names its seven_day_overage_included window with the suffix 7d_oi.
+        match = re.fullmatch(prefix + r"([1-9][0-9]*)([mhdw])(_oi)?-(utilization|reset|status|surpassed-threshold)", key)
+        if match:
+            count, unit, scoped, field = match.groups()
+            minutes = int(count) * {"m": 1, "h": 60, "d": 1440, "w": 10080}[unit]
+            window = WINDOW_LABELS.get(minutes, f"{minutes}min")
+            values = windows.setdefault((bool(scoped), window), {})
+            if field in values:
+                raise Malformed("response-malformed")
+            values[field] = value
+    if not any(not scoped for scoped, _window in windows):
+        raise Malformed("response-malformed")
+    freshness = f"headers {_local(now)}"
+    records = []
+    for (scoped, window), values in windows.items():
+        family = "model-scoped" if scoped else "all"
+        name = f"{family} {window}"
+
+        def read_window():
+            if values.get("status", "allowed") not in ("allowed", "allowed_warning", "rejected"):
+                raise Malformed("field-malformed")
+            try:
+                percent = _num(float(values["utilization"]), 0.0, PERCENT_MAX) * 100
+                resets = _from_epoch(int(values["reset"]), EPOCH_SECONDS)
+            except (KeyError, ValueError, OverflowError):
+                raise Malformed("field-malformed") from None
+            if values.get("status") == "rejected" and percent < 100:
+                raise Malformed("quota-rejected")
+            return _window_row(name=name, percent=_num(percent, 0.0, PERCENT_MAX),
+                               resets=resets, freshness=freshness, now=now,
+                               family=family, window=window)
+
+        records.append(_row_or_gap(name, read_window, family=family, window=window))
+    if status == "rejected" and not any(r.percent is not None and r.percent >= 100 for r in records):
+        records.append(Record("quota check", GAP, diagnostic="quota-rejected",
+                              freshness=freshness))
+    return records
+
+
+def _claude_probe(token: str, agent: str, model: str) -> list[Record]:
+    body = json.dumps({"model": model, "max_tokens": 1,
+                       "messages": [{"role": "user", "content": "quota"}]}).encode("utf-8")
+    status, _body, headers = _claude_http(token, agent, body)
+    if status not in (200, 429):
+        raise Malformed("http-error")
+    try:
+        records = _claude_header_rows(headers, datetime.datetime.now(datetime.timezone.utc))
+    except Malformed:
+        if status == 429:
+            raise Malformed("rate-limited") from None
+        raise
+    records.append(Record(VOUCHER_NAME, NO_CURRENT, info=True,
+                          note="not reported by quota check"))
+    return records
+
+
+def _claude_live(profile: Path, *, quota_probe: bool = False,
+                 quota_model: str = QUOTA_MODEL, include_scoped: bool = False) -> list[Record]:
+    token = _claude_token(profile)
+    agent = _claude_user_agent()
+    status, body, _headers = _claude_http(token, agent)
     now = datetime.datetime.now(datetime.timezone.utc)  # observation time, not run-start time
     # A 429 is the endpoint's own throttle on this login, which Claude Code sessions use too
     # (measured: it refused the voucher query and the plain path, with and without the User-Agent,
     # and cleared within minutes). It gets a token of its own because under `http-error` it read
     # like a broken login or a dead network.
     if status == 429:
+        if quota_probe:
+            return _claude_probe(token, agent, quota_model)
         raise Malformed("rate-limited")
     if status != 200:  # a 3xx is a non-200 like any other; nothing follows it
         raise Malformed("http-error")
@@ -1074,7 +1176,7 @@ def _claude_live(profile: Path) -> list[Record]:
     inner = blob.get("utilization", blob)
     if not isinstance(inner, dict):
         raise Malformed("response-malformed")
-    records = _claude_rows(inner, f"live {_local(now)}", now)
+    records = _claude_rows(inner, f"live {_local(now)}", now, include_scoped=include_scoped)
     if not records:
         raise Malformed("response-malformed")
     # Appended AFTER the emptiness check: a reply carrying only a voucher block is still a reply
@@ -1589,7 +1691,8 @@ def _parallel_examine(
     """Read independent profiles concurrently, returning outcomes in discovery order."""
     # lru_cache protects its own state but permits simultaneous cache misses. Resolve the
     # version once before workers start so they cannot each spawn `claude --version`.
-    if any(producer is _claude_live and not candidate.gap for candidate, producer in jobs):
+    if any(getattr(producer, "func", producer) is _claude_live and not candidate.gap
+           for candidate, producer in jobs):
         _claude_user_agent()
 
     locks = {}
@@ -1928,6 +2031,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Report Claude Code and Codex usage limits.")
     parser.add_argument("--live", action="store_true",
                         help="read Claude usage live only; never fall back to the on-disk cache")
+    parser.add_argument("--quota-probe", action="store_true",
+                        help="on Claude statistics HTTP 429, make one quota-check request with"
+                             " max_tokens=1 and read its quota headers (may consume usage)")
+    parser.add_argument("--quota-model", default=QUOTA_MODEL, metavar="MODEL",
+                        help="model for the optional quota check (default: %(default)s)")
+    parser.add_argument("--vendor", choices=("all", "claude", "codex"), default="all",
+                        help="read only this vendor (default: both)")
+    parser.add_argument("--json", action="store_true", help="emit schema-versioned observations")
     parser.add_argument("--claude-profile", action="append", default=[], metavar="PATH",
                         help="examine this Claude profile (repeatable; replaces discovery)")
     parser.add_argument("--codex-home", action="append", default=[], metavar="PATH",
@@ -1949,20 +2060,25 @@ def main(argv: list[str] | None = None) -> int:
     home = Path(os.path.expanduser("~"))
     now = datetime.datetime.now(datetime.timezone.utc)
 
-    claude = ([_explicit(Path(p)) for p in args.claude_profile]
+    claude = ([] if args.vendor == "codex" else [_explicit(Path(p)) for p in args.claude_profile]
               or _discover(home, ".claude", (".claude.json", ".credentials.json"),
                            external=_claude_config))
-    codex = ([_explicit(Path(p)) for p in args.codex_home]
+    codex = ([] if args.vendor == "claude" else [_explicit(Path(p)) for p in args.codex_home]
              or _discover(home, ".codex", ("auth.json", "config.toml")))
 
     warnings: list[str] = []
     notes: list[str] = []
     groups: list[tuple[str, str, str, list[Record]]] = []
+    observations = []
 
-    batches = (
-        (CLAUDE_GROUP, claude, _claude_live, not args.live),
-        (CODEX_GROUP, codex, _codex_records, False),
-    )
+    producer = (functools.partial(_claude_live, quota_probe=args.quota_probe,
+                                  quota_model=args.quota_model, include_scoped=args.json)
+                if args.quota_probe or args.json else _claude_live)
+    batches = []
+    if args.vendor != "codex":
+        batches.append((CLAUDE_GROUP, claude, producer, not args.live))
+    if args.vendor != "claude":
+        batches.append((CODEX_GROUP, codex, _codex_records, False))
     outcomes = iter(_parallel_examine([
         (candidate, producer)
         for _group, candidates, producer, _fallback in batches
@@ -2032,11 +2148,31 @@ def main(argv: list[str] | None = None) -> int:
                 # A candidate-level outcome has no pool to hang a row on, so it becomes a note.
                 # It still decides the exit status below, exactly as before.
                 notes.append(f"{where} [{code}]")
+            if any(r.freshness.startswith("headers ") for r in records):
+                notes.append(f"{where}: statistics API throttled; current quota headers from"
+                             f" a max_tokens=1 check using {_safe_name(args.quota_model)}")
             groups.append((group, str(candidate.path), where, records))
+            observations.append({
+                "vendor": "claude" if group == CLAUDE_GROUP else "codex",
+                "path": str(candidate.path), "state": state, "diagnostic": code,
+                "records": [{"name": r.name, "state": r.state, "kind": r.kind(),
+                             "family": r.family, "window": r.window, "percent": r.percent,
+                             "resets_at": r.resets.isoformat() if r.resets else None,
+                             "source": _source(r.freshness, group),
+                             "diagnostic": r.diagnostic, "note": r.note}
+                            for r in records if not r.info and r.name != VOUCHER_NAME],
+            })
             if state == GAP:
                 detail = _with_hint(code) or ", ".join(f"{r.name} [{r.diagnostic}]"
                                                         for r in records if r.state == GAP)
                 warnings.append(f"{group} {where}: NOT checked -- {detail}")
+
+    if args.json:
+        print(json.dumps({"schema_version": 1, "observed_at": now.isoformat(),
+                          "quota_probe_model": args.quota_model if args.quota_probe else None,
+                          "profiles": observations, "warnings": warnings, "notes": notes},
+                         ensure_ascii=True, allow_nan=False))
+        return 1 if warnings else 0
 
     codex_examined = any(candidate.gap == "" for candidate in codex)
     _render(groups, notes, now, paint, codex_examined=codex_examined)

@@ -2,6 +2,19 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [multi-profile-plugins 1.6.0] — 2026-11-07
+
+### Added
+
+- Optional `code-limit --quota-probe` uses one native-style quota check with `max_tokens: 1`
+  when Claude's statistics endpoint returns HTTP 429 (#1047). Current response headers supply
+  the windows actually reported by the account, including weekly-only and session-plus-weekly
+  plans. The check may consume usage and is explicitly enabled; the default stays GET-only.
+- `--json` emits versioned observations with provenance, diagnostics and model-scoped windows;
+  `--vendor` lets automation read Claude without starting Codex app-servers, or vice versa.
+- Quota-header failures remain unknown or gapped; paid-overage capacity and reset vouchers
+  never count as subscription headroom.
+
 ## [software-localizer 0.7.2] — 2026-10-30
 
 ### Fixed
