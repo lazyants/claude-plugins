@@ -2070,8 +2070,9 @@ def main(argv: list[str] | None = None) -> int:
     groups: list[tuple[str, str, str, list[Record]]] = []
     observations = []
 
-    producer = functools.partial(_claude_live, quota_probe=args.quota_probe,
-                                 quota_model=args.quota_model, include_scoped=args.json)
+    producer = (functools.partial(_claude_live, quota_probe=args.quota_probe,
+                                  quota_model=args.quota_model, include_scoped=args.json)
+                if args.quota_probe or args.json else _claude_live)
     batches = []
     if args.vendor != "codex":
         batches.append((CLAUDE_GROUP, claude, producer, not args.live))
