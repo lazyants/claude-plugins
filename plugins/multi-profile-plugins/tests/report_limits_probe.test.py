@@ -115,7 +115,7 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(rows[0].percent, 100)
 
     def test_model_scoped_window_is_kept_when_reported_by_probe(self):
-        rows = R._claude_header_rows(headers(("7d", .2), ("7d-overage-included", 1)), NOW)
+        rows = R._claude_header_rows(headers(("7d", .2), ("7d_oi", 1)), NOW)
         self.assertEqual([r.family for r in rows], ["all", "model-scoped"])
         self.assertEqual(rows[1].percent, 100)
 
@@ -161,9 +161,18 @@ class ProbeTests(unittest.TestCase):
     def test_duplicate_headers_and_missing_primary_pool_are_refused(self):
         for fields in (headers(("7d", .2), ("7d", .3)),
                        headers(("5h", 1), ("300m", .2)),
-                       headers(("7d-overage-included", .2)), []):
+                       headers(("7d_oi", .2)), []):
             with self.subTest(fields=fields), self.assertRaises(R.Malformed):
                 R._claude_header_rows(fields, NOW)
+
+    def test_incomplete_native_scoped_header_is_gapped_not_dropped(self):
+        for field, value in (("utilization", ".95"), ("status", "allowed"),
+                             ("surpassed-threshold", ".75")):
+            with self.subTest(field=field):
+                fields = headers(("7d", .2)) + [(f"anthropic-ratelimit-unified-7d_oi-{field}", value)]
+                rows = R._claude_header_rows(fields, NOW)
+                self.assertEqual([r.state for r in rows], [R.REPORTED, R.GAP])
+                self.assertEqual(rows[1].family, "model-scoped")
 
     def test_status_only_window_is_incomplete_not_an_absent_limit(self):
         fields = headers(("7d", .2)) + [("anthropic-ratelimit-unified-5h-status", "allowed")]

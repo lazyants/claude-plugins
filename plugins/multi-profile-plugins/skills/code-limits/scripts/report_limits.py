@@ -1094,7 +1094,8 @@ def _claude_header_rows(headers, now: datetime.datetime) -> list[Record]:
         raise Malformed("response-malformed")
     windows = {}
     for key, value in fields.items():
-        match = re.fullmatch(prefix + r"([1-9][0-9]*)([mhdw])(-overage-included)?-(utilization|reset|status)", key)
+        # Claude Code names its seven_day_overage_included window with the suffix 7d_oi.
+        match = re.fullmatch(prefix + r"([1-9][0-9]*)([mhdw])(_oi)?-(utilization|reset|status|surpassed-threshold)", key)
         if match:
             count, unit, scoped, field = match.groups()
             minutes = int(count) * {"m": 1, "h": 60, "d": 1440, "w": 10080}[unit]
